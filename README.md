@@ -15,10 +15,182 @@ protect mechanisms; their count or CI success does not establish usefulness.
 
 Doge-Code is being rebuilt as an orchestrator that drives the existing Claude
 Code and Codex CLIs instead of calling LLM APIs itself. The new daemon and its
-`dgc-next` client live under `crates/` and are not usable yet; the `dgc` binary
-described below keeps working until the legacy runtime is removed. See the
+`dgc-next` client live under `crates/`. They run Claude Code and Codex agents
+from the command line (milestone M1; no TUI yet); the `dgc` binary described
+below keeps working until the legacy runtime is removed. See the
 [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md) and
 [progress](docs/orchestrator/PROGRESS.md).
+
+Install: `cargo build --release -p dgc-cli` builds `target/release/dgc-next`
+(Unix only; Rust 1.94 or newer). Agents need the
+`claude` and/or `codex` CLI installed and logged in; dgc never reads their
+credentials. Typical session:
+
+```sh
+dgc-next project add ~/src/app                  # prints the project id
+dgc-next workspace create --project PRJ --worktree --branch fix-bug
+dgc-next run --workspace WS --provider claude --follow "Fix the failing test"
+dgc-next permit ls                              # from a second terminal
+dgc-next permit allow PERM
+dgc-next send AGENT --behavior queue "Then update the changelog"
+```
+
+The daemon lifecycle commands work for development: `dgc-next daemon
+{run [--detach] | start | stop | status}` (`--json` prints machine-readable
+output). `status` starts the daemon on demand; a background daemon logs to
+`<state>/daemon.log` (`DGC_LOG=error|warn|info|debug|trace`, default `info`).
+Setting `DGC_STATE_ROOT=<dir>` keeps the socket, state, config and worktrees
+under `<dir>` instead of the XDG locations (for tests and experiments).
+
+Projects and workspaces: `dgc-next project {add [PATH] | ls | rm ID}` and
+`dgc-next workspace {create --project ID [--worktree --branch NAME [--base REF]
+[--slug S]] | ls [--project ID] | archive ID [--force]}`. A worktree workspace
+is a git worktree dgc creates under `<worktrees>/<repo>-<id>/<slug>`; archiving
+it removes the worktree (`git worktree remove`) and safely deletes its branch
+(`git branch -d`), but only for paths inside that managed directory. Archive is
+refused, and nothing (agents included) is changed, while the worktree has
+uncommitted or untracked changes or commits not reachable from the commit it
+was created from (the error names which); `--force` removes it anyway and
+force-deletes the branch. The check is reachability from that base commit only,
+so a branch already merged into main that still carries commits beyond its base
+also needs `--force`. Untracked files count as work regardless of git's
+`status.showUntrackedFiles`, but gitignored files in the worktree (build output,
+`.env`, ...) are removed by a non-force archive, since git treats them as
+disposable. When git refuses the safe branch delete the branch is
+kept and `archive` prints `branch kept: NAME` (`--json`: `"branch_kept": true`,
+and `"worktree_removed"` tells whether the directory was removed). If the
+project directory was deleted or moved, archiving one of its worktree
+workspaces (no `--force` needed) only archives the record and prints
+`worktree kept on disk: PATH`: delete the leftover directory under
+`<worktrees>/` yourself. The project can then be removed.
+Local workspaces use the project directory and are never deleted. Archiving a
+workspace first archives its agents.
+
+Providers: at start the daemon uses `claude_path` / `codex_path` from
+`<config>/config.toml` (absolute paths), or else finds `claude` / `codex` on its
+own `PATH`, and runs `--version` once. `daemon status` shows each provider's
+path and version, and whether that version is the tested one (Claude Code
+2.1.332, codex-cli 0.172.0; others work but log a warning). A provider that is
+not found cannot run agents. Providers inherit the daemon's environment.
+
+Agents:
+
+- `dgc-next run --workspace ID --provider claude|codex [--model M] [--mode MODE]
+  [--title T] [--follow] PROMPT` starts an agent and prints its id (`--json`:
+  the agent record). The title defaults to the prompt's first line (60 chars).
+  `--follow` then prints its events until it is idle, stopped, failed or
+  archived; the exit status is 0 only when it ended idle.
+- `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
+  `bypassPermissions`, `manual`, `dontAsk`, `plan`. Codex: `read-only`,
+  `workspace-write` (default; sandboxed commands inside the workspace run
+  without asking), `untrusted` (asks before running commands), `full-access`.
+  Auto-approve modes (Claude `bypassPermissions`, `auto`, `acceptEdits`; Codex
+  `full-access`) let the provider act without asking: `run` always prints a
+  `warning: ... auto-approve ...` line on stderr for them (also with `--json`),
+  and `ls` marks such agents `auto-approve`.
+- `dgc-next ls [--all]` (archived agents only with `--all`), `dgc-next show ID`,
+  `dgc-next interrupt ID`, `dgc-next archive ID`, `dgc-next resume ID`
+  (restarts a stopped or failed agent from its provider session).
+- `dgc-next send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
+  `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
+  or `interrupted_and_sent` (also used when a provider cannot steer). An
+  interrupt (`dgc-next interrupt`, `send --behavior interrupt`, or a steer that
+  falls back to one) discards the queued messages instead of sending them
+  later; each shows in `logs` as `queued message discarded: TEXT`.
+- `dgc-next logs ID [--since SEQ] [--follow]` prints the stored events after
+  `SEQ`; `--follow` keeps streaming new ones until Ctrl-C or the daemon stops.
+  `--json` prints one event JSON object per line. Each human line is
+  `[seq] <event>`: `user (queue): TEXT`, `assistant: TEXT`, `tool: NAME SUMMARY`,
+  `tool result: SUMMARY` / `tool error: SUMMARY`,
+  `permission requested PERM_ID (KIND): SUMMARY`,
+  `permission resolved PERM_ID: allow|allow_for_session|deny|cancelled`,
+  `turn started`, `turn completed`, `rate limited: DETAIL`, `error: MESSAGE`,
+  `state: STATE`, `queued message discarded: TEXT`. Continuation lines of multi-line text are indented by four
+  spaces. A prompt or reply longer than 256 KiB is stored as several events
+  (reply parts before the last show as `assistant (partial)`). Human-readable
+  output shows control characters in daemon-supplied text (agent output,
+  summaries, errors) escaped (`\r`, `\t`, `\x1b`, `\u{202e}`; newlines are
+  kept only where text may span lines), so a terminal escape cannot hide or
+  rewrite what is displayed.
+- Permissions: `dgc-next permit ls [--agent ID]` lists pending requests
+  (`PERM_ID  AGENT_ID  KIND  SUMMARY`, oldest first); `dgc-next permit allow ID
+  [--session]` and `dgc-next permit deny ID` answer one. Requests stay pending
+  until answered, interrupted, or the daemon stops. A summary longer than 4 KiB
+  is cut and ends with `…(truncated, N bytes total)`; the full request is in
+  `permit ls --json` (`raw`, up to 64 KiB). A Codex request for extra sandbox
+  permissions (network access, file system paths) is listed with kind `other`
+  and a `permissions: ...` summary; `allow` grants them for the turn,
+  `allow --session` for the session, `deny` grants none.
+
+The daemon log never contains prompt or agent text; it is stored only in each
+agent's `events.jsonl` (0600).
+
+Storage (XDG; `DGC_STATE_ROOT=<dir>` replaces all of these with `<dir>/run`,
+`<dir>/state`, `<dir>/config` and `<dir>/data`):
+
+| What | Location |
+|---|---|
+| Socket | `$XDG_RUNTIME_DIR/dgc/daemon.sock`, else `~/.local/state/dgc/run/daemon.sock` |
+| Projects, workspaces, agents, events, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
+| Config (`claude_path`, `codex_path`, `events_max_bytes`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
+| Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
+
+The socket path must stay under 100 bytes (`sockaddr_un` limit), so keep
+`DGC_STATE_ROOT` short.
+
+Security properties:
+
+- The daemon listens only on a Unix socket (0600, in a 0700 directory) and
+  checks the peer's UID on every connection; other users are refused. It opens
+  no TCP or UDP port. All state files are 0600 and directories 0700.
+- The trust boundary is your UID: any process running as you can drive agents.
+  Agents started by dgc are trusted to the extent their provider mode allows.
+- dgc never reads provider credential files and does not log prompt text.
+  Provider children inherit the daemon's environment (including any API keys
+  in it), and agent output in `events.jsonl` is stored as-is (0600), so it can
+  contain secrets the agent printed.
+- Outside the listed auto-approve modes dgc adds no approvals of its own, but
+  the provider's default mode and your provider settings still decide what
+  runs without asking: Codex's default `workspace-write` runs sandboxed
+  commands in the workspace, and without `--mode` Claude applies your own
+  Claude settings (allow rules, default mode). `--mode untrusted` (Codex) and
+  `--mode manual` (Claude) are the modes that ask; requests then wait for
+  `permit allow|deny` (the provider's own built-in safe-command and allow-rule
+  exceptions still apply).
+
+Running as a service is optional (`status`, `run` and the other commands start
+the daemon on demand). Examples only; dgc installs neither file. Use an
+absolute `ExecStart`/`ProgramArguments` path and make sure `claude` / `codex`
+are on the service's `PATH` (or set `claude_path` / `codex_path` in the config).
+
+```ini
+# ~/.config/systemd/user/dgc.service  (systemctl --user enable --now dgc)
+[Unit]
+Description=dgc orchestrator daemon
+
+[Service]
+ExecStart=%h/.cargo/bin/dgc-next daemon run
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```xml
+<!-- ~/Library/LaunchAgents/dev.dgc.daemon.plist  (launchctl load -w <file>) -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.dgc.daemon</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/you/.cargo/bin/dgc-next</string><string>daemon</string><string>run</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
 
 ## 🚀 Key Features
 

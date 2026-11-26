@@ -12,6 +12,19 @@ version = "0.1.0"
 # keep versions identical to the legacy root package's declarations.
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+dgc-client = { path = "crates/dgc-client" }
+dgc-daemon = { path = "crates/dgc-daemon" }
+dgc-protocol = { path = "crates/dgc-protocol" }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3"
+thiserror = "2"
+toml = "1.1.8"
+tokio = { version = "1.53.3", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false }
+uuid = { version = "1.28.0", default-features = false }
 
 [package]
 name = "doge-code"

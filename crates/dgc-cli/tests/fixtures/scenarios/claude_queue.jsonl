@@ -1,0 +1,18 @@
+// claude_permission, then the queued message "second" must arrive as the next
+// turn once the first one completed; it is answered with "drained".
+{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}
+{"capture":"init","path":"/request_id"}
+{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}
+{"expect":{"type":"user"}}
+{"send":{"type":"system","subtype":"init","session_id":"sess-cli-2"}}
+{"send":{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"touch hello.txt"}}]}}}
+{"send":{"type":"control_request","request_id":"perm-req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch hello.txt"}}}}
+{"expect":{"type":"control_response","response":{"subtype":"success","request_id":"perm-req-1","response":{"behavior":"allow"}}}}
+{"send":{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"(Bash completed with no output)","is_error":false}]}}}
+{"send":{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}}
+{"send":{"type":"result","subtype":"success","is_error":false,"session_id":"sess-cli-2","usage":{"output_tokens":2}}}
+{"expect":{"type":"user","message":{"content":[{"type":"text","text":"second"}]}}}
+{"send":{"type":"system","subtype":"init","session_id":"sess-cli-2"}}
+{"send":{"type":"assistant","message":{"content":[{"type":"text","text":"drained"}]}}}
+{"send":{"type":"result","subtype":"success","is_error":false,"session_id":"sess-cli-2","usage":{"output_tokens":1}}}
+{"expect_eof":true}
