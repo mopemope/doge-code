@@ -14,7 +14,7 @@ use dgc_protocol::model::{
 use super::input::{Key, KeyInput};
 use super::state::{
     AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PermissionChange,
-    default_title,
+    ScrollMotion, default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
@@ -62,7 +62,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             request_snapshot(state, &mut fx, true);
             catch_up_selected(state, &mut fx);
         }
-        AppEvent::Resize { width, height } => state.size = (width, height),
+        AppEvent::Resize { width, height } => {
+            state.size = (width, height);
+            // The summary wraps differently now: read it again.
+            state.sync_permission_view(true);
+        }
         AppEvent::Tick => on_tick(state),
     }
     settle(state, &mut fx);
@@ -659,6 +663,8 @@ fn permission_key(state: &mut AppState, key: &KeyInput, fx: &mut Vec<Effect>) {
         permission,
         sending,
         ticks_until_armed,
+        seen_end,
+        ..
     }) = &mut state.dialog
     else {
         return;
@@ -670,6 +676,19 @@ fn permission_key(state: &mut AppState, key: &KeyInput, fx: &mut Vec<Effect>) {
         state.close_dialog();
         return;
     }
+    let motion = match key.key {
+        Key::Up => Some(ScrollMotion::Lines(-1)),
+        Key::Down => Some(ScrollMotion::Lines(1)),
+        Key::PageUp => Some(ScrollMotion::PageUp),
+        Key::PageDown => Some(ScrollMotion::PageDown),
+        Key::Home => Some(ScrollMotion::Home),
+        Key::End => Some(ScrollMotion::End),
+        _ => None,
+    };
+    if let Some(motion) = motion {
+        state.scroll_permission(motion);
+        return;
+    }
     let decision = match key.printable() {
         Some('a') => Decision::Allow,
         Some('s') => Decision::AllowForSession,
@@ -678,6 +697,11 @@ fn permission_key(state: &mut AppState, key: &KeyInput, fx: &mut Vec<Effect>) {
     };
     // Not yet armed (just opened or replaced), or already answering.
     if *sending || *ticks_until_armed > 0 {
+        return;
+    }
+    // Allowing needs the whole request to have been on screen; denying never
+    // does.
+    if decision != Decision::Deny && !*seen_end {
         return;
     }
     let params = PermissionRespondParams {

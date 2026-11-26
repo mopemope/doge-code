@@ -20,7 +20,7 @@
 - タスク: M2 Task 4（ランタイムと起動コマンド）
 - 状態: 未着手
 - 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）
-- 次の一手: M2 計画の Task 4 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。`tui/mod.rs` の `#![allow(dead_code)]` を外し、`render::render` を端末ループから呼ぶ
+- 次の一手: M2 計画の Task 4 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。`tui/mod.rs` の `#![allow(dead_code)]` を外し、`render::render` を端末ループから呼ぶ。起動直後と各リサイズで実サイズの `AppEvent::Resize` を送る（決定事項 M2 Task 3 レビュー修正 (h)）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -405,13 +405,32 @@
   権限の `summary`（`escape_text`、改行は行区切りとして保持）、入力欄・フォームの編集テキスト（`escape_line`）。`PendingPermission.raw` は
   表示しない（利用者が答える対象は summary。raw を出すとさらに長大な未整形テキストを表示することになる）。
   (3) 権限ダイアログは、選択中でないエージェントの要求でも「エージェント短縮 id・provider・title」、kind、summary 全文を折り返して表示し、
-  選択中でなければ黄色で `(not the selected agent)` を出す。summary が収まらない場合は先頭と末尾（プロトコルの切り詰めマーカー
-  `…(truncated, N bytes total)` や危険な引数が末尾にあることが多いため）を残し、中央に `…(N lines hidden; full text: dgc-next permit ls)`
-  を出す（スクロール状態を `AppState` に足さない選択。`permit ls` は summary 全文を 1 行で出す）。どんなに小さい端末でも黙って切らない。
+  選択中でなければ黄色で `(not the selected agent)` を出す。（レビュー修正で置き換え。下の 2026-11-26 M2 Task 3 レビュー修正を参照）
   (4) `!dialog.permission_armed()` の間は `keys enabled shortly` と、淡色（DIM）の `[a]llow [s]ession [d]eny` を出す。armed で通常表示。
   (5) Input フォーカスで権限待ちなら `permission_hint()` を入力欄の最初の行に黒地・黄背景で、ステータスバーにも出す。
   `input_target_missing()` のとき入力欄タイトルに赤字で `no target — select an agent`。
-  (6) `output::kind_name` を `pub` にした（権限ダイアログの kind 表示に再利用）。新規ファイル `render.rs` は約 1450 行（実装 約 800 行 + テスト）。
+  (6) `output::kind_name` を `pub` にした（権限ダイアログの kind 表示に再利用）。新規ファイル `render.rs`（レビュー修正後は幾何・折り返しを `tui/layout.rs` に分離）。
+- 2026-11-26 (M2 Task 3 レビュー修正、コントローラ裁定): 「権限の確認画面は承認する内容をそのまま見せる」を守るため次を変更。
+  (a) 長い summary の中央を隠す head/tail 表示と、誤った `permit ls` の「全文」案内を廃止（`permit ls` も同じ 4 KiB に切られた文字列を出す）。
+  summary は常に全体を折り返して持ち、スクロールで読む（↑↓ 1 行、PgUp/PgDn 1 ページ、Home/End）。
+  (b) 配置計算を純粋関数 `tui::layout::permission_layout(size, summary)` に一本化し、描画（`render`）と a/s の判定（`update`）が同じ結果を使う。
+  ヘッダ（3 行: エージェント・選択外の注記・kind）とフッタ（armed ヒント 1 行、スクロール表示、短縮警告、凡例）を先に確保し、残りが summary の
+  表示行数。確保量は armed/スクロール状態に依存しない。1 行も取れなければ `too_small`（超過扱い）で、`window too small — enlarge or [d]eny` と凡例だけを出す。
+  (c) `Dialog::Permission` に `scroll` / `seen_rows` / `seen_end` を追加。`a`/`s` は armed かつ `seen_end` のときだけ受け付け、`d`（armed が必要）と
+  Esc は常に使える。`seen_end` は summary の全行が（上からのスクロールで連続して）画面に出たときだけ真。裁定の文言（「最後の行が一度見えた」）より
+  厳しくした: End/Home で末尾へ跳ぶと中間の行が一度も見えないまま許可できてしまい、中間に細工したコマンドを隠せるため。そのため End だけでは
+  a/s は有効にならず、上から PgDn/↓ で読み進める（末尾から PgUp で戻って先頭側の既読範囲に繋ぐ読み方は数えない）。収まる場合は即 true。
+  端末サイズが変わる（`Resize`）と折り返しが変わるので先頭から読み直し（収まるようになれば即 true）。表示中は
+  `rows X–Y of N — scroll to the end to enable [a]/[s]`、読了後は `rows X–Y of N`、読了までは a/s の凡例を淡色にする。
+  (d) 折り返しの継続行（要求の改行ではなく幅で折れた行）には淡色の `↪` を左端 1 桁に付ける（シェルでは改行がコマンド区切りのため）。
+  全行に 1 桁のガターを取るため本文幅は dialog 内幅 - 1。
+  (e) ヘッダのエージェント行は 1 行に切る（id・provider が先頭、長い title は `…`）。
+  (f) 文字幅は grapheme 単位（ratatui の `styled_graphemes` と `Span::width`）で測る。char 単位の合計では `⚠\u{fe0f}`（2 桁）等が 1 桁と数えられて
+  行末で最後の grapheme が描画されずに消えた。折り返し・切り詰め・末尾取りの全部が同じ関数群（`tui/layout.rs`）を使う。
+  (g) 既知の制限（プラン水準の裁定）: プロトコルは summary を 4 KiB で切る（`…(truncated, N bytes total)`）。切られた要求には赤字で
+  `this request was shortened by dgc — the full command is not shown` を出す。a/s は読了後に使える。完全なコマンドは表示できない。
+  (h) 契約（Task 4 へ）: `permission_layout` は `AppState.size` を使うので、ランタイムは起動直後に実端末サイズの `AppEvent::Resize` を 1 回送り、
+  以後のリサイズごとに送ること（既定の 80x24 のままだと、描画側の幅と a/s 判定の幅がずれる）。描画は実際のフレームサイズで配置する。
 
 ## 検証記録
 
@@ -625,6 +644,15 @@
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
     | `bash scripts/verify.sh tui-deps` | PASS |
     | `bash scripts/verify.sh msrv` | PASS（rustup run 1.94.0 cargo check --locked --workspace --all-targets --all-features） |
+- 2026-11-26 M2 Task 3 レビュー修正（固定ツールチェーン 1.99.0）。新規テストを先に書き、旧コードで RED（10 件が FAIL: 未読の要求に a/s が通る、
+  Resize で有効/無効にならない、End で中間を飛ばして許可できる、スクロール表示なし、小端末でフッタ欠落、長い title でフッタ欠落、`↪` なし、
+  短縮警告なし、`⚠\u{fe0f}` が 40 個中 24 個しか描画されない）。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（89 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS |
 
 ## 保留中の小さな改善
 

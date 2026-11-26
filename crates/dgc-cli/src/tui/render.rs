@@ -21,18 +21,18 @@ use dgc_protocol::model::{AgentState, Isolation, PendingPermission, ProviderKind
 
 use super::ConnectionState;
 use super::input::LineEditor;
+use super::layout::{
+    LEGEND, NARROW, PermissionLayout, SHORTENED_WARNING, TOO_SMALL, panes, permission_layout,
+    scroll_indicator, tail_cols, text_width, truncate_cols, wrap_line, wrap_text,
+};
 use super::state::{
     AgentField, AppState, Dialog, Focus, NewAgentForm, NewWorkspaceForm, Row, WorkspaceField,
 };
-use crate::output::{escape_line, escape_text, kind_name, provider_name, state_name};
+use crate::output::{escape_line, kind_name, provider_name, state_name};
 
 const ACCENT: Color = Color::Cyan;
 const WARN: Color = Color::Yellow;
 const DANGER: Color = Color::Red;
-
-/// A terminal narrower than this gets a 16-column tree.
-const NARROW: u16 = 50;
-const NARROW_TREE: u16 = 16;
 
 /// Draw the whole screen.
 pub fn render(state: &AppState, frame: &mut Frame) {
@@ -40,12 +40,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let [body, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let [tree, right] = Layout::horizontal([
-        Constraint::Length(tree_width(area.width)),
-        Constraint::Min(0),
-    ])
-    .areas(body);
+    let (tree, right, status) = panes(area);
     let input_height = if state.permission_hint().is_some() {
         4
     } else {
@@ -69,104 +64,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     }
 }
 
-/// 30% of the terminal, 18 to 40 columns; 16 when the terminal is narrow.
-fn tree_width(total: u16) -> u16 {
-    if total < NARROW {
-        NARROW_TREE.min(total)
-    } else {
-        u16::try_from(u32::from(total) * 30 / 100).map_or(40, |w| w.clamp(18, 40))
-    }
-}
-
 // ---- text helpers ----
-
-fn char_width(c: char) -> usize {
-    let mut buf = [0u8; 4];
-    Span::raw(&*c.encode_utf8(&mut buf)).width()
-}
-
-fn text_width(text: &str) -> usize {
-    Span::raw(text).width()
-}
-
-/// `text` cut to `max` columns, ending in `…` when something was dropped.
-fn truncate_cols(text: &str, max: usize) -> String {
-    if text_width(text) <= max {
-        return text.to_owned();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in text.chars() {
-        let w = char_width(c);
-        if used + w > max - 1 {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out.push('\u{2026}');
-    out
-}
-
-/// The last `max` columns of `text`.
-fn tail_cols(text: &str, max: usize) -> String {
-    let mut used = 0;
-    let mut start = text.len();
-    for (index, c) in text.char_indices().rev() {
-        let w = char_width(c);
-        if used + w > max {
-            break;
-        }
-        used += w;
-        start = index;
-    }
-    text[start..].to_owned()
-}
-
-/// Break `line` (no newlines) into rows of at most `width` columns, at a
-/// space when the row has one. Nothing is dropped (a space stays at the end
-/// of its row); an empty line gives one empty row.
-fn wrap_line(line: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    let mut current = String::new();
-    let mut used = 0;
-    // Byte offset and column just after the last space of `current`.
-    let mut space: Option<(usize, usize)> = None;
-    for c in line.chars() {
-        let w = char_width(c);
-        if used + w > width && !current.is_empty() {
-            match space.take() {
-                Some((at, columns)) if !current[..at].trim().is_empty() => {
-                    let rest = current.split_off(at);
-                    rows.push(std::mem::replace(&mut current, rest));
-                    used -= columns;
-                }
-                _ => {
-                    rows.push(std::mem::take(&mut current));
-                    used = 0;
-                }
-            }
-        }
-        current.push(c);
-        used += w;
-        if c == ' ' {
-            space = Some((current.len(), used));
-        }
-    }
-    rows.push(current);
-    rows
-}
-
-/// `text` (newlines allowed) wrapped to `width` columns.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    text.split('\n')
-        .flat_map(|line| wrap_line(line, width))
-        .collect()
-}
 
 /// `agt_…` and the last six characters of the id.
 fn short_id(id: &AgentId) -> String {
@@ -510,22 +408,33 @@ fn render_dialog(state: &AppState, frame: &mut Frame, pane: Rect) -> Option<(u16
     if pane.width < 3 || pane.height < 3 {
         return None;
     }
-    let width = pane.width.min(72);
+    let area = frame.area();
+    let mut width = pane.width.min(72);
     let inner_width = usize::from(width - 2);
     let max_inner_height = usize::from(pane.height - 2);
     let body = match dialog {
         Dialog::Permission {
             permission,
             sending,
+            scroll,
+            seen_end,
             ..
-        } => permission_body(
-            state,
-            permission,
-            *sending,
-            dialog.permission_armed(),
-            inner_width,
-            max_inner_height,
-        ),
+        } => {
+            // The same layout `update` used to judge a/s, for this terminal.
+            let layout = permission_layout((area.width, area.height), &permission.summary);
+            width = layout.dialog_width;
+            permission_body(
+                state,
+                permission,
+                &PermissionView {
+                    sending: *sending,
+                    armed: dialog.permission_armed(),
+                    scroll: *scroll,
+                    seen_end: *seen_end,
+                },
+                &layout,
+            )
+        }
         Dialog::NewAgent(form) => agent_body(form, inner_width),
         Dialog::NewWorkspace(form) => workspace_body(form, inner_width),
         Dialog::ConfirmArchive { title, .. } => archive_body(title, inner_width),
@@ -564,15 +473,83 @@ fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// What the dialog state says about the permission being shown.
+struct PermissionView {
+    sending: bool,
+    armed: bool,
+    scroll: usize,
+    seen_end: bool,
+}
+
+fn legend_lines(layout: &PermissionLayout, view: &PermissionView) -> Vec<Line<'static>> {
+    if view.sending {
+        return vec![Line::styled(
+            "sending answer\u{2026}",
+            Style::default().fg(WARN),
+        )];
+    }
+    let enabled = Style::default().add_modifier(Modifier::BOLD);
+    let disabled = dim();
+    let allow = if view.armed && view.seen_end {
+        enabled
+    } else {
+        disabled
+    };
+    let styles = [
+        allow,
+        allow,
+        if view.armed { enabled } else { disabled },
+        Style::default(),
+    ];
+    layout
+        .legend_rows
+        .iter()
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (i, &item) in row.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(LEGEND[item], styles[item]));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
 fn permission_body(
     state: &AppState,
     permission: &PendingPermission,
-    sending: bool,
-    armed: bool,
-    width: usize,
-    max_height: usize,
+    view: &PermissionView,
+    layout: &PermissionLayout,
 ) -> DialogBody {
-    let mut header = Vec::new();
+    let width = layout.inner_width;
+    let hint = if view.armed {
+        Line::raw("")
+    } else {
+        Line::styled("keys enabled shortly", Style::default().fg(WARN))
+    };
+    let mut lines = Vec::new();
+    if layout.too_small {
+        // Nothing of the summary fits next to the legend: say so, keep the
+        // way to refuse, and never offer allow.
+        lines.extend(wrapped(
+            TOO_SMALL,
+            width,
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        ));
+        if !view.armed {
+            lines.push(hint);
+        }
+        lines.extend(legend_lines(layout, view));
+        lines.truncate(layout.max_inner_height);
+        return DialogBody {
+            title: " Permission ",
+            border: WARN,
+            lines,
+            cursor: None,
+        };
+    }
     let who = match state.tree.agent(&permission.agent_id) {
         Some(agent) => format!(
             "agent: {}  {}  {}",
@@ -582,70 +559,54 @@ fn permission_body(
         ),
         None => format!("agent: {}  (unknown)", short_id(&permission.agent_id)),
     };
-    header.extend(wrapped(&who, width, bold()));
-    if state.stream_agent_id().as_ref() != Some(&permission.agent_id) {
-        header.extend(wrapped(
-            "(not the selected agent)",
-            width,
-            Style::default().fg(WARN),
-        ));
-    }
-    header.extend(wrapped(
+    // One row: the id and provider come first, a long title is cut.
+    lines.push(Line::styled(truncate_cols(&who, width), bold()));
+    lines.push(
+        if state.stream_agent_id().as_ref() == Some(&permission.agent_id) {
+            Line::raw("")
+        } else {
+            Line::styled("(not the selected agent)", Style::default().fg(WARN))
+        },
+    );
+    lines.push(Line::raw(truncate_cols(
         &format!("kind: {}", kind_name(permission.kind)),
         width,
-        Style::default(),
-    ));
-    header.push(Line::raw(""));
+    )));
 
-    let mut footer = vec![Line::raw("")];
-    if sending {
-        footer.push(Line::styled(
-            "sending answer\u{2026}",
-            Style::default().fg(WARN),
-        ));
-    } else {
-        if !armed {
-            footer.push(Line::styled(
-                "keys enabled shortly",
+    let scroll = view.scroll.min(layout.max_scroll());
+    let end = (scroll + layout.visible_rows).min(layout.rows.len());
+    for row in &layout.rows[scroll..end] {
+        let gutter = if row.soft {
+            Span::styled("\u{21aa}", dim())
+        } else {
+            Span::raw(" ")
+        };
+        lines.push(Line::from(vec![gutter, Span::raw(row.text.clone())]));
+    }
+
+    lines.push(hint);
+    if layout.overflows {
+        let (text, style) = if view.seen_end {
+            (
+                format!("rows {}\u{2013}{end} of {}", scroll + 1, layout.rows.len()),
+                dim(),
+            )
+        } else {
+            (
+                scroll_indicator(scroll + 1, end, layout.rows.len()),
                 Style::default().fg(WARN),
-            ));
-        }
-        let legend =
-            Style::default().add_modifier(if armed { Modifier::BOLD } else { Modifier::DIM });
-        footer.extend(wrapped(
-            "[a]llow  [s]ession  [d]eny  [Esc] close",
+            )
+        };
+        lines.extend(wrapped(&text, width, style));
+    }
+    if layout.shortened_rows > 0 {
+        lines.extend(wrapped(
+            SHORTENED_WARNING,
             width,
-            legend,
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
         ));
     }
-
-    let summary = if permission.summary.is_empty() {
-        "(no summary)".to_owned()
-    } else {
-        escape_text(&permission.summary)
-    };
-    let rows = wrap_text(&summary, width);
-    let room = max_height
-        .saturating_sub(header.len() + footer.len())
-        .max(1);
-    let mut lines = header;
-    if rows.len() <= room {
-        lines.extend(rows.into_iter().map(Line::from));
-    } else {
-        // Keep the start and the end (where a truncation marker or the
-        // dangerous part of a command tends to be) and say what is left out.
-        let head = (room - 1) / 2 + (room - 1) % 2;
-        let tail = (room - 1) - head;
-        let hidden = rows.len() - head - tail;
-        let marker = truncate_cols(
-            &format!("\u{2026}({hidden} lines hidden; full text: dgc-next permit ls)"),
-            width,
-        );
-        lines.extend(rows[..head].iter().cloned().map(Line::from));
-        lines.push(Line::styled(marker, Style::default().fg(WARN)));
-        lines.extend(rows[rows.len() - tail..].iter().cloned().map(Line::from));
-    }
-    lines.extend(footer);
+    lines.extend(legend_lines(layout, view));
     DialogBody {
         title: " Permission ",
         border: WARN,
@@ -819,13 +780,13 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::*;
-    use crate::tui::AppEvent;
-    use crate::tui::input::KeyInput;
+    use crate::tui::input::{Key, KeyInput};
     use crate::tui::state::{
         Dialog, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PERMISSION_ARM_TICKS,
         PERMISSION_HINT, STREAM_CAP,
     };
     use crate::tui::update::update;
+    use crate::tui::{AppEvent, Effect, RequestTag};
 
     struct Fx {
         state: AppState,
@@ -931,6 +892,13 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::Connection(crate::tui::ConnectionState::Connected),
+            );
+            update(
+                &mut state,
+                AppEvent::Resize {
+                    width: 120,
+                    height: 30,
+                },
             );
             Self {
                 state,
@@ -1300,23 +1268,68 @@ mod tests {
         assert!(text.contains("END_OF_LINE"), "{text}");
     }
 
+    fn press_key(state: &mut AppState, key: Key) -> Vec<Effect> {
+        update(state, AppEvent::Key(KeyInput::new(key)))
+    }
+
+    fn press(state: &mut AppState, c: char) -> Vec<Effect> {
+        update(state, AppEvent::Key(KeyInput::char(c)))
+    }
+
+    fn resize(state: &mut AppState, width: u16, height: u16) {
+        update(state, AppEvent::Resize { width, height });
+    }
+
+    fn responds(effects: &[Effect]) -> bool {
+        effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::Call {
+                    request: RequestTag::Respond { .. },
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Show `summary` as a permission of a2 (not the stream's agent) in a
+    /// `width` x `height` terminal, with its keys armed.
+    fn open_permission(f: &mut Fx, width: u16, height: u16, summary: &str) {
+        resize(&mut f.state, width, height);
+        let a1 = f.a1.clone();
+        f.select(&a1, &["unrelated"]);
+        let permission = permission(&f.a2.id, summary);
+        f.state.permissions = vec![permission.clone()];
+        f.state.open_dialog(Dialog::permission(permission));
+        for _ in 0..PERMISSION_ARM_TICKS {
+            update(&mut f.state, AppEvent::Tick);
+        }
+        assert!(f.state.dialog.as_ref().expect("dialog").permission_armed());
+    }
+
+    fn numbered_rows(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("row{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PgDn until the dialog stops moving (reads the summary to its end).
+    fn read_to_the_end(state: &mut AppState) {
+        for _ in 0..200 {
+            press_key(state, Key::PageDown);
+        }
+    }
+
     #[test]
     fn permission_dialog_shows_agent_and_full_summary_escaped() {
         let mut f = Fx::new();
-        // The stream shows a1; the permission belongs to a2.
-        let a1 = f.a1.clone();
-        f.select(&a1, &["unrelated"]);
         let a2 = f.a2.clone();
         let summary = format!(
             "rm -rf /tmp/x\r\u{1b}[2J\u{202e}evil\nsecond line {}",
             "A".repeat(5000)
         );
-        let permission = permission(&a2.id, &summary);
-        assert!(
-            permission.summary.contains("(truncated,"),
-            "protocol cut it"
-        );
-        f.state.open_dialog(Dialog::permission(permission));
+        open_permission(&mut f, 120, 30, &summary);
         let buffer = draw(&f.state, 120, 30);
         assert_no_control_chars(&buffer);
         let text = screen(&buffer);
@@ -1334,46 +1347,220 @@ mod tests {
             right.contains("secondline"),
             "newline kept as a line break: {right}"
         );
-        assert!(
-            right.contains("…(truncated,"),
-            "protocol marker visible: {right}"
-        );
-        assert!(right.contains("bytestotal)"), "{right}");
-        assert!(
-            right.contains("hidden"),
-            "the dialog says rows were left out: {right}"
-        );
-        // A summary that fits is shown entirely, without a hidden marker.
-        let short_one = permission_with_lines(&a2.id, 12);
-        f.state.open_dialog(Dialog::permission(short_one));
-        let buffer = draw(&f.state, 120, 40);
+        // The protocol cut the text; the end is reached by scrolling.
+        read_to_the_end(&mut f.state);
+        let buffer = draw(&f.state, 120, 30);
         let right = squash_from(&buffer, 36);
+        assert!(right.contains("…(truncated,"), "marker: {right}");
+        assert!(right.contains("bytestotal)"), "{right}");
+        // A summary that fits is shown entirely, without a scroll indicator.
+        open_permission(&mut f, 120, 40, &numbered_rows(12));
+        let right = squash_from(&draw(&f.state, 120, 40), 36);
         assert!(right.contains("row0"), "{right}");
         assert!(right.contains("row11"), "{right}");
-        assert!(!right.contains("hidden"), "{right}");
-    }
-
-    fn permission_with_lines(agent_id: &AgentId, n: usize) -> PendingPermission {
-        let summary: Vec<String> = (0..n).map(|i| format!("row{i}")).collect();
-        permission(agent_id, &summary.join("\n"))
+        assert!(!right.contains("scrolltotheend"), "{right}");
     }
 
     #[test]
-    fn permission_dialog_hides_middle_rows_but_keeps_head_and_tail() {
+    fn allow_and_session_need_the_whole_summary_read_but_deny_always_works() {
         let mut f = Fx::new();
-        let a2 = f.a2.clone();
-        f.select(&a2, &["x"]);
-        f.state
-            .open_dialog(Dialog::permission(permission_with_lines(&a2.id, 100)));
-        let buffer = draw(&f.state, 100, 24);
-        let right = squash_from(&buffer, 30);
-        assert!(right.contains("row0"), "{right}");
+        open_permission(&mut f, 120, 30, &numbered_rows(100));
+        for key in ['a', 's'] {
+            let fx = press(&mut f.state, key);
+            assert!(!responds(&fx), "{key} answered an unread request: {fx:?}");
+        }
+        assert!(f.state.dialog.is_some(), "still open");
+        // Scrolling down to the end enables them.
+        read_to_the_end(&mut f.state);
+        let right = squash_from(&draw(&f.state, 120, 30), 36);
         assert!(right.contains("row99"), "{right}");
-        assert!(right.contains("hidden"), "{right}");
-        assert!(!right.contains("row50"), "{right}");
-        // Even a tiny pane never cuts silently.
-        let buffer = draw(&f.state, 40, 8);
-        assert!(squash_from(&buffer, 0).contains("hidden"));
+        let fx = press(&mut f.state, 'a');
+        assert!(responds(&fx), "a after reading to the end: {fx:?}");
+
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 30, &numbered_rows(100));
+        let fx = press(&mut f.state, 'd');
+        assert!(responds(&fx), "deny works without reading: {fx:?}");
+
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 30, &numbered_rows(100));
+        read_to_the_end(&mut f.state);
+        let fx = press(&mut f.state, 's');
+        assert!(responds(&fx), "s after reading to the end: {fx:?}");
+    }
+
+    #[test]
+    fn jumping_to_the_end_does_not_count_as_reading_the_middle() {
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 30, &numbered_rows(100));
+        press_key(&mut f.state, Key::End);
+        let right = squash_from(&draw(&f.state, 120, 30), 36);
+        assert!(right.contains("row99"), "End shows the tail: {right}");
+        let fx = press(&mut f.state, 'a');
+        assert!(!responds(&fx), "the middle was never visible: {fx:?}");
+        // Reading on from the top does.
+        press_key(&mut f.state, Key::Home);
+        read_to_the_end(&mut f.state);
+        assert!(responds(&press(&mut f.state, 'a')));
+    }
+
+    #[test]
+    fn resize_that_fits_the_summary_enables_allow() {
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 20, &numbered_rows(30));
+        assert!(!responds(&press(&mut f.state, 'a')));
+        resize(&mut f.state, 120, 60);
+        let right = squash_from(&draw(&f.state, 120, 60), 36);
+        assert!(right.contains("row29"), "everything fits: {right}");
+        assert!(responds(&press(&mut f.state, 'a')));
+    }
+
+    #[test]
+    fn resize_that_hides_rows_again_disables_allow() {
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 60, &numbered_rows(30));
+        resize(&mut f.state, 120, 20);
+        assert!(!responds(&press(&mut f.state, 'a')));
+    }
+
+    #[test]
+    fn scroll_indicator_is_rendered_and_a_s_are_dimmed_until_the_end() {
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 30, &numbered_rows(100));
+        let buffer = draw(&f.state, 120, 30);
+        let text = screen(&buffer);
+        assert!(text.contains("rows 1\u{2013}"), "{text}");
+        assert!(text.contains(" of 100 "), "{text}");
+        assert!(
+            squash_from(&buffer, 36).contains("scrolltotheendtoenable[a]/[s]"),
+            "{text}"
+        );
+        let (x, y) = find(&buffer, "[a]llow").expect("legend");
+        assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+        let (x, y) = find(&buffer, "[d]eny").expect("legend");
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::DIM));
+        // Scrolling moves the window and the numbers.
+        press_key(&mut f.state, Key::Down);
+        let text = screen(&draw(&f.state, 120, 30));
+        assert!(text.contains("rows 2\u{2013}"), "{text}");
+        read_to_the_end(&mut f.state);
+        let buffer = draw(&f.state, 120, 30);
+        let text = screen(&buffer);
+        assert!(text.contains("\u{2013}100 of 100"), "{text}");
+        assert!(
+            !squash_from(&buffer, 36).contains("toenable[a]/[s]"),
+            "{text}"
+        );
+        let (x, y) = find(&buffer, "[a]llow").expect("legend");
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn long_agent_title_keeps_summary_and_legend_visible() {
+        let mut f = Fx::new();
+        f.a2.title = "T".repeat(3000);
+        update(
+            &mut f.state,
+            AppEvent::Snapshot {
+                projects: vec![f.project.clone()],
+                workspaces: vec![f.workspace.clone()],
+                agents: vec![f.a1.clone(), f.a2.clone()],
+                permissions: Vec::new(),
+            },
+        );
+        open_permission(&mut f, 120, 30, "rm -rf target");
+        let text = screen(&draw(&f.state, 120, 30));
+        assert!(text.contains("rm -rf target"), "{text}");
+        assert!(text.contains("[d]eny"), "{text}");
+        assert!(text.contains("kind: command"), "{text}");
+        assert!(text.contains("codex"), "provider survives the cut\n{text}");
+        assert!(responds(&press(&mut f.state, 'a')));
+    }
+
+    #[test]
+    fn tiny_window_keeps_the_footer_and_refuses_allow() {
+        let mut f = Fx::new();
+        open_permission(&mut f, 40, 8, "rm -rf target");
+        let text = screen(&draw(&f.state, 40, 8));
+        assert!(text.contains("window too small"), "{text}");
+        assert!(text.contains("[d]eny"), "{text}");
+        assert!(!responds(&press(&mut f.state, 'a')), "{text}");
+        assert!(!responds(&press(&mut f.state, 's')));
+        assert!(responds(&press(&mut f.state, 'd')));
+        // The "keys enabled shortly" hint is still there before arming.
+        let mut f = Fx::new();
+        resize(&mut f.state, 40, 8);
+        let permission = permission(&f.a2.id, "rm -rf target");
+        f.state.permissions = vec![permission.clone()];
+        f.state.open_dialog(Dialog::permission(permission));
+        let text = screen(&draw(&f.state, 40, 8));
+        assert!(text.contains("keys enabled shortly"), "{text}");
+    }
+
+    #[test]
+    fn soft_wraps_are_marked_and_real_newlines_are_not() {
+        let mut f = Fx::new();
+        // 120x30: the dialog is 72 wide, 70 inside, 69 for text.
+        let summary = format!("first\n{}{}\nthird", "a".repeat(69), "b".repeat(5));
+        open_permission(&mut f, 120, 30, &summary);
+        let text = screen(&draw(&f.state, 120, 30));
+        assert_eq!(text.matches('\u{21aa}').count(), 1, "{text}");
+        let line = text
+            .lines()
+            .find(|l| l.contains('\u{21aa}'))
+            .expect("marked row");
+        assert!(line.contains("\u{21aa}bbbbb"), "{line}");
+    }
+
+    #[test]
+    fn wrapping_keeps_every_grapheme_of_cjk_and_emoji() {
+        let mut f = Fx::new();
+        let summary = format!(
+            "{} {} {}",
+            "\u{6f22}\u{5b57}".repeat(40),
+            "\u{26a0}\u{fe0f}".repeat(40),
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}".repeat(30)
+        );
+        open_permission(&mut f, 120, 40, &summary);
+        let buffer = draw(&f.state, 120, 40);
+        let right = squash_from(&buffer, 36);
+        for (grapheme, expected) in [
+            ("\u{6f22}\u{5b57}", 40),
+            ("\u{26a0}\u{fe0f}", 40),
+            ("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", 30),
+        ] {
+            let shown = right.matches(grapheme).count();
+            assert_eq!(
+                shown,
+                expected,
+                "{grapheme:?} appears {shown} times\n{}",
+                screen(&buffer)
+            );
+        }
+        assert!(responds(&press(&mut f.state, 'a')), "it all fit");
+    }
+
+    #[test]
+    fn shortened_request_is_flagged_in_red_and_allowed_after_reading() {
+        let mut f = Fx::new();
+        let summary = format!("echo {}", "word ".repeat(1500));
+        open_permission(&mut f, 120, 30, &summary);
+        let buffer = draw(&f.state, 120, 30);
+        let (x, y) = find(&buffer, "this request was shortened by dgc").unwrap_or_else(|| {
+            panic!("no warning\n{}", screen(&buffer));
+        });
+        assert_eq!(buffer[(x, y)].fg, Color::Red);
+        assert!(screen(&buffer).contains("the full command is not shown"));
+        assert!(!responds(&press(&mut f.state, 'a')), "unread");
+        read_to_the_end(&mut f.state);
+        assert!(
+            responds(&press(&mut f.state, 'a')),
+            "a stays available once read"
+        );
+        // An untruncated request carries no warning.
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 30, "rm -rf target");
+        assert!(!screen(&draw(&f.state, 120, 30)).contains("shortened"));
     }
 
     #[test]
@@ -1436,17 +1623,6 @@ mod tests {
         );
         assert!(!text.contains(PERMISSION_HINT), "{text}");
         assert!(text.contains("half typed"), "text is kept\n{text}");
-    }
-
-    #[test]
-    fn tree_width_follows_the_layout_rules() {
-        assert_eq!(tree_width(120), 36);
-        assert_eq!(tree_width(50), 18);
-        assert_eq!(tree_width(200), 40);
-        assert_eq!(tree_width(49), 16);
-        assert_eq!(tree_width(20), 16);
-        assert_eq!(tree_width(10), 10);
-        assert_eq!(tree_width(u16::MAX), 40);
     }
 
     #[test]

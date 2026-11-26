@@ -15,6 +15,7 @@ use dgc_protocol::model::{
 
 use super::ConnectionState;
 use super::input::LineEditor;
+use super::layout::permission_layout;
 use crate::output::{escape_line, event_line};
 
 /// Most lines the stream keeps; older ones are dropped.
@@ -604,6 +605,15 @@ pub enum Dialog {
         /// Ticks left before a/s/d are accepted ([`PERMISSION_ARM_TICKS`] when
         /// the dialog opens); the dialog shows "keys enabled shortly" until 0.
         ticks_until_armed: u8,
+        /// First summary row on screen.
+        scroll: usize,
+        /// Summary rows `0..seen_rows` have been on screen (contiguously
+        /// from the top, at the current terminal size).
+        seen_rows: usize,
+        /// The whole summary has been on screen: a and s are accepted only
+        /// then (d and Esc never need it). Kept in step by
+        /// [`AppState::sync_permission_view`].
+        seen_end: bool,
     },
     NewAgent(NewAgentForm),
     NewWorkspace(NewWorkspaceForm),
@@ -621,6 +631,9 @@ impl Dialog {
             permission,
             sending: false,
             ticks_until_armed: PERMISSION_ARM_TICKS,
+            scroll: 0,
+            seen_rows: 0,
+            seen_end: false,
         }
     }
 
@@ -628,6 +641,16 @@ impl Dialog {
     pub fn permission_armed(&self) -> bool {
         !matches!(self, Self::Permission { ticks_until_armed, .. } if *ticks_until_armed > 0)
     }
+}
+
+/// How the permission dialog's summary scrolls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScrollMotion {
+    Lines(isize),
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 #[derive(Debug, Clone)]
@@ -808,6 +831,60 @@ impl AppState {
         }
         self.dialog = Some(dialog);
         self.focus = Focus::Dialog;
+        self.sync_permission_view(true);
+    }
+
+    /// Recompute what a permission dialog shows after it opened, was
+    /// scrolled or the terminal changed size. `reset` starts reading over
+    /// (the rows themselves change when the width does).
+    ///
+    /// `seen_end` needs every summary row to have been on screen, reached
+    /// by scrolling from the top: jumping to the end does not count, since
+    /// the rows in between were never visible.
+    pub(super) fn sync_permission_view(&mut self, reset: bool) {
+        let size = self.size;
+        let Some(Dialog::Permission {
+            permission,
+            scroll,
+            seen_rows,
+            seen_end,
+            ..
+        }) = &mut self.dialog
+        else {
+            return;
+        };
+        let layout = permission_layout(size, &permission.summary);
+        if reset {
+            *scroll = 0;
+            *seen_rows = 0;
+        }
+        *scroll = (*scroll).min(layout.max_scroll());
+        if layout.visible_rows > 0 && *scroll <= *seen_rows {
+            *seen_rows = (*seen_rows).max(*scroll + layout.visible_rows);
+        }
+        *seen_end = layout.visible_rows > 0 && *seen_rows >= layout.rows.len();
+    }
+
+    /// Scroll the permission dialog's summary.
+    pub(super) fn scroll_permission(&mut self, motion: ScrollMotion) {
+        let size = self.size;
+        let Some(Dialog::Permission {
+            permission, scroll, ..
+        }) = &mut self.dialog
+        else {
+            return;
+        };
+        let layout = permission_layout(size, &permission.summary);
+        let page = layout.visible_rows.max(1);
+        let max = layout.max_scroll();
+        *scroll = match motion {
+            ScrollMotion::Lines(delta) => scroll.saturating_add_signed(delta).min(max),
+            ScrollMotion::PageUp => scroll.saturating_sub(page),
+            ScrollMotion::PageDown => (*scroll + page).min(max),
+            ScrollMotion::Home => 0,
+            ScrollMotion::End => max,
+        };
+        self.sync_permission_view(false);
     }
 
     pub(super) fn close_dialog(&mut self) {

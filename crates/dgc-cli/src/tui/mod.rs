@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod input;
+pub mod layout;
 pub mod render;
 pub mod state;
 pub mod update;
