@@ -103,6 +103,7 @@
 - 2026-11-26 (M3 Task 1): macOS の集中テスト（`verify.sh macos`）のフィルタは `process_group`、`terminate_`（プロセスグループと
   SIGTERM→SIGKILL）、`socket`（unix ソケットのモード・残骸・パス長）、`hello`（全接続が通る peer credential 検査を経る RPC）、
   `autostart`（デーモンの自動起動）、`tui::`。各フィルタが 1 件以上に一致することを Linux で確認済み（下の検証記録）。
+  （最終レビュー修正で置き換え。下の 2026-11-26 M3 最終レビュー修正 2 を参照）
 - 2026-11-26 (M3 Task 2): README は `dgc` オーケストレーターだけを説明する（約 430 行。旧ランタイムの節はすべて削除）。M1/M2 でレビュー済みの
   節を土台にし、各コマンド・フラグは `target/debug/dgc --help` と各サブコマンドの help、キーと挙動は `crates/dgc-cli` の実装で確認した。
   追加した記述: 目的（ローカル専用・認証情報に触れない）、要件と動作確認版、`cargo install --locked --path crates/dgc-cli`（実行して確認）、
@@ -562,6 +563,22 @@
   ときだけそれを閉じて新しいエージェントを選択する。Esc で閉じた後なら、ツリーに追加するだけでカーソルは動かさない（以前は選択が新しい
   エージェントに飛び、利用者の `x`/`r`/`A` がそちらに当たった）。その間に開いた別のフォーム（submitting でない）は閉じない。
   同じ扱いを `workspace.create` にも適用した（ブリーフは agent のみ。カーソルが飛ぶと次の `n` が意図しないワークスペースに作るため、同じ誤対象の類）。
+- 2026-11-26 (M3 最終レビュー修正、コントローラ裁定): 7 項目を修正。(1) CLI テストは `dgc-daemon` の `dgc-fake-provider`（裁定 R3、
+  `dgc` の隣のバイナリ）を使う。`-p dgc-cli` や `--test` 指定ではビルドされず、クリーンビルドでは "dgc-fake-provider is missing" で落ち、
+  古い target では古い偽プロバイダが黙って使われる。workflow.md の CLI 行を「先に `cargo build --locked -p dgc-daemon --bin
+  dgc-fake-provider`、または `bash scripts/verify.sh test <name>`（ワークスペース全体をビルド）」に変え、理由を明記。テストの panic
+  メッセージにもビルドコマンドを書いた。AGENTS.md と README の開発者向け節に同じ落とし穴はなかった（README は verify.sh のみ）。
+  (2) `verify.sh macos` は `MACOS_FILTERS` をやめて `cargo test --locked --workspace` 全体を実行する（0 件拒否は維持）。フィルタでは
+  store の権限・symlink、flock、`--test process` の大半、`no_tcp_listener`、`second_daemon_is_refused`、`foreground_run_stops_on_sigterm`、
+  `run_detach…`、ワークスペースの symlink/パス安全性（macOS では `/var` → `/private/var`）が実行されなかった。上の Task 1 の
+  フィルタ決定を置き換える。workflow.md・AGENTS.md の説明も合わせた。CI の macOS ジョブは `bash scripts/verify.sh macos` のまま。
+  (3) `check-sensitive-logging.py` の対象を `crates/*/src` 全体（glob で発見するので新 crate も入る）に広げた（41 ファイル、既存コードに
+  誤検出なし）。`EXPECTED_CRATES`（protocol/daemon/client/cli）のどれかの `src` がなければ失敗（全部ないときだけでなく）。上の Task 1 の
+  対象範囲の決定を置き換える。AGENTS.md・architecture.md・workflow.md を更新。(4) README の権限ダイアログの無効時間を "about 0.75 s" から
+  "0.5-0.75 s" に。(5) README の保存先を AGENTS.md と同じ記述（`events.jsonl`、`queue.json`、エージェント記録のタイトル）に。
+  (6) README 冒頭の安全性の要約に、interrupt/デーモン停止での要求のキャンセル（deny/cancel）と、`--mode` なしでは provider の既定モードが
+  確認なしに動く範囲を決めることを追記し、Security properties and limits へリンク。(7) 上記の保留項目（M0 の rust-version）を解決済みにした。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -945,6 +962,18 @@
     | `bash scripts/verify.sh tui-deps` | PASS |
     | `bash scripts/verify.sh macos` | 環境で実行不可（Linux。Task 1 で 6 フィルタを Linux で確認済み） |
 
+- 2026-11-26 M3 最終レビュー修正（Linux、固定ツールチェーン 1.99.0）。スクリプトの変更はテストを先に書いて RED を確認:
+  `python3 -m unittest discover -s scripts/tests` が 1 FAIL（`test_macos_mode_runs_the_whole_workspace_test_suite`: 旧コードは 6 フィルタ）
+  + 12 ERROR（`EXPECTED_CRATES` が未定義）。GREEN: 40 tests OK。
+  | コマンド | 結果 |
+  |---|---|
+  | 旧 CLI 集中コマンド（`CARGO_TARGET_DIR` を空の scratch にして `cargo test --locked -p dgc-cli --test agent_cli`） | 再現: `dgc-fake-provider is missing`（`tests/common/mod.rs:22` の panic） |
+  | 新コマンド（空の scratch target で `cargo build --locked -p dgc-daemon --bin dgc-fake-provider && cargo test --locked -p dgc-cli --test agent_cli --test daemon_cli --test workspace_cli`） | PASS（12 + 7 + 3 passed） |
+  | `python3 scripts/check-sensitive-logging.py` | PASS（41 files、既存コードに誤検出なし） |
+  | `bash scripts/verify.sh guidance` | PASS（40 tests） |
+  | `TMPDIR=/var/tmp bash scripts/verify.sh rust` | PASS（fmt、clippy `-D warnings`、test 576 executed） |
+  | `bash scripts/verify.sh macos` | 環境で実行不可（Linux）。コマンドは `cargo test --locked --workspace` に変更（unit test で確認） |
+
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 
 M2 最終レビューで扱いを決める。（3 件目は修正ラウンド 1 でバグと裁定され修正済み。他は使い勝手の指摘。）
@@ -969,8 +998,9 @@ M2 最終レビューで扱いを決める。（3 件目は修正ラウンド 1 
   `allow --session`・resume 後の policy）は検証記録 B に記録。未検証で残るのは Codex の `thread/resume` の `excludeTurns:true`
   （コードは `true` を送る。記録 `resume_exclude_turns.jsonl` は resume 応答までで、その後のターンは未記録。2026-11-26 に
   「現状は `false`」の誤記を訂正）と、`decline` が提示される承認種別（コマンド承認では提示されなかった）のみ。
-- M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
-  の一致を検査していない。M1 で crate を増やす前に `check_ci` へ一致検査を足すとよい。
+- （M3 で解決）M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
+  の一致を検査していない。M3 でルートの `[package]` がなくなり（仮想ワークスペース）、MSRV は `[workspace.package]` の 1 か所になった。
+  `check_ci` はその値と CI の msrv ジョブ、rust-toolchain を照合する。
 - M0 最終レビュー由来: `test_rust_and_test_modes_cover_workspace` は rust モードの clippy が
   消えても通る（空リストに `all`）。`assertTrue(clippy)` を足す。
 - M0 最終レビュー由来: `crates/dgc-cli/tests/version.rs` は版を直書き。`env!("CARGO_PKG_VERSION")` を使う。

@@ -69,7 +69,7 @@ Do not weaken these.
   text: IDs, states, error kinds only. That text is stored only in the agent's
   0600 state files (`events.jsonl`, `queue.json`, and the agent record, whose
   title defaults to the prompt's first line). `check-sensitive-logging.py`
-  enforces this for the provider, agent and TUI modules.
+  enforces this for every `crates/*/src` directory.
 - Worktree deletion only for dgc-owned workspaces whose path is inside the
   managed worktree directory, with the archive safety check (no uncommitted or
   untracked work, no commits outside the base) unless `--force`; destructive
@@ -130,7 +130,7 @@ version.
   `bash scripts/verify.sh rust` (fmt check, warning-free Clippy, locked tests).
 - Docs and development-script changes: `bash scripts/verify.sh guidance`.
 - Dependency/MSRV changes also `msrv`; TUI or dependency graph changes also
-  `tui-deps`; `macos` (CI, or on a Mac) covers process, socket and TUI code.
+  `tui-deps`; `macos` (CI, or on a Mac) runs the whole workspace suite on macOS.
 - Reuse passed checks until relevant files change. Report command, result and
   blocked checks; blocked checks are not passes. Real-provider checks are
   manual (login, tokens) and recorded in PROGRESS.

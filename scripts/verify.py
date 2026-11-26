@@ -16,11 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 TEST_RESULT = re.compile(r"test result: \w+\. (\d+) passed; (\d+) failed;")
 UNITTEST_RESULT = re.compile(r"^Ran (\d+) tests? in ", re.M)
 UNITTEST_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
-# Test-name filters for the code whose behavior depends on the Unix platform:
-# process groups and their termination, the unix socket server (file modes and
-# the peer-credential check every connection passes through `hello`), daemon
-# autostart, and the terminal UI.
-MACOS_FILTERS = ("process_group", "terminate_", "socket", "hello", "autostart", "tui::")
 
 
 def workspace_rust_version(root):
@@ -89,7 +84,9 @@ def commands(mode, test_filter, root):
     if mode == "macos":
         if sys.platform != "darwin":
             raise ValueError("macos checks require macOS; this platform cannot supply macOS evidence")
-        return [(["cargo", "test", "--locked", "--workspace", name], True) for name in MACOS_FILTERS]
+        # The whole workspace, not name filters: filters would skip the symlink,
+        # permission and path-safety tests that matter most on macOS.
+        return [(["cargo", "test", "--locked", "--workspace"], True)]
     if mode == "tui-deps":
         return [([sys.executable, "scripts/check-tui-deps.py"], False)]
     raise ValueError(f"Unknown mode: {mode}")

@@ -34,9 +34,15 @@ needed.
 | Daemon: store, event log, workspaces, process, server | `cargo test --locked -p dgc-daemon` (narrow with `--test store`, `--test workspace`, `--test server`, ...) | `rust`; `macos` in CI for process/socket code |
 | Agent manager, provider adapters | `cargo test --locked -p dgc-daemon --test agent_manager --test claude_adapter --test codex_adapter` | `rust`; manual real-provider check recorded in PROGRESS when wire behavior changes |
 | Client (`dgc-client`) | `cargo test --locked -p dgc-client` | `rust` |
-| CLI commands and output | `cargo test --locked -p dgc-cli --test agent_cli --test daemon_cli --test workspace_cli` | `rust`; README for visible changes |
+| CLI commands and output | `cargo build --locked -p dgc-daemon --bin dgc-fake-provider && cargo test --locked -p dgc-cli --test agent_cli --test daemon_cli --test workspace_cli`, or `bash scripts/verify.sh test <name>` | `rust`; README for visible changes |
 | TUI | `bash scripts/verify.sh test tui::` | `rust`, `tui-deps`, manual TUI run and screenshot/recording |
 | Cargo, dependencies, MSRV | Affected tests and builds | `rust`, `msrv`, `tui-deps` when the TUI graph changes |
+
+The CLI tests drive the sibling `dgc-fake-provider` binary, which belongs to
+`dgc-daemon`. Selecting `-p dgc-cli` or a `--test` target does not build it, so a
+clean build panics with "dgc-fake-provider is missing" and an old target dir
+silently runs a stale fake. Build the provider first (as in the table) or use
+`bash scripts/verify.sh test <name>`, which builds the whole workspace.
 
 `rust` runs `cargo fmt --all --check`,
 `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and
@@ -44,9 +50,10 @@ needed.
 it. `test` mode runs `cargo test --locked --workspace <filter>`. `msrv` runs
 `cargo check --locked --workspace` with the workspace `rust-version` via
 `rustup run`; install the matching toolchain separately when needed. A missing
-toolchain is an environment blocker. `macos` runs the platform-dependent tests
-(process groups, termination, the Unix socket, `hello`, autostart, `tui::`) and
-works only on macOS. `tui-deps` verifies that the declared Crossterm backend is
+toolchain is an environment blocker. `macos` runs the whole
+`cargo test --locked --workspace` suite (zero-test rejection kept) and works only
+on macOS; name filters would skip the symlink, permission and path-safety tests
+that matter most there (`/var` is a symlink to `/private/var`). `tui-deps` verifies that the declared Crossterm backend is
 active and legacy 0.28 metadata is inactive. `guidance` runs the guidance
 checker, the sensitive-logging checker and the development-script tests.
 
@@ -71,8 +78,8 @@ tracked guidance (README, AGENTS.md, `docs/ai/`), that `CLAUDE.md` imports
 AGENTS.md, that CI runs the wrapper's Rust gate and the MSRV/toolchain versions
 agree, and that this file quotes each Rust gate command.
 `python3 scripts/check-sensitive-logging.py` rejects `tracing` macro calls that
-use known content identifiers (prompt, output, permission text) in the provider,
-agent and TUI modules; it matches identifiers in source text and cannot prove
+use known content identifiers (prompt, output, permission text) anywhere under
+`crates/*/src` (and fails when an expected crate's `src` is missing); it matches identifiers in source text and cannot prove
 what a runtime value contains. Behavior
 belongs in Rust tests; do not add prose or source-text checks that claim
 runtime correctness.

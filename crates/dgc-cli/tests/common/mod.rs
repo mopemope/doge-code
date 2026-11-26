@@ -21,8 +21,8 @@ pub fn fake_provider() -> PathBuf {
     let fake = Path::new(env!("CARGO_BIN_EXE_dgc")).with_file_name("dgc-fake-provider");
     assert!(
         fake.is_file(),
-        "{} is missing: run the tests with --workspace (scripts/verify.sh does) so dgc-daemon's \
-         fake provider is built",
+        "{} is missing: run `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` first, \
+         or run the tests with --workspace (scripts/verify.sh does)",
         fake.display()
     );
     fake

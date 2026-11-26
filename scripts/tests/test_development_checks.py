@@ -16,9 +16,6 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 VIRTUAL_MANIFEST = ('[workspace]\nmembers = ["crates/*"]\nresolver = "3"\n\n'
                     '[workspace.package]\nedition = "2024"\nrust-version = "{version}"\n'
                     'version = "0.1.0"\n')
-# macOS focused tests: process groups, the unix socket server (permissions and
-# peer credentials on every connection), daemon autostart, and the terminal UI.
-MACOS_FILTERS = ("process_group", "terminate_", "socket", "hello", "autostart", "tui::")
 
 
 def load_module(name, filename):
@@ -92,13 +89,12 @@ class VerificationTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 verify.commands("msrv", None, root)
 
-    def test_macos_mode_runs_the_orchestrator_platform_tests(self):
+    def test_macos_mode_runs_the_whole_workspace_test_suite(self):
+        # Filters would skip the symlink, permission and path-safety tests that
+        # matter most on macOS (/var is a symlink to /private/var).
         with patch.object(verify.sys, "platform", "darwin"):
             checks = verify.commands("macos", None, SCRIPTS.parent)
-        self.assertEqual([argv[-1] for argv, _ in checks], list(MACOS_FILTERS))
-        for argv, require_tests in checks:
-            self.assertEqual(argv[:4], ["cargo", "test", "--locked", "--workspace"], argv)
-            self.assertIs(require_tests, True)
+        self.assertEqual(checks, [(["cargo", "test", "--locked", "--workspace"], True)])
 
     def test_macos_mode_refuses_other_platforms(self):
         with patch.object(verify.sys, "platform", "linux"), self.assertRaises(ValueError):

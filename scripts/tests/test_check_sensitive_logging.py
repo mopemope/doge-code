@@ -31,6 +31,9 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        # Every expected crate has a source directory unless a test removes one.
+        for crate in CHECKER.EXPECTED_CRATES:
+            (self.root / "crates" / crate / "src").mkdir(parents=True)
 
     def test_reject_raw_identifiers(self):
         write_scope(
@@ -106,8 +109,8 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
         self.assertEqual(CHECKER.check_root(self.root), [])
 
     def test_outside_scope_is_ignored(self):
-        for rel in ("crates/dgc-daemon/src/store.rs", "crates/dgc-daemon/src/agentless.rs",
-                    "src/llm/fixture.rs"):
+        for rel in ("crates/dgc-daemon/tests/store.rs", "crates/dgc-daemon/build.rs",
+                    "crates/dgc-cli/tests/common/mod.rs", "src/llm/fixture.rs"):
             write_scope(
                 self.root,
                 rel,
@@ -130,16 +133,33 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
         errors = CHECKER.check_root(self.root)
         self.assertTrue(any("text" in e and "agent/actor.rs" in e for e in errors), errors)
 
-    def test_scope_covers_the_orchestrator_prompt_and_output_paths(self):
-        for rel in ("crates/dgc-daemon/src/provider/codex.rs", "crates/dgc-daemon/src/agent.rs",
-                    "crates/dgc-daemon/src/agent/actor.rs", "crates/dgc-cli/src/tui/render.rs"):
+    def test_scope_covers_every_crate_source_directory(self):
+        rels = ("crates/dgc-daemon/src/provider/codex.rs", "crates/dgc-daemon/src/store.rs",
+                "crates/dgc-daemon/src/agent/actor.rs", "crates/dgc-cli/src/tui/render.rs",
+                "crates/dgc-client/src/lib.rs", "crates/dgc-protocol/src/lib.rs")
+        for rel in rels:
             write_scope(self.root, rel, "fn f() {}\n")
         files = {path.relative_to(self.root).as_posix()
                  for path in CHECKER.collect_scope_files(self.root)}
-        self.assertEqual(files, {
-            "crates/dgc-daemon/src/provider/codex.rs", "crates/dgc-daemon/src/agent.rs",
-            "crates/dgc-daemon/src/agent/actor.rs", "crates/dgc-cli/src/tui/render.rs",
-        })
+        self.assertEqual(files, set(rels))
+
+    def test_scope_includes_crates_added_later(self):
+        write_scope(self.root, "crates/dgc-newcrate/src/lib.rs",
+                    'fn f() {\n  info!(prompt = %prompt, "x");\n}\n')
+        errors = CHECKER.check_root(self.root)
+        self.assertTrue(any("dgc-newcrate" in e and "prompt" in e for e in errors), errors)
+
+    def test_violation_in_a_non_agent_module_is_detected(self):
+        write_scope(self.root, "crates/dgc-client/src/lib.rs",
+                    'fn f() {\n  warn!(body = %body, "x");\n}\n')
+        errors = CHECKER.check_root(self.root)
+        self.assertTrue(any("dgc-client" in e and "body" in e for e in errors), errors)
+
+    def test_missing_expected_crate_source_directory_fails(self):
+        write_scope(self.root, "crates/dgc-daemon/src/agent.rs", "fn f() {}\n")
+        (self.root / "crates/dgc-client/src").rmdir()
+        errors = CHECKER.check_root(self.root)
+        self.assertTrue(any("dgc-client" in e and "missing" in e for e in errors), errors)
 
     def test_repository_scope_is_not_empty(self):
         # A moved module must not silently turn the check into a no-op.

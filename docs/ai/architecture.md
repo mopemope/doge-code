@@ -139,7 +139,7 @@ on every connection. dgc never reads provider credentials; providers inherit the
 daemon's environment. `tracing` (and so `daemon.log`) carries ids and states only;
 prompt and agent text is stored only in each agent's 0600 state files
 (`events.jsonl`, `queue.json`, the agent record's title), and
-`scripts/check-sensitive-logging.py` guards the modules that handle it. dgc never
+`scripts/check-sensitive-logging.py` guards every crate source directory. dgc never
 approves on the user's behalf: requests the provider raises wait for the user,
 and only an interrupt or shutdown cancels them (answered deny or cancel). What
 runs without a request is decided by the provider's mode and the user's provider
