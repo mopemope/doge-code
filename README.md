@@ -191,9 +191,12 @@ daemon-supplied text (agent output, summaries, errors) escaped (`\r`, `\t`,
 `\x1b`, `\u{202e}`; newlines are kept only where text may span lines), so a
 terminal escape cannot hide or rewrite what is displayed.
 
-Claude Code and Codex usage-limit notifications produce one `rate limited`
-event per turn at most. Its detail includes the provider, the reason, and
-the reset time in Unix seconds when reported.
+dgc records at most one `rate limited` event per turn. Claude Code rejection
+statuses, unknown statuses, and HTTP 429 errors trigger the event. Codex
+triggers it when a snapshot reports a reached limit or when a usage-limit or
+rate-limit error ends without retrying. The detail includes the provider,
+a reason token of up to 48 characters, and the reset time in Unix seconds
+when available.
 
 ## Terminal UI
 

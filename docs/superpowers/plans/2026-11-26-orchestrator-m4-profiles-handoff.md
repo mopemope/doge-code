@@ -17,15 +17,16 @@
 - 引き継ぎ先のモードは、指定がなければ引き継ぎ先プロバイダの既定（自動承認なし）。自動承認系モードは明示指定のときだけで、CLI は従来どおり警告行を出す。
 - プロファイルは `config.toml` の `[profiles.<name>]`（`provider`、`model`、`mode`、`notes` すべて文字列、provider 以外は任意）。未知のキーは起動エラー（既存の `deny_unknown_fields`）。プロファイル名は `[A-Za-z0-9_-]{1,32}`。
 - 上限検知の条件（記録データとスキーマからの推定。実際の上限到達は未観測なので README に明記）:
-  - Claude: `rate_limit_event` の `rate_limit_info.status` が `"allowed"` 以外、または `result` / assistant エラー行の `api_error_status == 429`。
-  - Codex: `error` 通知の `codexErrorInfo` が `usageLimitExceeded` か `rateLimitExceeded`、または `account/rateLimits/updated` の `rateLimitReachedType` が null 以外。
-  - 同じターン内では 1 回だけ `RateLimited` を出す。`detail` は正規化した `{ "provider", "reason", "resets_at"? }`（数値・列挙のみ。アカウント情報やプラン名は含めない）。
+  - Claude: `rate_limit_event` の `rate_limit_info.status` が `"rejected"` または未知の文字列（`"allowed"` と `"allowed_warning"` は無視）、または `result` / assistant エラー行の `api_error_status == 429`。
+  - Codex: `willRetry` が false または省略された `error` 通知の `codexErrorInfo` が `usageLimitExceeded` か `rateLimitExceeded`、または `account/rateLimits/updated` の `rateLimitReachedType` が null 以外。
+  - Codex の `resets_at` は `primary` / `secondary` のうち `usedPercent >= 100` のウィンドウにある最小の整数 `resetsAt`。該当するウィンドウがなければ両方を対象とする。
+  - 同じターン内では 1 回だけ `RateLimited` を出す。`detail` は正規化した `{ "provider", "reason", "resets_at"? }`。`reason` は `[A-Za-z0-9_]` 以外を `_` に置換し、48 文字までとする。アカウント情報やプラン名は含めない。
 - 新しい依存なし。既存のセキュリティ不変条件と TUI の権限安全規則（AGENTS.md）を弱めない。
 - テストは偽プロバイダとシナリオ（上限到達のシナリオは合成と明記）で行う。
 
 ## Review Focus
 
-1. 上限検知の誤検知: 通常の `rate_limit_event`（`allowed`）や `rateLimitReachedType: null` で `RateLimited` を出さない（Task 2 にテスト）。
+1. 上限検知の誤検知: `allowed`、`allowed_warning`、Codex の `willRetry: true` のエラーや `rateLimitReachedType: null` で `RateLimited` を出さない（Task 2 にテスト）。
 2. 引き継ぎ文に秘密が混ざる経路: アカウント情報・環境変数・認証ファイルは含めない（Task 4 にテスト。含めるのは元エージェントのイベントと git の出力だけ）。
 3. 引き継ぎ中に元エージェントが動いている: 元エージェントは止めない（ユーザーが判断）。引き継ぎ先は同じワークスペースで並行に動きうることを README に書く。
 4. TUI の提案表示が権限ダイアログや入力の安全規則を崩さない（提案は表示だけ、確認ダイアログは別、キーは `H` のみ）。

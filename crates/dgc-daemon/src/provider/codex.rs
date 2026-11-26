@@ -72,8 +72,8 @@
 //!     the server's request id as JSON text (e.g. `"0"`). Other server
 //!     requests (e.g. `mcpServer/elicitation/request`) get the JSON-RPC error
 //!     -32601 and an `Error` event naming the method.
-//!   - An `error` with `usageLimitExceeded` or `rateLimitExceeded`, or
-//!     `account/rateLimits/updated` with a reached type, → `RateLimited`
+//!   - A terminal `error` with `usageLimitExceeded` or `rateLimitExceeded`,
+//!     or an `account/rateLimits/updated` with a reached type, → `RateLimited`
 //!     once per turn. Routine account updates are dropped.
 //!   - An oversized stdout line → `Error` and the session continues.
 //!   - Anything else is ignored with a debug log of its method.
@@ -112,7 +112,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 use tracing::debug;
 
-use super::{AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession};
+use super::{
+    AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
+    rate_limited_event,
+};
 use crate::process::{ChildIo, ChildProcess, ChildSpec, LineEvent, TailBuffer};
 
 /// `--mode` values for Codex.
@@ -428,11 +431,7 @@ impl State {
             return Vec::new();
         }
         self.rate_limit_emitted = true;
-        let mut detail = json!({"provider": "codex", "reason": reason});
-        if let Some(resets_at) = resets_at {
-            detail["resets_at"] = json!(resets_at);
-        }
-        vec![ProviderEvent::Event(EventKind::RateLimited { detail })]
+        vec![rate_limited_event(ProviderKind::Codex, reason, resets_at)]
     }
 
     fn ignores_turn(&self, turn_id: &str) -> bool {
@@ -1024,16 +1023,20 @@ fn notification(state: &mut State, method: &str, params: &Value) -> Vec<Provider
             Vec::new()
         }
         "error" => {
-            if params["willRetry"].as_bool() == Some(true) {
+            let will_retry = params.get("willRetry");
+            if matches!(will_retry, Some(Value::Bool(true))) {
                 debug!("codex reported a retried error");
-            } else if let Some(turn_id) = params["turnId"].as_str() {
+                return Vec::new();
+            }
+            if let Some(turn_id) = params["turnId"].as_str() {
                 let message = params["error"]["message"].as_str().unwrap_or("");
                 state.turn_error = Some((turn_id.to_owned(), truncate_summary(message)));
             }
-            match params["error"]["codexErrorInfo"].as_str() {
-                Some(reason @ ("usageLimitExceeded" | "rateLimitExceeded")) => {
-                    state.rate_limited(reason, None)
-                }
+            match (will_retry, params["error"]["codexErrorInfo"].as_str()) {
+                (
+                    None | Some(Value::Bool(false)),
+                    Some(reason @ ("usageLimitExceeded" | "rateLimitExceeded")),
+                ) => state.rate_limited(reason, None),
                 _ => Vec::new(),
             }
         }
@@ -1044,9 +1047,17 @@ fn notification(state: &mut State, method: &str, params: &Value) -> Vec<Provider
                 debug!("dropped routine codex rate limit update");
                 return Vec::new();
             };
-            let resets_at = ["primary", "secondary"]
+            let windows = [&snapshot["primary"], &snapshot["secondary"]];
+            let is_blocked = |window: &Value| {
+                window["usedPercent"]
+                    .as_i64()
+                    .is_some_and(|used| used >= 100)
+            };
+            let has_blocked_window = windows.into_iter().any(is_blocked);
+            let resets_at = windows
                 .into_iter()
-                .filter_map(|window| snapshot[window]["resetsAt"].as_i64())
+                .filter(|window| !has_blocked_window || is_blocked(window))
+                .filter_map(|window| window["resetsAt"].as_i64())
                 .min();
             state.rate_limited(reason, resets_at)
         }

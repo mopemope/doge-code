@@ -208,10 +208,12 @@ initialize → user を送る。`system/init` と `result` の `session_id` は*
 ```
 
 制限に達していなくても API 呼び出しごとに出る。観測した `status` は `"allowed"` のみで、上限到達時の実際の
-`rate_limit_event`、`assistant`、`result` は**未観測**。dgc は、記録した通常応答と API エラー行の形式に基づき、
-`rate_limit_info.status` が `"allowed"` 以外の文字列なら、その値を理由として `rate_limited` を記録する。
-`rate_limit_info.resetsAt` が整数ならリセット時刻も記録する。`assistant` または `result` 行で
-`api_error_status` が整数の `429` の場合は、理由を `http_429` とする。到達ケースは
+`rate_limit_event`、`assistant`、`result` は**未観測**。dgc は `rate_limit_info.status` が `"rejected"` または
+未知の文字列の場合に、その値を正規化して `rate_limited` の理由とする。`"allowed"` と上限に近づいたことを示す
+`"allowed_warning"` はデバッグログのみ。 [Claude Agent SDK の型定義](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py)
+
+`rate_limit_info.resetsAt` が整数ならリセット時刻も記録する。記録した API エラー行の形式に基づき、`assistant` または
+`result` 行で `api_error_status` が整数の `429` の場合は、理由を `http_429` とする。到達ケースは
 `claude/scenarios/rate_limited_*.jsonl` の合成シナリオで検証する。
 
 ### その他の出力（無視してよいもの）
@@ -376,12 +378,16 @@ stderr にはモデルエラーは出ない。stderr には tracing ログ（ANS
 観測した `rateLimitReachedType` は `null` のみで、上限到達時の実際の通知は**未観測**。dgc は、Codex CLI 0.172.0 の
 app-server 生成スキーマに基づき、次のどちらかで `rate_limited` を記録する。
 
-- `ErrorNotification` の `params.error.codexErrorInfo` が `usageLimitExceeded` または `rateLimitExceeded`。
+- `ErrorNotification` の `params.error.codexErrorInfo` が `usageLimitExceeded` または `rateLimitExceeded` で、
+  `willRetry` が false または省略されている。再試行するエラーはデバッグログのみ。
 - `AccountRateLimitsUpdatedNotification` の `params.rateLimits.rateLimitReachedType` が非 null の列挙値。
-  `primary` と `secondary` に整数の `resetsAt` があれば、そのうち最も早い時刻も記録する。
+  `primary` と `secondary` のうち `usedPercent >= 100` のウィンドウを優先し、その中で最も早い整数の `resetsAt` を記録する。
+  どちらも 100% 未満か未報告なら両方を対象とする。`individualLimit` は対象外。
 
 該当する列挙値を理由とし、`rateLimitReachedType: null` の通知は無視する。到達ケースは
 `codex/scenarios/rate_limited_*.jsonl` の合成シナリオで検証する。
+
+両プロバイダとも、`reason` の `[A-Za-z0-9_]` 以外の文字は `_` に置換し、先頭 48 文字を記録する。
 
 ---
 

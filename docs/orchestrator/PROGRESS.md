@@ -95,6 +95,10 @@
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
 
+- 2026-11-26 (M4 Task 2、レビュー決定): Claude の `allowed` と `allowed_warning` は通知を抑止し、`rejected`、未知の文字列ステータス、HTTP 429 を検知する。
+  Codex の再試行するエラーは通知を抑止する。リセット時刻は `primary` / `secondary` の 100% 以上のウィンドウから最小値を選び、該当がなければ両方を対象にする。
+  両アダプタの理由は ASCII 英数字と `_` の最大 48 文字とし、記録済みシナリオで `RateLimited` が出ないことを明示的に検証する。
+
 - 2026-11-26 (M4 Task 1): TUI は選択時に `tail=2000` を 1 ページ要求し、RPC では直近 1000 件かつ 768 KiB に収まる範囲を返す。
   最後の 1 件だけで予算を超える場合はその 1 件を返す。初回取得までのライブイベントが保留上限を超えた場合は、
   取得済みの末尾から順方向に補う。再接続・lagged 後も初回の取得後は順方向に継続する。
@@ -601,6 +605,12 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-26 M4 Task 2 レビュー修正（Linux、Rust 1.99.0）:
+  - RED: Claude の警告、両プロバイダの未正規化の理由、Codex の再試行エラーとリセット時刻の選択を再現。
+    通常の通知を誤検知させる一時的な変更で、記録済みの Claude resume と Codex steer のアサーションが失敗することも確認。
+  - GREEN: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter` で Claude 20 件、Codex 28 件 PASS。
+    `cargo fmt --all`、4 crate の全ターゲット・全機能の Clippy、`bash scripts/verify.sh rust`（604 件）、`guidance` PASS。
 
 - 2026-11-26 M4 Task 2（Linux、Rust 1.99.0）:
   - RED: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter --no-fail-fast` で

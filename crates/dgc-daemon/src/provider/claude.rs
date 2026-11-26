@@ -25,8 +25,8 @@
 //!   - `control_request` `can_use_tool` → `PermissionRequested` (`Bash` →
 //!     Command, `Edit|Write|MultiEdit|NotebookEdit` → FileChange, others →
 //!     Tool); other control requests are answered with an error response.
-//!   - `rate_limit_event` with a status other than `allowed`, or HTTP 429 in
-//!     an `assistant` or `result` row, → `RateLimited` once per turn.
+//!   - `rate_limit_event` with `rejected` or an unknown status, or HTTP 429
+//!     in an `assistant` or `result` row, → `RateLimited` once per turn.
 //!   - An oversized stdout line → `Error` and the session continues.
 //!   - Anything else (hook and thinking-token `system` lines, unknown types)
 //!     is ignored with a debug log of its type.
@@ -71,7 +71,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 use tracing::{debug, warn};
 
-use super::{AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession};
+use super::{
+    AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
+    rate_limited_event,
+};
 use crate::process::{ChildIo, ChildProcess, ChildSpec, LineEvent, TailBuffer};
 
 /// `--permission-mode` values accepted by Claude Code 2.1.332.
@@ -292,11 +295,7 @@ impl State {
             return None;
         }
         self.rate_limit_emitted = true;
-        let mut detail = json!({"provider": "claude", "reason": reason});
-        if let Some(resets_at) = resets_at {
-            detail["resets_at"] = json!(resets_at);
-        }
-        Some(ProviderEvent::Event(EventKind::RateLimited { detail }))
+        Some(rate_limited_event(ProviderKind::Claude, reason, resets_at))
     }
 }
 
@@ -702,7 +701,7 @@ async fn handle_line(shared: &Shared, text: &str) -> Vec<ProviderEvent> {
         "rate_limit_event" => {
             let info = &message["rate_limit_info"];
             match info["status"].as_str() {
-                Some("allowed") => {
+                Some("allowed" | "allowed_warning") => {
                     debug!("dropped routine claude rate limit update");
                     Vec::new()
                 }

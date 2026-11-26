@@ -36,7 +36,7 @@ use std::pin::Pin;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::AgentId;
 use dgc_protocol::model::{Decision, PermissionKind, ProviderKind};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 /// Boxed `Send` future returned by the provider traits.
@@ -72,6 +72,29 @@ pub enum ProviderEvent {
     TurnCompleted { usage: Option<Value> },
     /// The provider process ended unexpectedly.
     Exited { success: bool, stderr_tail: String },
+}
+
+fn rate_limited_event(
+    provider: ProviderKind,
+    reason: &str,
+    resets_at: Option<i64>,
+) -> ProviderEvent {
+    let reason: String = reason
+        .chars()
+        .take(48)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut detail = json!({"provider": provider, "reason": reason});
+    if let Some(resets_at) = resets_at {
+        detail["resets_at"] = json!(resets_at);
+    }
+    ProviderEvent::Event(EventKind::RateLimited { detail })
 }
 
 #[derive(Debug, thiserror::Error)]

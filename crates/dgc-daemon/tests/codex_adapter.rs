@@ -27,6 +27,10 @@ use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
 
+#[path = "support/provider_events.rs"]
+mod provider_events;
+use provider_events::{assert_no_rate_limited, rate_limited_details};
+
 /// Longer than the fake's own 10 s wait, so a stuck exchange shows up as the
 /// fake's timeout exit (with its stderr) rather than a bare test timeout.
 const EVENT_WAIT: Duration = Duration::from_secs(15);
@@ -178,6 +182,7 @@ async fn codex_simple_turn() {
     let mut session = start(&adapter, spec(&dir, None, None)).await;
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(events[0], session_started(SIMPLE_THREAD));
     assert_eq!(events[1], text("pong", true));
@@ -195,12 +200,7 @@ async fn codex_rate_limit_event_routine_update_is_dropped() {
     let mut session = start(&adapter, spec(&dir, None, None)).await;
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, ProviderEvent::Event(EventKind::RateLimited { .. }))),
-        "{events:?}"
-    );
+    assert_no_rate_limited(&events);
     shutdown_quietly(session).await;
 }
 
@@ -217,23 +217,13 @@ async fn rate_limit_turns(name: &str, count: usize) -> Vec<Vec<ProviderEvent>> {
     turns
 }
 
-fn rate_limited_details(events: &[ProviderEvent]) -> Vec<&Value> {
-    events
-        .iter()
-        .filter_map(|event| match event {
-            ProviderEvent::Event(EventKind::RateLimited { detail }) => Some(detail),
-            _ => None,
-        })
-        .collect()
-}
-
 #[tokio::test]
 async fn codex_usage_limit_error_emits_rate_limited() {
-    let turns = rate_limit_turns("rate_limited_error", 2).await;
-    for (turn, reason) in turns
-        .iter()
-        .zip(["usageLimitExceeded", "rateLimitExceeded"])
-    {
+    let turns = rate_limit_turns("rate_limited_error", 3).await;
+    for (turn, reason) in [
+        (&turns[0], "usageLimitExceeded"),
+        (&turns[2], "rateLimitExceeded"),
+    ] {
         assert_eq!(
             rate_limited_details(turn),
             [&json!({"provider": "codex", "reason": reason})]
@@ -247,29 +237,64 @@ async fn codex_usage_limit_error_emits_rate_limited() {
 }
 
 #[tokio::test]
+async fn codex_retried_limit_errors_are_ignored() {
+    let turns = rate_limit_turns("rate_limited_error", 3).await;
+    assert_no_rate_limited(&turns[1]);
+    assert!(
+        !turns[1]
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Event(EventKind::Error { .. }))),
+        "{:?}",
+        turns[1]
+    );
+}
+
+#[tokio::test]
 async fn codex_rate_limit_reached_type_emits_rate_limited() {
-    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    let turns = rate_limit_turns("rate_limited_snapshot", 4).await;
     let details = rate_limited_details(&turns[0]);
     let detail = details
         .first()
         .expect("reached limit event with a reset time");
     assert_eq!(detail["reason"], "rate_limit_reached");
-    assert_eq!(detail["resets_at"], 1700003600);
+    assert_eq!(detail["resets_at"], 1700007200);
+}
+
+#[tokio::test]
+async fn codex_reset_time_prefers_blocked_windows() {
+    let turns = rate_limit_turns("rate_limited_snapshot", 4).await;
+    let details = rate_limited_details(&turns[0]);
+    assert_eq!(details[0]["resets_at"], 1700007200);
+
+    // The blocked window without a reset time still takes precedence.
     assert_eq!(
         rate_limited_details(&turns[1]),
         [&json!({"provider": "codex", "reason": "workspace_owner_usage_limit_reached"})]
+    );
+    // When neither window is blocked, use the earliest overall.
+    let details = rate_limited_details(&turns[3]);
+    assert_eq!(details[0]["resets_at"], 1700003600);
+}
+
+#[tokio::test]
+async fn codex_snapshot_reason_is_bounded_safe_token() {
+    let turns = rate_limit_turns("rate_limited_snapshot", 4).await;
+    let details = rate_limited_details(&turns[3]);
+    assert_eq!(
+        details[0]["reason"],
+        "A_z_9______0123456789abcdefghijklmnopqrstuvwxyz_"
     );
 }
 
 #[tokio::test]
 async fn codex_null_reached_type_is_ignored() {
-    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
-    assert!(rate_limited_details(&turns[2]).is_empty(), "{:?}", turns[2]);
+    let turns = rate_limit_turns("rate_limited_snapshot", 4).await;
+    assert_no_rate_limited(&turns[2]);
 }
 
 #[tokio::test]
 async fn rate_limited_is_emitted_once_per_turn() {
-    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    let turns = rate_limit_turns("rate_limited_snapshot", 4).await;
     for turn in &turns[..2] {
         assert_eq!(rate_limited_details(turn).len(), 1, "{turn:?}");
     }
@@ -277,11 +302,11 @@ async fn rate_limited_is_emitted_once_per_turn() {
 
 #[tokio::test]
 async fn rate_limited_detail_carries_no_account_data() {
-    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    let turns = rate_limit_turns("rate_limited_snapshot", 4).await;
     assert_eq!(
         rate_limited_details(&turns[0]).first().copied(),
         Some(&json!({
-            "provider": "codex", "reason": "rate_limit_reached", "resets_at": 1700003600
+            "provider": "codex", "reason": "rate_limit_reached", "resets_at": 1700007200
         }))
     );
 }
@@ -301,6 +326,7 @@ async fn codex_steer_without_active_turn_returns_false() {
         .expect("interrupt");
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events[1], text("pong", true), "{events:?}");
     // The turn has ended: steering is refused again.
     assert!(!session.steer("ignored").await.expect("steer"));
@@ -317,6 +343,7 @@ async fn codex_command_approval_accept() {
     session.send_user(TOUCH).await.expect("send_user");
 
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -349,6 +376,7 @@ async fn codex_command_approval_accept() {
         .await
         .expect("respond");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -374,6 +402,7 @@ async fn codex_file_change_decline() {
         .expect("send_user");
 
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[1],
@@ -401,6 +430,7 @@ async fn codex_file_change_decline() {
         .await
         .expect("respond");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -440,6 +470,7 @@ async fn codex_interrupt_uses_turn_id() {
     while let Ok(Some(event)) = timeout(Duration::from_millis(500), session.events().recv()).await {
         events.push(event);
     }
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 2, "{events:?}");
     assert_eq!(
         events[0],
@@ -469,6 +500,7 @@ async fn codex_interrupt_suppresses_only_that_turn() {
         .expect("interrupt");
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     let completed: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, ProviderEvent::TurnCompleted { .. }))
@@ -489,6 +521,7 @@ async fn codex_interrupt_cancels_pending_approval() {
     let mut session = start(&adapter, spec(&dir, Some("untrusted"), None)).await;
     session.send_user(TOUCH).await.expect("send_user");
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     let Some(ProviderEvent::PermissionRequested {
         provider_request_id,
         ..
@@ -509,6 +542,7 @@ async fn codex_interrupt_cancels_pending_approval() {
     );
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 2, "{events:?}");
     assert_eq!(events[0], text("pong", true));
     assert_eq!(usage_total_tokens(&events[1]), 23806);
@@ -541,6 +575,7 @@ async fn codex_steer_uses_expected_turn_id() {
     // The steered-away message never gets item/completed: it is flushed as
     // non-final text when the next message starts, and does not leak into it.
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 4, "{events:?}");
     assert_eq!(
         events[0],
@@ -580,6 +615,7 @@ async fn codex_steer_rejected_on_ended_turn_returns_false() {
         .expect("interrupt");
     session.send_user(STEER_TEXT).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(events[0], session_started(SIMPLE_THREAD));
     assert_eq!(events[1], text("pong", true));
@@ -601,6 +637,7 @@ async fn codex_resume_calls_thread_resume() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(events[0], session_started(thread));
     assert_eq!(events[1], text("BLUEFISH", true));
@@ -620,6 +657,7 @@ async fn codex_unknown_server_request_is_rejected() {
     let mut session = start(&adapter, spec(&dir, None, None)).await;
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 4, "{events:?}");
     let ProviderEvent::Event(EventKind::Error { message }) = &events[1] else {
         panic!("expected Error, got {:?}", events[1]);
@@ -639,6 +677,7 @@ async fn permissions_request(scenario: &str, decision: Decision) {
     let mut session = start(&adapter, spec(&dir, None, None)).await;
     session.send_user(PONG).await.expect("send_user");
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     let Some(ProviderEvent::PermissionRequested {
         provider_request_id,
         kind,
@@ -661,6 +700,7 @@ async fn permissions_request(scenario: &str, decision: Decision) {
         .await
         .expect("respond");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events[0], text("pong", true), "{events:?}");
     assert!(matches!(events[1], ProviderEvent::TurnCompleted { .. }));
     shutdown_quietly(session).await;
@@ -690,6 +730,7 @@ async fn codex_failed_turn_reports_error_and_completes() {
     .await;
     session.send_user(PONG).await.expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     let ProviderEvent::Event(EventKind::Error { message }) = &events[1] else {
         panic!("expected Error, got {:?}", events[1]);
@@ -716,6 +757,7 @@ async fn codex_unexpected_exit_emits_exited_once() {
         .await
         .expect("timed out waiting for Exited")
         .expect("event channel closed without Exited");
+    assert_no_rate_limited(std::slice::from_ref(&event));
     let ProviderEvent::Exited {
         success,
         stderr_tail,
@@ -842,6 +884,12 @@ async fn codex_manager_simple_turn() {
     assert_eq!(idle.last_error, None);
     let events = h.events(&agent.id);
     assert!(
+        !events
+            .iter()
+            .any(|kind| matches!(kind, EventKind::RateLimited { .. })),
+        "{events:?}"
+    );
+    assert!(
         events.contains(&EventKind::AssistantText {
             text: "pong".to_owned(),
             final_: true,
@@ -887,6 +935,12 @@ async fn codex_manager_steer_on_ended_turn_sends_new_turn() {
     let idle = h.wait_state(&agent.id, AgentState::Idle, EVENT_WAIT).await;
     assert_eq!(idle.last_error, None);
     let events = h.events(&agent.id);
+    assert!(
+        !events
+            .iter()
+            .any(|kind| matches!(kind, EventKind::RateLimited { .. })),
+        "{events:?}"
+    );
     assert!(h.error_messages(&agent.id).is_empty(), "{events:?}");
     assert!(
         !events.contains(&EventKind::StateChanged {

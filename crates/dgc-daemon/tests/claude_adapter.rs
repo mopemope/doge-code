@@ -22,9 +22,13 @@ use dgc_protocol::methods::{AgentCreateParams, AgentEventsParams};
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, Workspace, WorkspaceState,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
+
+#[path = "support/provider_events.rs"]
+mod provider_events;
+use provider_events::{assert_no_rate_limited, rate_limited_details};
 
 /// Longer than the fake's own 10 s wait, so a stuck exchange shows up as the
 /// fake's timeout exit (with its stderr) rather than a bare test timeout.
@@ -170,6 +174,7 @@ async fn claude_simple_turn() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -196,26 +201,30 @@ async fn rate_limit_turns(name: &str, count: usize) -> Vec<Vec<ProviderEvent>> {
     turns
 }
 
-fn rate_limited_details(events: &[ProviderEvent]) -> Vec<&Value> {
-    events
-        .iter()
-        .filter_map(|event| match event {
-            ProviderEvent::Event(EventKind::RateLimited { detail }) => Some(detail),
-            _ => None,
-        })
-        .collect()
-}
-
 #[tokio::test]
 async fn claude_rate_limit_rejected_status_emits_rate_limited() {
-    let turns = rate_limit_turns("rate_limited_status", 2).await;
+    let turns = rate_limit_turns("rate_limited_status", 3).await;
     assert_eq!(
         rate_limited_details(&turns[0]).first().copied(),
         Some(&json!({"provider": "claude", "reason": "rejected", "resets_at": 1700000000}))
     );
+}
+
+#[tokio::test]
+async fn claude_allowed_warning_status_is_ignored() {
+    let turns = rate_limit_turns("rate_limited_status", 3).await;
+    assert_no_rate_limited(&turns[1]);
+}
+
+#[tokio::test]
+async fn claude_unknown_status_reason_is_bounded_safe_token() {
+    let turns = rate_limit_turns("rate_limited_status", 3).await;
     assert_eq!(
-        rate_limited_details(&turns[1]).first().copied(),
-        Some(&json!({"provider": "claude", "reason": "allowed_warning"}))
+        rate_limited_details(&turns[2]),
+        [&json!({
+            "provider": "claude",
+            "reason": "A_z_9______0123456789abcdefghijklmnopqrstuvwxyz_"
+        })]
     );
 }
 
@@ -240,13 +249,13 @@ async fn claude_429_result_emits_rate_limited() {
 #[tokio::test]
 async fn claude_allowed_status_is_ignored() {
     let turns = rate_limit_turns("simple_turn", 1).await;
-    assert!(rate_limited_details(&turns[0]).is_empty(), "{turns:?}");
+    assert_no_rate_limited(&turns[0]);
 }
 
 #[tokio::test]
 async fn rate_limited_is_emitted_once_per_turn() {
-    let turns = rate_limit_turns("rate_limited_status", 2).await;
-    for turn in &turns {
+    let turns = rate_limit_turns("rate_limited_status", 3).await;
+    for turn in [&turns[0], &turns[2]] {
         assert_eq!(rate_limited_details(turn).len(), 1, "{turn:?}");
     }
 }
@@ -266,6 +275,7 @@ async fn claude_permission_allow() {
         .expect("send_user");
 
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -295,6 +305,7 @@ async fn claude_permission_allow() {
         .await
         .expect("respond");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -323,6 +334,7 @@ async fn claude_permission_deny() {
         .expect("send_user");
 
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     let Some(ProviderEvent::PermissionRequested {
         provider_request_id,
         kind,
@@ -337,6 +349,7 @@ async fn claude_permission_deny() {
         .await
         .expect("respond");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -380,6 +393,7 @@ async fn claude_interrupt() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -415,6 +429,7 @@ async fn claude_interrupt_without_result_does_not_swallow_next_turn() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(events[1], text("ok"));
     assert_eq!(usage_output_tokens(&events[2]), 162);
@@ -432,7 +447,8 @@ async fn claude_interrupt_when_idle_sends_nothing() {
         .send_user("Reply with exactly the word: pong")
         .await
         .expect("send_user");
-    turn_events(&mut session).await;
+    let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     timeout(EVENT_WAIT, session.interrupt())
         .await
         .expect("interrupt did not finish")
@@ -467,6 +483,7 @@ async fn claude_interrupt_denies_pending_permission() {
         .await
         .expect("send_user");
     let events = until_permission(&mut session).await;
+    assert_no_rate_limited(&events);
     assert!(
         matches!(
             events.last(),
@@ -490,6 +507,7 @@ async fn claude_interrupt_denies_pending_permission() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(
         events[0],
@@ -511,6 +529,7 @@ async fn claude_resume_passes_session_id() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(events[0], session_started(RESUME_SESSION));
     assert_eq!(events[1], text("BLUEFISH"));
@@ -528,6 +547,7 @@ async fn claude_invalid_model_reports_error_and_completes_turn() {
         .await
         .expect("send_user");
     let events = turn_events(&mut session).await;
+    assert_no_rate_limited(&events);
     assert_eq!(events.len(), 4, "{events:?}");
     assert_eq!(
         events[0],
@@ -565,6 +585,7 @@ async fn claude_unexpected_exit_emits_exited_once() {
         .await
         .expect("timed out waiting for Exited")
         .expect("event channel closed without Exited");
+    assert_no_rate_limited(std::slice::from_ref(&event));
     let ProviderEvent::Exited {
         success,
         stderr_tail,
@@ -694,6 +715,12 @@ async fn claude_manager_simple_turn() {
     );
     assert_eq!(idle.last_error, None);
     let events = h.events(&agent.id);
+    assert!(
+        !events
+            .iter()
+            .any(|kind| matches!(kind, EventKind::RateLimited { .. })),
+        "{events:?}"
+    );
     assert!(
         events.contains(&EventKind::AssistantText {
             text: "pong".to_owned(),
