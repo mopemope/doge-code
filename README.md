@@ -26,7 +26,10 @@ closed by default:
   downloading of code.
 - **Permissions go to you.** Unless you choose an auto-approve mode for an
   agent, dgc adds no approvals of its own; requests the provider raises wait
-  for your answer.
+  for your answer. An interrupt or a daemon stop cancels pending requests
+  (answered deny or cancel). Without `--mode`, the provider's own default mode
+  decides what runs without asking; see
+  [Security properties and limits](#security-properties-and-limits).
 - **Few dependencies.** The crates use tokio, serde, clap, ratatui/crossterm and
   a handful of small libraries.
 
@@ -271,8 +274,8 @@ summary you did not read (reading the summary is not the same as reading
 everything the agent will do, for example the content of a file it writes):
 
 - `a` (allow once), `s` (allow for the session) and `d` (deny) are ignored for
-  about 0.75 s after the dialog opens, after it switches to another request,
-  and after the terminal is resized ("keys enabled shortly").
+  0.5-0.75 s after the dialog opens, after it switches to another request, and
+  after the terminal is resized ("keys enabled shortly").
 - `a` and `s` work only after the whole summary has been on screen: scroll from
   the top with `↑` `↓` / `PgDn` until the footer stops saying `scroll to the
   end to enable [a]/[s]`. Jumping with `End` does not count unless the rows
@@ -331,8 +334,9 @@ stay under 100 bytes (`sockaddr_un` limit), so keep `DGC_STATE_ROOT` short.
 - dgc never reads provider credential files, and the daemon log never contains
   prompt or agent text. Provider children inherit the daemon's environment
   (including any API keys in it). Prompts and agent output are stored as-is in
-  each agent's `events.jsonl` (0600), so they can contain secrets the agent
-  printed.
+  the agent's 0600 state files (`events.jsonl`, `queue.json` for queued
+  messages, and the agent record, whose title defaults to the prompt's first
+  line), so they can contain secrets the agent printed.
 - The permission dialog and `permit ls` show dgc's summary of a request, not
   everything the agent will do (for example not the content of a file it
   writes), and a summary longer than 4 KiB is cut.
