@@ -496,6 +496,12 @@
   副次効果: 保留していた「重なった snapshot（Connected と Lagged の 2 つが飛んでいて、1 つ目の応答の後に届いた権限を、それより前に読まれた
   2 つ目の応答が消す）」は、次の定期 snapshot（5 s 以内）で権限が戻ることで解消する（テスト
   `the_periodic_snapshot_brings_back_a_permission_an_overlapping_snapshot_erased`。戻ったダイアログは改めて 3 Tick 無効）。
+- 2026-11-26 (M2 最終レビュー修正 5、コントローラ裁定): RPC の打ち切りを呼び出しごとに分ける（`backend::CallTimeouts{read, mutating}`、
+  既定 `CALL_TIMEOUTS` = 読み取り 15 s / 変更 90 s）。変更系は `agent.send` / `agent.create` / `agent.interrupt` / `agent.resume` / `agent.archive` /
+  `permission.respond` / `workspace.create` / `workspace.archive`（`backend::is_mutating`）、それ以外（snapshot の 4 つの list、`agent.events`、
+  `subscribe`）は 15 s。デーモン側の上限（Claude の control 20 s、プロバイダ呼び出し 30 s、git 30 s）より短い 15 s で健全な変更呼び出しを
+  切断扱いにし、再送で二重配送・worktree 再作成の失敗を招いていた。テスト用の `Backend::start_with_timeout(paths, exe, timeout)` は
+  `start_with_timeouts(paths, exe, CallTimeouts)` に置き換え（上の M2 Task 4 レビュー修正 (c) の 15 s は読み取りのみに変更）。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。

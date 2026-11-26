@@ -225,7 +225,9 @@ every second, spawns the daemon only on its first connection attempt (never
 again after a disconnect), and
 reloads everything when `dgc-next daemon start` brings it back (agents the
 restart ended show as stopped; resume them with `r`). A request that gets no
-answer within 15 s counts as a disconnect.
+answer in time counts as a disconnect: 15 s for reads, 90 s for requests that
+change something (send, create, interrupt, resume, archive, permission answers),
+which the daemon may spend waiting on the provider or git.
 
 The daemon log never contains prompt or agent text; it is stored only in each
 agent's `events.jsonl` (0600).

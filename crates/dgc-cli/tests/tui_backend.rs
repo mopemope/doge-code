@@ -41,7 +41,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
-use tui::backend::Backend;
+use tui::backend::{Backend, CallTimeouts};
 use tui::input::KeyInput;
 use tui::state::AppState;
 use tui::{AppEvent, ConnectionState, Effect, RequestTag, Runtime, TermEvent};
@@ -663,6 +663,15 @@ type Answer = fn(&str) -> Option<Result<Value, RpcError>>;
 /// A daemon stand-in on `paths.socket` that completes `hello` and
 /// `subscribe` on every connection and answers the rest with `answer`.
 fn fake_daemon(paths: &DaemonPaths, answer: Answer) -> tokio::task::JoinHandle<()> {
+    slow_fake_daemon(paths, answer, |_| Duration::ZERO)
+}
+
+/// [`fake_daemon`] that waits `delay(method)` before answering a method.
+fn slow_fake_daemon(
+    paths: &DaemonPaths,
+    answer: Answer,
+    delay: fn(&str) -> Duration,
+) -> tokio::task::JoinHandle<()> {
     fs::create_dir_all(paths.socket.parent().expect("socket dir")).expect("mkdir");
     let listener = UnixListener::bind(&paths.socket).expect("bind");
     tokio::spawn(async move {
@@ -680,7 +689,10 @@ fn fake_daemon(paths: &DaemonPaths, answer: Answer) -> tokio::task::JoinHandle<(
                             json!({"protocol_version": PROTOCOL_VERSION, "daemon_pid": 1}),
                         )),
                         SUBSCRIBE => Some(Ok(json!({}))),
-                        method => answer(method),
+                        method => {
+                            sleep(delay(method)).await;
+                            answer(method)
+                        }
                     };
                     let response = match reply {
                         Some(Ok(value)) => Response::ok(request.id, value),
@@ -787,7 +799,12 @@ async fn backend_gives_up_on_a_daemon_that_does_not_answer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = DaemonPaths::under(dir.path());
     let server = fake_daemon(&paths, |_| None);
-    let (fx, mut rx) = Backend::start_with_timeout(paths, no_exe(), Duration::from_millis(300));
+    let limit = Duration::from_millis(300);
+    let timeouts = CallTimeouts {
+        read: limit,
+        mutating: limit,
+    };
+    let (fx, mut rx) = Backend::start_with_timeouts(paths, no_exe(), timeouts);
     assert_eq!(
         next_event(&mut rx).await,
         AppEvent::Connection(ConnectionState::Connected)
@@ -819,4 +836,104 @@ async fn backend_gives_up_on_a_daemon_that_does_not_answer() {
     assert!(reason.contains("did not answer"), "{reason}");
     assert!(started.elapsed() < Duration::from_secs(5));
     server.abort();
+}
+
+#[tokio::test]
+async fn backend_gives_mutating_calls_longer_than_reads() {
+    // The daemon's own limits on a send (provider calls, git) are longer
+    // than a read's: a slow but healthy send must not count as a lost
+    // connection, or the user resends and the text is delivered twice.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    let server = slow_fake_daemon(
+        &paths,
+        |method| match method {
+            AGENT_SEND => Some(Ok(json!({"outcome": "queued"}))),
+            AGENT_LIST => Some(Ok(json!({"agents": []}))),
+            _ => Some(Ok(json!({}))),
+        },
+        |method| match method {
+            AGENT_SEND | AGENT_LIST => Duration::from_millis(800),
+            _ => Duration::ZERO,
+        },
+    );
+    let timeouts = CallTimeouts {
+        read: Duration::from_millis(300),
+        mutating: Duration::from_secs(5),
+    };
+    let (fx, mut rx) = Backend::start_with_timeouts(paths, no_exe(), timeouts);
+    assert_eq!(
+        next_event(&mut rx).await,
+        AppEvent::Connection(ConnectionState::Connected)
+    );
+    let request = RequestTag::Send {
+        agent_id: AgentId::generate(),
+    };
+    fx.send(Effect::Call {
+        request: request.clone(),
+        method: AGENT_SEND,
+        params: json!({}),
+    })
+    .expect("backend alive");
+    assert_eq!(
+        next_event(&mut rx).await,
+        AppEvent::RpcDone {
+            request: request.clone(),
+            result: Ok(json!({"outcome": "queued"})),
+        },
+        "a send that outlives the read limit still succeeds"
+    );
+    // The same delay on a read is too long.
+    fx.send(Effect::Call {
+        request: request.clone(),
+        method: AGENT_LIST,
+        params: json!({}),
+    })
+    .expect("backend alive");
+    let answer = next_event(&mut rx).await;
+    assert!(
+        matches!(&answer, AppEvent::RpcDone { result: Err(message), .. } if message.contains("did not answer")),
+        "{answer:?}"
+    );
+    assert!(is_disconnected(&next_event(&mut rx).await));
+    server.abort();
+}
+
+#[test]
+fn calls_that_change_something_get_the_long_limit() {
+    use dgc_protocol::methods::{
+        AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_INTERRUPT, AGENT_RESUME,
+        WORKSPACE_ARCHIVE, WORKSPACE_CREATE,
+    };
+    use tui::backend::CALL_TIMEOUTS;
+    for method in [
+        AGENT_SEND,
+        AGENT_CREATE,
+        AGENT_INTERRUPT,
+        AGENT_RESUME,
+        AGENT_ARCHIVE,
+        PERMISSION_RESPOND,
+        WORKSPACE_CREATE,
+        WORKSPACE_ARCHIVE,
+    ] {
+        assert_eq!(
+            CALL_TIMEOUTS.of(method),
+            Duration::from_secs(90),
+            "{method}"
+        );
+    }
+    for method in [
+        PROJECT_LIST,
+        WORKSPACE_LIST,
+        AGENT_LIST,
+        PERMISSION_LIST,
+        AGENT_EVENTS,
+        SUBSCRIBE,
+    ] {
+        assert_eq!(
+            CALL_TIMEOUTS.of(method),
+            Duration::from_secs(15),
+            "{method}"
+        );
+    }
 }
