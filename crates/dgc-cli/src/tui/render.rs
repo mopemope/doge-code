@@ -35,6 +35,9 @@ const ACCENT: Color = Color::Cyan;
 const WARN: Color = Color::Yellow;
 const DANGER: Color = Color::Red;
 
+/// Shown in the tree pane while there is no project.
+const EMPTY_TREE_HINT: &str = "no projects \u{2014} add one with: dgc-next project add <path>";
+
 /// Draw the whole screen.
 pub fn render(state: &AppState, frame: &mut Frame) {
     let area = frame.area();
@@ -183,6 +186,11 @@ fn render_tree(state: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let rows = state.rows();
+    if rows.is_empty() {
+        let hint = wrapped(EMPTY_TREE_HINT, usize::from(inner.width), dim());
+        frame.render_widget(Paragraph::new(hint), inner);
+        return;
+    }
     let cursor = state.cursor_index();
     let offset = cursor.map_or(0, |c| (c + 1).saturating_sub(height));
     let narrow = frame.area().width < NARROW;
@@ -393,7 +401,7 @@ fn render_status(state: &AppState, frame: &mut Frame, area: Rect) {
     let hints = match state.focus {
         Focus::Tree => {
             "\u{2191}\u{2193} move  Enter open  i type  n agent  w workspace  p permission  \
-             x stop  r resume  A archive  Tab mode  q quit"
+             x stop  r resume  A archive  R refresh  Tab mode  q quit"
         }
         Focus::Input => "Enter send  Tab mode  PgUp/PgDn scroll  Esc back",
         Focus::Dialog => "",
@@ -1800,5 +1808,29 @@ mod tests {
             text.contains("queued \u{2014} delivered when the turn ends"),
             "{text}"
         );
+    }
+
+    /// The tree pane's text (inside its border) at 120 columns, whitespace
+    /// removed (the hint wraps).
+    fn tree_pane(buffer: &Buffer) -> String {
+        rows(buffer)
+            .iter()
+            .flat_map(|r| r.chars().skip(1).take(34).collect::<Vec<_>>())
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_tree_says_how_to_add_a_project() {
+        let hint: String = "no projects \u{2014} add one with: dgc-next project add <path>"
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let state = AppState::default();
+        let pane = tree_pane(&draw(&state, 120, 30));
+        assert!(pane.contains(&hint), "{pane}");
+        let f = Fx::new();
+        let pane = tree_pane(&draw(&f.state, 120, 30));
+        assert!(!pane.contains("noprojects"), "{pane}");
     }
 }

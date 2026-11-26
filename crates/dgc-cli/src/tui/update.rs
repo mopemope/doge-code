@@ -14,7 +14,7 @@ use dgc_protocol::model::{
 use super::input::{Key, KeyInput};
 use super::state::{
     AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PermissionChange,
-    ScrollMotion, default_title,
+    SNAPSHOT_REFRESH_TICKS, ScrollMotion, default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
@@ -73,7 +73,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
         }
         AppEvent::Paste(text) => on_paste(state, &text),
-        AppEvent::Tick => on_tick(state),
+        AppEvent::Tick => on_tick(state, &mut fx),
     }
     settle(state, &mut fx);
     fx
@@ -138,6 +138,7 @@ fn request_snapshot(state: &mut AppState, fx: &mut Vec<Effect>, force: bool) {
         return;
     }
     state.snapshot_pending = Some(0);
+    state.ticks_since_snapshot = 0;
     fx.push(Effect::LoadSnapshot);
 }
 
@@ -166,11 +167,12 @@ fn on_connection(state: &mut AppState, connection: ConnectionState, fx: &mut Vec
         catch_up_selected(state, fx);
     } else {
         state.snapshot_pending = None;
+        state.ticks_since_snapshot = 0;
         state.permission_log.clear();
     }
 }
 
-fn on_tick(state: &mut AppState) {
+fn on_tick(state: &mut AppState, fx: &mut Vec<Effect>) {
     if let Some(Dialog::Permission {
         ticks_until_armed, ..
     }) = &mut state.dialog
@@ -188,6 +190,14 @@ fn on_tick(state: &mut AppState) {
         if *ticks >= SNAPSHOT_RETRY_TICKS {
             state.snapshot_pending = None;
             state.permission_log.clear();
+        }
+    } else if state.status.connection == ConnectionState::Connected {
+        // Projects and workspaces added or archived elsewhere have no live
+        // event; a periodic reload also repairs a permission that
+        // overlapping snapshots erased.
+        state.ticks_since_snapshot += 1;
+        if state.ticks_since_snapshot >= SNAPSHOT_REFRESH_TICKS {
+            request_snapshot(state, fx, false);
         }
     }
 }
@@ -514,6 +524,13 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
             None => state.set_error("select a project first".to_owned()),
         },
         'p' => go_to_next_waiting_agent(state),
+        'R' => {
+            if state.status.connection == ConnectionState::Connected {
+                request_snapshot(state, fx, false);
+            } else {
+                state.set_error("not connected to the daemon".to_owned());
+            }
+        }
         _ => {}
     }
 }
@@ -2987,5 +3004,153 @@ mod tests {
         update(&mut f.state, done(Ok(json!({"outcome": "teleported"}))));
         assert_eq!(f.state.status.notice, None);
         assert_eq!(f.state.status.error, None);
+    }
+
+    // ---- periodic snapshot and refresh ----
+
+    /// Tick `times` times, collecting the effects.
+    fn tick_fx(state: &mut AppState, times: usize) -> Vec<Effect> {
+        (0..times)
+            .flat_map(|_| update(state, AppEvent::Tick))
+            .collect()
+    }
+
+    /// Connected, with the reload it asks for answered.
+    fn connected_fixture() -> Fixture {
+        let mut f = Fixture::new();
+        let fx = update(
+            &mut f.state,
+            AppEvent::Connection(ConnectionState::Connected),
+        );
+        assert!(fx.contains(&Effect::LoadSnapshot));
+        f.snapshot_with(vec![]);
+        f
+    }
+
+    #[test]
+    fn a_snapshot_is_requested_every_five_seconds_while_connected() {
+        let mut f = connected_fixture();
+        assert_eq!(tick_fx(&mut f.state, 19), vec![]);
+        assert_eq!(tick_fx(&mut f.state, 1), vec![Effect::LoadSnapshot]);
+        // None while one is pending...
+        assert_eq!(tick_fx(&mut f.state, 10), vec![]);
+        // ...and the count starts over once it is answered.
+        f.snapshot_with(vec![]);
+        assert_eq!(tick_fx(&mut f.state, 19), vec![]);
+        assert_eq!(tick_fx(&mut f.state, 1), vec![Effect::LoadSnapshot]);
+    }
+
+    #[test]
+    fn no_periodic_snapshot_while_disconnected() {
+        let mut f = Fixture::new();
+        assert_eq!(
+            tick_fx(&mut f.state, 60),
+            vec![],
+            "not connected yet (reconnecting)"
+        );
+        let mut f = connected_fixture();
+        tick_fx(&mut f.state, 15);
+        update(
+            &mut f.state,
+            AppEvent::Connection(ConnectionState::Disconnected {
+                reason: "gone".to_owned(),
+            }),
+        );
+        assert_eq!(tick_fx(&mut f.state, 60), vec![]);
+    }
+
+    #[test]
+    fn shift_r_refreshes_the_tree() {
+        let mut f = connected_fixture();
+        assert_eq!(press(&mut f.state, 'R'), vec![Effect::LoadSnapshot]);
+        assert_eq!(press(&mut f.state, 'R'), vec![], "one is already pending");
+        f.snapshot_with(vec![]);
+        assert_eq!(press(&mut f.state, 'R'), vec![Effect::LoadSnapshot]);
+        // Lowercase r is still resume, and needs an agent.
+        f.snapshot_with(vec![]);
+        assert_eq!(press(&mut f.state, 'r'), vec![]);
+
+        let mut f = Fixture::new();
+        assert_eq!(press(&mut f.state, 'R'), vec![], "not connected");
+        assert!(f.state.status.error.is_some());
+    }
+
+    #[test]
+    fn the_periodic_snapshot_brings_back_a_permission_an_overlapping_snapshot_erased() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        // Two snapshots in flight: the reconnect's and the lag's.
+        update(
+            &mut f.state,
+            AppEvent::Connection(ConnectionState::Connected),
+        );
+        update(&mut f.state, AppEvent::Lagged);
+        f.snapshot_with(vec![]);
+        // A permission arrives after the first answer, but the second
+        // snapshot was read before it and erases it.
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert_eq!(f.state.permission_count(), 1);
+        f.snapshot_with(vec![]);
+        assert_eq!(f.state.permission_count(), 0, "erased");
+        assert!(f.state.dialog.is_none());
+
+        let fx = tick_fx(&mut f.state, 20);
+        assert_eq!(fx, vec![Effect::LoadSnapshot]);
+        f.snapshot_with(vec![perm.clone()]);
+        assert_eq!(f.state.permission_count(), 1, "back");
+        assert_eq!(open_permission_id(&f.state), Some(perm.id));
+        assert!(
+            !f.state
+                .dialog
+                .as_ref()
+                .is_some_and(Dialog::permission_armed),
+            "a dialog that opens again is not armed"
+        );
+    }
+
+    #[test]
+    fn a_periodic_snapshot_leaves_an_open_dialog_as_it_was() {
+        let mut f = connected_fixture();
+        let summary: Vec<String> = (0..200).map(|i| format!("line {i}")).collect();
+        let perm = PendingPermission::new(
+            PermissionId::generate(),
+            f.a1.id.clone(),
+            PermissionKind::Command,
+            summary.join("\n"),
+            serde_json::Value::Null,
+            String::new(),
+        );
+        f.snapshot_with(vec![perm.clone()]);
+        f.select_a1();
+        press_key(&mut f.state, Key::PageDown);
+        press_key(&mut f.state, Key::Down);
+        let view = |state: &AppState| match &state.dialog {
+            Some(Dialog::Permission {
+                permission,
+                sending,
+                ticks_until_armed,
+                scroll,
+                seen_rows,
+                seen_end,
+            }) => (
+                permission.id.clone(),
+                *sending,
+                *ticks_until_armed,
+                *scroll,
+                *seen_rows,
+                *seen_end,
+            ),
+            _ => panic!("no permission dialog"),
+        };
+        // The periodic request comes while the dialog is open.
+        let fx = tick_fx(&mut f.state, 20);
+        assert_eq!(fx, vec![Effect::LoadSnapshot]);
+        let before = view(&f.state);
+        assert!(before.3 > 0, "scrolled");
+        assert!(!before.5, "not read to the end");
+        f.snapshot_with(vec![perm]);
+        assert_eq!(view(&f.state), before);
+        assert_eq!(f.state.focus, Focus::Dialog);
     }
 }

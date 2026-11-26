@@ -661,6 +661,9 @@ pub struct Status {
     pub(super) error_ticks: u32,
 }
 
+/// Ticks between periodic snapshots while connected (5 s).
+pub const SNAPSHOT_REFRESH_TICKS: u32 = 20;
+
 /// Ticks an error or a notice stays in the status line.
 pub const ERROR_TICKS: u32 = 10;
 
@@ -698,8 +701,12 @@ pub struct AppState {
     pub(super) focus_before_dialog: Focus,
     /// Permissions the user closed the dialog on; not reopened automatically.
     pub(super) dismissed: HashSet<PermissionId>,
-    /// Ticks since an unanswered unknown-agent snapshot request.
+    /// Ticks since an unanswered snapshot request.
     pub(super) snapshot_pending: Option<u32>,
+    /// Ticks connected with no snapshot pending since the last request: at
+    /// [`SNAPSHOT_REFRESH_TICKS`] the tree is reloaded (changes made by
+    /// other clients have no live event).
+    pub(super) ticks_since_snapshot: u32,
     /// The last sent message, restored into the input if sending fails.
     pub(super) unsent: Option<(AgentId, String)>,
     /// The agent the input was opened on; messages go there, whatever the
@@ -733,6 +740,7 @@ impl Default for AppState {
             focus_before_dialog: Focus::Tree,
             dismissed: HashSet::new(),
             snapshot_pending: None,
+            ticks_since_snapshot: 0,
             unsent: None,
             input_target: None,
             drafts: HashMap::new(),

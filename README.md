@@ -137,7 +137,10 @@ failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
 selected agent's stream (the same events as `dgc-next logs`, last 2000 lines
 kept), below it the input line, and at the bottom a status bar (connection,
 agent count, agents waiting for a permission, errors, key hints). In a narrow
-tree (under 50 columns) provider names are dropped.
+tree (under 50 columns) provider names are dropped. Agents and permissions
+update live; projects and workspaces added or archived by other commands appear
+on the next reload, every 5 s or at once with `R`. With no project the tree says
+`no projects — add one with: dgc-next project add <path>`.
 
 Keys in the tree:
 
@@ -152,6 +155,7 @@ Keys in the tree:
 | `r` | resume a stopped or failed agent |
 | `A` | archive the selected agent (asks first: `y`/`Enter` or `n`/`Esc`) |
 | `p` | jump to the next agent with a pending permission and open its dialog |
+| `R` | reload the tree from the daemon now (it also reloads every 5 s) |
 | `Tab` / `Shift-Tab` | change the send mode: queue, steer, interrupt |
 | `PgUp` / `PgDn` | scroll the stream |
 | `q`, `Ctrl-C` | quit (`Ctrl-C` works everywhere) |

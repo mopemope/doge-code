@@ -486,6 +486,16 @@
 - 2026-11-26 (M2 最終レビュー修正 3): `agent.send` の成功応答の `outcome`（`SendOutcome`）をステータスバーに出す: `queued — delivered when the turn ends` /
   `sent` / `steered` / `interrupted and sent`（`Status.notice`、アクセント色）。エラーと同じく 10 Tick で消え、エラーが出ると置き換わり、次の成功で消える
   （`clear_error` が両方を消す）。デコードできない outcome は何も出さない。実行中のエージェントへの queue 送信が受理されたか分からず再送して重複する問題への対処。
+- 2026-11-26 (M2 最終レビュー修正 4、コントローラ裁定): 接続中は snapshot 要求が無い状態で 20 Tick（5 s、`SNAPSHOT_REFRESH_TICKS`）ごとに
+  `LoadSnapshot` を要求する（要求中は数えない。要求すると数え直し。切断中は数えず、切断でリセット）。別のクライアントが追加・archive した
+  プロジェクト／ワークスペースはライブイベントが無く、以前は Connected/Lagged/未知のエージェントのときしか読み直さなかった。ツリーで `R`
+  （Shift-r）は今すぐ要求する（要求中なら何もしない。未接続なら `not connected to the daemon`）。プロジェクトが無いときツリー枠に
+  `no projects — add one with: dgc-next project add <path>` を出す。ステータスバーのキー案内に `R refresh`。
+  定期 snapshot は通常の snapshot と同じ処理を通る: 開いている権限ダイアログの arming（`ticks_until_armed`）・scroll・seen_rows・seen_end は
+  変えない（テスト `a_periodic_snapshot_leaves_an_open_dialog_as_it_was`）。要求中のライブの権限イベントは従来どおり `permission_log` で再適用される。
+  副次効果: 保留していた「重なった snapshot（Connected と Lagged の 2 つが飛んでいて、1 つ目の応答の後に届いた権限を、それより前に読まれた
+  2 つ目の応答が消す）」は、次の定期 snapshot（5 s 以内）で権限が戻ることで解消する（テスト
+  `the_periodic_snapshot_brings_back_a_permission_an_overlapping_snapshot_erased`。戻ったダイアログは改めて 3 Tick 無効）。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
