@@ -1,0 +1,676 @@
+dgc-next tui screen record (M2 acceptance, 2026-11-26)
+Captured with `tmux capture-pane -p` at 120x32 (except capture 19), real dgc-next binary in a real pty,
+fake provider (dgc-fake-provider replaying a hand-written SYNTHETIC scenario, not a Claude recording),
+throwaway git repository, scratch DGC_STATE_ROOT. Colors and highlights are not part of the text capture.
+
+====================================================================================================
+1. Start with no projects: empty tree, daemon ok. (`w` here only says `select a project first` in the status bar.)
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ stream ──────────────────────────────────────────────────────────────────────────┐
+│                                  ││select an agent (↑↓, Enter) to see its stream                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 0 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  x stop
+
+====================================================================================================
+2. `w` on a project: New workspace form (isolation local; Tab switches to worktree, which asks for a branch).
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ stream ──────────────────────────────────────────────────────────────────────────┐
+│▾ app                             ││select an agent (↑↓, Enter) to see its stream                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││     ┌ New workspace ───────────────────────────────────────────────────────┐     │
+│                                  ││     │                                                                      │     │
+│                                  ││     │  isolation local (the project directory)  (Tab to switch)            │     │
+│                                  ││     │                                                                      │     │
+│                                  ││     │Enter create  Esc cancel                                              │     │
+│                                  ││     └──────────────────────────────────────────────────────────────────────┘     │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 0 agents · 0 waiting permission
+
+====================================================================================================
+3. Tree after creating a local workspace and a worktree workspace (`fix-bug (wt)`) from the TUI.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ stream ──────────────────────────────────────────────────────────────────────────┐
+│▾ app                             ││select an agent (↑↓, Enter) to see its stream                                     │
+│  ▾ ws local                      ││                                                                                  │
+│  ▾ ws fix-bug (wt)               ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 0 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  x stop
+
+====================================================================================================
+4. `n` on a workspace: New agent form (provider, model, mode, title, prompt; Up/Down moves between fields).
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ stream ──────────────────────────────────────────────────────────────────────────┐
+│▾ app                             ││select an agent (↑↓, Enter) to see its stream                                     │
+│  ▾ ws local                      ││                                                                                  │
+│  ▾ ws fix-bug (wt)               ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││     ┌ New agent ───────────────────────────────────────────────────────────┐     │
+│                                  ││     │                                                                      │     │
+│                                  ││     │  provider claude  (Tab to switch)                                    │     │
+│                                  ││     │  model    (provider default)                                         │     │
+│                                  ││     │  mode     (provider default)                                         │     │
+│                                  ││     │  title    (from the prompt)                                          │     │
+│                                  ││     │> prompt   (optional)                                                 │     │
+│                                  ││     │                                                                      │     │
+│                                  ││     │Enter create  Esc cancel  ↑↓ field                                    │     │
+│                                  ││     └──────────────────────────────────────────────────────────────────────┘     │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 0 agents · 0 waiting permission
+
+====================================================================================================
+5. Permission dialog just opened: a/s/d are ignored (`keys enabled shortly`, 3 ticks), long synthetic Bash command (43 rows) shown from the top.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_┌ Permission ──────────────────────────────────────────────────────────┐t ───┐
+│▾ app                             ││    e│agent: agt_…115e5d  claude  Run the long setup and create hello.txt   │     │
+│  ▾ ws local                      ││    e│                                                                      │     │
+│  ▾ ws fix-bug (wt)               ││    e│kind: command                                                         │     │
+│    ! claude Run the long setup a…││    e│ Bash: set -e                                                         │     │
+│                                  ││    e│ cd "$WORKSPACE"                                                      │     │
+│                                  ││    e│ echo 'step 1: preparing synthetic fixture file part 1' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 2: preparing synthetic fixture file part 2' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 3: preparing synthetic fixture file part 3' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 4: preparing synthetic fixture file part 4' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 5: preparing synthetic fixture file part 5' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 6: preparing synthetic fixture file part 6' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 7: preparing synthetic fixture file part 7' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 8: preparing synthetic fixture file part 8' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 9: preparing synthetic fixture file part 9' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 10: preparing synthetic fixture file part 10' >> hello.txt│     │
+│                                  ││    e│ echo 'step 11: preparing synthetic fixture file part 11' >> hello.txt│     │
+│                                  ││    e│ echo 'step 12: preparing synthetic fixture file part 12' >> hello.txt│     │
+│                                  ││    e│ echo 'step 13: preparing synthetic fixture file part 13' >> hello.txt│     │
+│                                  ││    e│ echo 'step 14: preparing synthetic fixture file part 14' >> hello.txt│     │
+│                                  ││    e│ echo 'step 15: preparing synthetic fixture file part 15' >> hello.txt│     │
+│                                  ││    e│ echo 'step 16: preparing synthetic fixture file part 16' >> hello.txt│     │
+│                                  ││    e│ echo 'step 17: preparing synthetic fixture file part 17' >> hello.txt│     │
+│                                  ││    e│ echo 'step 18: preparing synthetic fixture file part 18' >> hello.txt│     │
+│                                  ││    e│ echo 'step 19: preparing synthetic fixture file part 19' >> hello.txt│     │
+│                                  ││    t│ echo 'step 20: preparing synthetic fixture file part 20' >> hello.txt│     │
+│                                  ││[8] s│ echo 'step 21: preparing synthetic fixture file part 21' >> hello.txt│     │
+│                                  │└─────│keys enabled shortly                                                  │─────┘
+│                                  │┌ send│rows 1–23 of 43 — scroll to the end to enable [a]/[s]                 │─────┐
+│                                  ││> pre│[a]llow  [s]ession  [d]eny  [Esc] close                               │     │
+└──────────────────────────────────┘└─────└──────────────────────────────────────────────────────────────────────┘─────┘
+daemon ok · 1 agents · 1 waiting permission
+
+====================================================================================================
+6. Same dialog once armed, not yet scrolled: footer says `rows 1-23 of 43 - scroll to the end to enable [a]/[s]`; pressing `a` here did nothing.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_┌ Permission ──────────────────────────────────────────────────────────┐t ───┐
+│▾ app                             ││    e│agent: agt_…115e5d  claude  Run the long setup and create hello.txt   │     │
+│  ▾ ws local                      ││    e│                                                                      │     │
+│  ▾ ws fix-bug (wt)               ││    e│kind: command                                                         │     │
+│    ! claude Run the long setup a…││    e│ Bash: set -e                                                         │     │
+│                                  ││    e│ cd "$WORKSPACE"                                                      │     │
+│                                  ││    e│ echo 'step 1: preparing synthetic fixture file part 1' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 2: preparing synthetic fixture file part 2' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 3: preparing synthetic fixture file part 3' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 4: preparing synthetic fixture file part 4' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 5: preparing synthetic fixture file part 5' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 6: preparing synthetic fixture file part 6' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 7: preparing synthetic fixture file part 7' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 8: preparing synthetic fixture file part 8' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 9: preparing synthetic fixture file part 9' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 10: preparing synthetic fixture file part 10' >> hello.txt│     │
+│                                  ││    e│ echo 'step 11: preparing synthetic fixture file part 11' >> hello.txt│     │
+│                                  ││    e│ echo 'step 12: preparing synthetic fixture file part 12' >> hello.txt│     │
+│                                  ││    e│ echo 'step 13: preparing synthetic fixture file part 13' >> hello.txt│     │
+│                                  ││    e│ echo 'step 14: preparing synthetic fixture file part 14' >> hello.txt│     │
+│                                  ││    e│ echo 'step 15: preparing synthetic fixture file part 15' >> hello.txt│     │
+│                                  ││    e│ echo 'step 16: preparing synthetic fixture file part 16' >> hello.txt│     │
+│                                  ││    e│ echo 'step 17: preparing synthetic fixture file part 17' >> hello.txt│     │
+│                                  ││    e│ echo 'step 18: preparing synthetic fixture file part 18' >> hello.txt│     │
+│                                  ││    e│ echo 'step 19: preparing synthetic fixture file part 19' >> hello.txt│     │
+│                                  ││    t│ echo 'step 20: preparing synthetic fixture file part 20' >> hello.txt│     │
+│                                  ││[8] s│ echo 'step 21: preparing synthetic fixture file part 21' >> hello.txt│     │
+│                                  │└─────│                                                                      │─────┘
+│                                  │┌ send│rows 1–23 of 43 — scroll to the end to enable [a]/[s]                 │─────┐
+│                                  ││> pre│[a]llow  [s]ession  [d]eny  [Esc] close                               │     │
+└──────────────────────────────────┘└─────└──────────────────────────────────────────────────────────────────────┘─────┘
+daemon ok · 1 agents · 1 waiting permission
+
+====================================================================================================
+7. After Down/End the whole request has been on screen (rows 1-23 then 21-43 overlap), so the footer drops the hint and `a` is accepted.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_┌ Permission ──────────────────────────────────────────────────────────┐t ───┐
+│▾ app                             ││    e│agent: agt_…115e5d  claude  Run the long setup and create hello.txt   │     │
+│  ▾ ws local                      ││    e│                                                                      │     │
+│  ▾ ws fix-bug (wt)               ││    e│kind: command                                                         │     │
+│    ! claude Run the long setup a…││    e│ echo 'step 19: preparing synthetic fixture file part 19' >> hello.txt│     │
+│                                  ││    e│ echo 'step 20: preparing synthetic fixture file part 20' >> hello.txt│     │
+│                                  ││    e│ echo 'step 21: preparing synthetic fixture file part 21' >> hello.txt│     │
+│                                  ││    e│ echo 'step 22: preparing synthetic fixture file part 22' >> hello.txt│     │
+│                                  ││    e│ echo 'step 23: preparing synthetic fixture file part 23' >> hello.txt│     │
+│                                  ││    e│ echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt│     │
+│                                  ││    e│ echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt│     │
+│                                  ││    e│ echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt│     │
+│                                  ││    e│ echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt│     │
+│                                  ││    e│ echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt│     │
+│                                  ││    e│ echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt│     │
+│                                  ││    e│ echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt│     │
+│                                  ││    e│ echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt│     │
+│                                  ││    e│ echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt│     │
+│                                  ││    e│ echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt│     │
+│                                  ││    e│ echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt│     │
+│                                  ││    e│ echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt│     │
+│                                  ││    e│ echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt│     │
+│                                  ││    e│ echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt│     │
+│                                  ││    e│ echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt│     │
+│                                  ││    e│ echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt│     │
+│                                  ││    t│ echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt│     │
+│                                  ││[8] s│ touch hello.txt                                                      │     │
+│                                  │└─────│                                                                      │─────┘
+│                                  │┌ send│rows 21–43 of 43                                                      │─────┐
+│                                  ││> pre│[a]llow  [s]ession  [d]eny  [Esc] close                               │     │
+└──────────────────────────────────┘└─────└──────────────────────────────────────────────────────────────────────┘─────┘
+daemon ok · 1 agents · 1 waiting permission
+
+====================================================================================================
+8. Stream of the agent after allow: `permission resolved ... allow`, tool result, assistant text, turn completed, state idle (long command lines are wrapped).
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…115e5d claude idle Run the long setup and create hello.txt ─────────────────┐
+│▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│    ○ claude Run the long setup a…││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│                                  ││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│                                  ││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a2164281dc73f78fdf6467c0e4c9bf: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 1 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  x stop
+
+====================================================================================================
+9. `i` on the agent: input focus. The title line `send: queue|steer|interrupt` highlights the active mode in reverse video (not visible as plain text); keys hint changes to `Enter send  Tab mode  PgUp/PgDn scroll  Esc back`.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…115e5d claude idle Run the long setup and create hello.txt ─────────────────┐
+│▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│    ○ claude Run the long setup a…││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│                                  ││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│                                  ││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a2164281dc73f78fdf6467c0e4c9bf: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> second message                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 1 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/PgDn scroll  Esc back
+
+====================================================================================================
+10. Queue-mode send while the turn was running (two messages), then a steer-mode send: the stream shows `queued message discarded` x2 (steer on Claude falls back to interrupt, which drops the queue) and `user (steer)`.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…115e5d claude running Run the long setup and create hello.txt ──────────────┐
+│▾ app                             ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│    ● claude Run the long setup a…││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a2164281dc73f78fdf6467c0e4c9bf: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  ││[15] user (queue): second message                                                 │
+│                                  ││[16] turn started                                                                 │
+│                                  ││[17] state: running                                                               │
+│                                  ││[18] assistant: Queued message received. Working on it, waiting for more input... │
+│                                  ││[19] queued message discarded: queued while running                               │
+│                                  ││[20] queued message discarded: q2                                                 │
+│                                  ││[21] user (steer): steer this now                                                 │
+│                                  ││[22] turn started                                                                 │
+│                                  ││[23] assistant: Interrupt-mode message received. Still working, waiting for a     │
+│                                  ││steer...                                                                          │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││>                                                                                 │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 1 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/PgDn scroll  Esc back
+
+====================================================================================================
+11. Interrupt-mode send (Tab twice from steer), turn restarts and completes: `user (interrupt)`, `turn started`, `turn completed`, `state: idle`.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…115e5d claude idle Run the long setup and create hello.txt ─────────────────┐
+│▾ app                             ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    touch hello.txt                                                               │
+│    ○ claude Run the long setup a…││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a2164281dc73f78fdf6467c0e4c9bf: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  ││[15] user (queue): second message                                                 │
+│                                  ││[16] turn started                                                                 │
+│                                  ││[17] state: running                                                               │
+│                                  ││[18] assistant: Queued message received. Working on it, waiting for more input... │
+│                                  ││[19] queued message discarded: queued while running                               │
+│                                  ││[20] queued message discarded: q2                                                 │
+│                                  ││[21] user (steer): steer this now                                                 │
+│                                  ││[22] turn started                                                                 │
+│                                  ││[23] assistant: Interrupt-mode message received. Still working, waiting for a     │
+│                                  ││steer...                                                                          │
+│                                  ││[24] user (interrupt): interrupt now                                              │
+│                                  ││[25] turn started                                                                 │
+│                                  ││[26] assistant: Steer-mode message received. All done.                            │
+│                                  ││[27] turn completed                                                               │
+│                                  ││[28] state: idle                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││>                                                                                 │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 1 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/PgDn scroll  Esc back
+
+====================================================================================================
+12. Second agent waiting for permission, Escape closed the dialog, `i` opened the input: yellow hint `permission waiting - Esc then p to review` in the input title and the status bar, and the dialog did not open by itself. (The `Esci` in the input is a leftover draft typed earlier for the first agent, see the report.)
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude waiting_permission Second agent: needs permission ────────────┐
+│▾ app                             ││    echo 'step 18: preparing synthetic fixture file part 18' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 19: preparing synthetic fixture file part 19' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 20: preparing synthetic fixture file part 20' >> hello.txt         │
+│    ● claude Run the long setup a…││    echo 'step 21: preparing synthetic fixture file part 21' >> hello.txt         │
+│    ! claude Second agent: needs …││    echo 'step 22: preparing synthetic fixture file part 22' >> hello.txt         │
+│                                  ││    echo 'step 23: preparing synthetic fixture file part 23' >> hello.txt         │
+│                                  ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
+│                                  ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│                                  ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│                                  ││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│                                  ││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│                                  ││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││⚠ permission waiting — Esc then p to review                                       │
+│                                  ││> Esci                                                                            │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 2 agents · 1 waiting permission  ⚠ permission waiting — Esc then p to review
+
+====================================================================================================
+13. Escape, then `p` reopens the dialog for the waiting agent (unscrolled, armed after ~1 s); `a` is ignored until scrolled to the end.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_┌ Permission ──────────────────────────────────────────────────────────┐─────┐
+│▾ app                             ││    e│agent: agt_…00a642  claude  Second agent: needs permission            │     │
+│  ▾ ws local                      ││    e│                                                                      │     │
+│  ▾ ws fix-bug (wt)               ││    e│kind: command                                                         │     │
+│    ● claude Run the long setup a…││    e│ Bash: set -e                                                         │     │
+│    ! claude Second agent: needs …││    e│ cd "$WORKSPACE"                                                      │     │
+│                                  ││    e│ echo 'step 1: preparing synthetic fixture file part 1' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 2: preparing synthetic fixture file part 2' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 3: preparing synthetic fixture file part 3' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 4: preparing synthetic fixture file part 4' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 5: preparing synthetic fixture file part 5' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 6: preparing synthetic fixture file part 6' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 7: preparing synthetic fixture file part 7' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 8: preparing synthetic fixture file part 8' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 9: preparing synthetic fixture file part 9' >> hello.txt  │     │
+│                                  ││    e│ echo 'step 10: preparing synthetic fixture file part 10' >> hello.txt│     │
+│                                  ││    e│ echo 'step 11: preparing synthetic fixture file part 11' >> hello.txt│     │
+│                                  ││    e│ echo 'step 12: preparing synthetic fixture file part 12' >> hello.txt│     │
+│                                  ││    e│ echo 'step 13: preparing synthetic fixture file part 13' >> hello.txt│     │
+│                                  ││    e│ echo 'step 14: preparing synthetic fixture file part 14' >> hello.txt│     │
+│                                  ││    e│ echo 'step 15: preparing synthetic fixture file part 15' >> hello.txt│     │
+│                                  ││    e│ echo 'step 16: preparing synthetic fixture file part 16' >> hello.txt│     │
+│                                  ││    e│ echo 'step 17: preparing synthetic fixture file part 17' >> hello.txt│     │
+│                                  ││    e│ echo 'step 18: preparing synthetic fixture file part 18' >> hello.txt│     │
+│                                  ││    e│ echo 'step 19: preparing synthetic fixture file part 19' >> hello.txt│     │
+│                                  ││    t│ echo 'step 20: preparing synthetic fixture file part 20' >> hello.txt│     │
+│                                  ││[8] s│ echo 'step 21: preparing synthetic fixture file part 21' >> hello.txt│     │
+│                                  │└─────│                                                                      │─────┘
+│                                  │┌ send│rows 1–23 of 43 — scroll to the end to enable [a]/[s]                 │─────┐
+│                                  ││> Esc│[a]llow  [s]ession  [d]eny  [Esc] close                               │     │
+└──────────────────────────────────┘└─────└──────────────────────────────────────────────────────────────────────┘─────┘
+daemon ok · 2 agents · 1 waiting permission
+
+====================================================================================================
+14. Two agents under one worktree workspace after both permissions were answered; first agent is `running` (its fake provider ended its script), second is `idle`.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude idle Second agent: needs permission ──────────────────────────┐
+│▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│    ● claude Run the long setup a…││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│    ○ claude Second agent: needs …││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│                                  ││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a21643de34778491ae52a4174e8b01: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> Esci                                                                            │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  x stop
+
+====================================================================================================
+15. After `q` (agents keep running) and a new `dgc-next tui`: tree and stream are loaded again (second agent selected, Enter opened input focus).
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude idle Second agent: needs permission ──────────────────────────┐
+│▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│    ● claude Run the long setup a…││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│    ○ claude Second agent: needs …││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│                                  ││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a21643de34778491ae52a4174e8b01: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││>                                                                                 │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 2 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/PgDn scroll  Esc back
+
+====================================================================================================
+16. `dgc-next daemon stop` while the TUI is open: status bar shows the disconnect reason and that it retries every second (text is cut at 120 columns).
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude idle Second agent: needs permission ──────────────────────────┐
+│▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│    ● claude Run the long setup a…││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│    ○ claude Second agent: needs …││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│                                  ││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a21643de34778491ae52a4174e8b01: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon disconnected: the daemon closed the connection — retrying every second (`dgc-next daemon start` starts it) · 2 ag
+
+====================================================================================================
+17. `dgc-next daemon start`: the TUI reconnected by itself; both agents now show as stopped (the daemon restart ended their provider processes).
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude stopped Second agent: needs permission ───────────────────────┐
+│▾ app                             ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│    ■ claude Run the long setup a…││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│    ■ claude Second agent: needs …││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    echo 'step 36: preparing synthetic fixture file part 36' >> hello.txt         │
+│                                  ││    echo 'step 37: preparing synthetic fixture file part 37' >> hello.txt         │
+│                                  ││    echo 'step 38: preparing synthetic fixture file part 38' >> hello.txt         │
+│                                  ││    echo 'step 39: preparing synthetic fixture file part 39' >> hello.txt         │
+│                                  ││    echo 'step 40: preparing synthetic fixture file part 40' >> hello.txt         │
+│                                  ││    touch hello.txt                                                               │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a21643de34778491ae52a4174e8b01: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  ││[15] state: stopped                                                               │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  x stop
+
+====================================================================================================
+18. `A` on an agent: archive confirmation dialog.
+====================================================================================================
+┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude stopped Second agent: needs permission ───────────────────────┐
+│▾ app                             ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │
+│  ▾ ws local                      ││    echo 'step 26: preparing synthetic fixture file part 26' >> hello.txt         │
+│  ▾ ws fix-bug (wt)               ││    echo 'step 27: preparing synthetic fixture file part 27' >> hello.txt         │
+│    ■ claude Run the long setup a…││    echo 'step 28: preparing synthetic fixture file part 28' >> hello.txt         │
+│    ■ claude Second agent: needs …││    echo 'step 29: preparing synthetic fixture file part 29' >> hello.txt         │
+│                                  ││    echo 'step 30: preparing synthetic fixture file part 30' >> hello.txt         │
+│                                  ││    echo 'step 31: preparing synthetic fixture file part 31' >> hello.txt         │
+│                                  ││    echo 'step 32: preparing synthetic fixture file part 32' >> hello.txt         │
+│                                  ││    echo 'step 33: preparing synthetic fixture file part 33' >> hello.txt         │
+│                                  ││    echo 'step 34: preparing synthetic fixture file part 34' >> hello.txt         │
+│                                  ││    echo 'step 35: preparing synthetic fixture file part 35' >> hello.txt         │
+│                                  ││    e┌ Archive ─────────────────────────────────────────────────────────────┐     │
+│                                  ││    e│                                                                      │     │
+│                                  ││    e│Archive agent "Second agent: needs permission"?                       │     │
+│                                  ││    e│                                                                      │     │
+│                                  ││    e│[y]es  [n]o                                                           │     │
+│                                  ││    t└──────────────────────────────────────────────────────────────────────┘     │
+│                                  ││[8] state: waiting_permission                                                     │
+│                                  ││[9] permission resolved perm_01a21643de34778491ae52a4174e8b01: allow              │
+│                                  ││[10] state: running                                                               │
+│                                  ││[11] tool result: (Bash completed with no output)                                 │
+│                                  ││[12] assistant: Setup finished. Finalizing (this turn stays open for a few        │
+│                                  ││seconds).                                                                         │
+│                                  ││[13] turn completed                                                               │
+│                                  ││[14] state: idle                                                                  │
+│                                  ││[15] state: stopped                                                               │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 2 agents · 0 waiting permission
+
+====================================================================================================
+19. Narrow terminal (60x20): sidebar shrinks, provider names are dropped, titles are cut with an ellipsis.
+====================================================================================================
+┌ dgc ───────────┐┌ agt_…00a642 claude stopped Second agent┐
+│▾ app           ││    touch hello.txt                     │
+│  ▾ ws local    ││[8] state: waiting_permission           │
+│  ▾ ws fix-bug …││[9] permission resolved                 │
+│    ■ Run the l…││perm_01a21643de34778491ae52a4174e8b01:  │
+│    ■ Second ag…││allow                                   │
+│                ││[10] state: running                     │
+│                ││[11] tool result: (Bash completed with  │
+│                ││no output)                              │
+│                ││[12] assistant: Setup finished.         │
+│                ││Finalizing (this turn stays open for a  │
+│                ││few seconds).                           │
+│                ││[13] turn completed                     │
+│                ││[14] state: idle                        │
+│                ││[15] state: stopped                     │
+│                │└────────────────────────────────────────┘
+│                │┌ send: queue│steer│interrupt ───────────┐
+│                ││> press i to type to the selected agent │
+└────────────────┘└────────────────────────────────────────┘
+daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Ent

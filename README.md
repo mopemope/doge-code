@@ -16,8 +16,8 @@ protect mechanisms; their count or CI success does not establish usefulness.
 Doge-Code is being rebuilt as an orchestrator that drives the existing Claude
 Code and Codex CLIs instead of calling LLM APIs itself. The new daemon and its
 `dgc-next` client live under `crates/`. They run Claude Code and Codex agents
-from the command line (milestone M1; no TUI yet); the `dgc` binary described
-below keeps working until the legacy runtime is removed. See the
+from the command line and from a terminal UI (milestones M1 and M2); the `dgc`
+binary described below keeps working until the legacy runtime is removed. See the
 [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md) and
 [progress](docs/orchestrator/PROGRESS.md).
 
@@ -121,6 +121,115 @@ Agents:
   permissions (network access, file system paths) is listed with kind `other`
   and a `permissions: ...` summary; `allow` grants them for the turn,
   `allow --session` for the session, `deny` grants none.
+
+### Terminal UI (`dgc-next tui`)
+
+`dgc-next tui` (or `dgc-next` with no arguments) opens a full-screen terminal UI
+for all projects, workspaces and agents. It needs a terminal on stdout (and no
+`--json`), starts the daemon if it is not running, and works against the same
+state as the other commands. Quitting leaves the daemon and every agent running;
+the next `dgc-next tui` shows them again. A recorded session is in
+[m2-tui-screen.txt](docs/orchestrator/m2-tui-screen.txt).
+
+Layout: on the left the tree (project, workspace, agent) with a state symbol per
+agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
+failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
+selected agent's stream (the same events as `dgc-next logs`, last 2000 lines
+kept), below it the input line, and at the bottom a status bar (connection,
+agent count, agents waiting for a permission, errors, key hints). In a narrow
+tree (under 50 columns) provider names are dropped. Agents and permissions
+update live; projects and workspaces added or archived by other commands appear
+on the next reload, every 5 s or at once with `R`. With no project the tree says
+`no projects — add one with: dgc-next project add <path>`.
+
+Keys in the tree:
+
+| Key | Action |
+|---|---|
+| `↑` `↓` / `k` `j` | move; `←` collapse or go to the parent; `→` expand or enter |
+| `Enter` | expand/collapse a project or workspace; on an agent, start typing |
+| `i` | type to the selected agent |
+| `n` | new agent in the selected workspace (form: provider, model, mode, title, prompt) |
+| `w` | new workspace in the selected project (local, or worktree with branch and optional base) |
+| `x` | interrupt the selected agent (discards its queued messages) |
+| `r` | resume a stopped or failed agent |
+| `A` | archive the selected agent (asks first: `y`/`Enter` or `n`/`Esc`) |
+| `p` | jump to the next agent with a pending permission and open its dialog |
+| `R` | reload the tree from the daemon now (it also reloads every 5 s) |
+| `Tab` / `Shift-Tab` | change the send mode: queue, steer, interrupt |
+| `PgUp` / `PgDn` | scroll the stream |
+| `q`, `Ctrl-C` | quit (`Ctrl-C` works everywhere) |
+
+In forms `↑` `↓` move between fields, `Tab` switches the provider (or the
+workspace isolation), `Enter` creates, `Esc` cancels. The new-agent form needs a
+prompt, and a worktree workspace needs a branch; failures stay in the form. The
+form warns in red when the mode is an auto-approve one. A created agent or
+workspace is selected only if its form is still open when the daemon answers;
+after `Esc` it is still created, but the cursor stays where you left it.
+
+Sending: `i` focuses the input; `Enter` sends the line to the agent that was
+selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).
+An unsent draft belongs to the agent it was typed for: after `Esc`, selecting
+another agent shows that agent's own draft (empty if none) and never sends the
+first agent's text; going back restores it. `Tab` changes the mode (the active one is
+highlighted in the input title), `PgUp`/`PgDn` scroll, `Esc` goes back to the
+tree. Pasting (bracketed paste) inserts the text into the input or the
+focused form field as one line: line breaks and tabs become spaces, so a paste
+never sends, never changes the mode and never submits a form. A paste in the
+tree, the permission dialog or the archive confirmation is ignored. The modes
+are the `dgc-next send` behaviors: `queue` (default; sent when the current turn
+ends), `steer` and `interrupt`. Claude agents cannot steer, so
+there `steer` interrupts and then sends, which also discards the queue. When
+the daemon accepts a message the status bar says what happened to it for a few
+seconds: `queued — delivered when the turn ends`, `sent`, `steered` or
+`interrupted and sent`. A queued message appears in the stream only when it is
+delivered (or shown as discarded). If the send fails, the text returns to an empty input and the error shows in the status
+bar. If the agent you were typing to is archived or disappears, the input keeps
+its text and shows `no target — select an agent`; leave with `Esc` and pick
+another agent. The text stays with that removed agent and is not shown again.
+
+Permission dialog: a pending permission of the selected agent opens a dialog
+automatically when you are in the tree and the input is empty. While you type
+in the input it never opens by itself; the input title and the status bar show
+`permission waiting — Esc then p to review` instead (`p` opens it, also from
+a non-empty input after `Esc`). The dialog shows the agent, the kind and dgc's
+one-line summary of the request, not the raw request payload. For Claude, Bash
+shows the command, file tools (Write, Edit, ...) show only the path and never
+the content to be written, and other tools show the first of `command`,
+`file_path`, `notebook_path` or `path`, else the input as compact JSON. For
+Codex it is a summary of the file change or of the requested permissions. The
+provider's payload is in `dgc-next permit ls --json` (`raw`, up to 64 KiB;
+larger payloads are replaced by `{"truncated":true}`). Long summaries wrap;
+a `↪` in the left margin marks a wrapped continuation, not a new line. Rules, all
+there so a keystroke you typed for something else cannot approve a summary you
+did not read (reading the summary is not the same as reading everything the
+agent will do, for example the content of a file it writes):
+
+- `a` (allow once), `s` (allow for the session) and `d` (deny) are ignored for
+  about 0.75 s after the dialog opens, after it switches to another request,
+  and after the terminal is resized ("keys enabled shortly").
+- `a` and `s` work only after the whole summary has been on screen: scroll from
+  the top with `↑` `↓` / `PgDn` until the footer stops saying `scroll to the
+  end to enable [a]/[s]`. Jumping with `End` does not count unless the rows
+  between were visible too. A window too small to show the request keeps `a`
+  and `s` off.
+- `d` is available once the keys are enabled. `Esc` always closes the dialog
+  without answering: the request stays pending and `p` reopens it.
+- A summary that dgc had to shorten (the daemon cuts summaries at 4 KiB) shows
+  `this request was shortened by dgc — the full command is not shown`. That is
+  one case where the summary is incomplete; allow only if you are content to
+  approve something you cannot see in full.
+
+Disconnects: if the daemon goes away (`dgc-next daemon stop`, a crash, an old
+daemon that cannot answer) the status bar shows `daemon disconnected: REASON`
+and the last tree stays on screen, but nothing can be sent. The TUI retries
+every second, spawns the daemon only on its first connection attempt (never
+again after a disconnect), and
+reloads everything when `dgc-next daemon start` brings it back (agents the
+restart ended show as stopped; resume them with `r`). A request that gets no
+answer in time counts as a disconnect: 15 s for reads, 90 s for requests that
+change something (send, create, interrupt, resume, archive, permission answers),
+which the daemon may spend waiting on the provider or git.
 
 The daemon log never contains prompt or agent text; it is stored only in each
 agent's `events.jsonl` (0600).

@@ -430,6 +430,7 @@ async fn create_runs_initial_prompt_then_idle() {
                 text: "hello".to_owned(),
                 behavior: SendBehavior::Queue
             },
+            EventKind::TurnStarted,
             EventKind::StateChanged {
                 state: AgentState::Running
             },
@@ -1336,4 +1337,186 @@ async fn interrupting_send_discards_the_queue_before_sending() {
         })
         .expect("Y recorded");
     assert!(discarded < sent, "the queue is cleared before Y is sent");
+}
+
+/// Kinds of the user-message and turn-start events, in log order, with the
+/// message text for user messages.
+fn turn_markers(events: &[EventKind]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|k| match k {
+            EventKind::UserMessage { text, .. } => Some(format!("user:{text}")),
+            EventKind::TurnStarted => Some("turn_started".to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn turn_started_follows_each_user_message() {
+    let mut h = Harness::new(DEFAULT);
+    // Initial prompt.
+    let (agent, mut session) = h.running("first").await;
+    assert_eq!(
+        turn_markers(&h.events(&agent.id)),
+        vec!["user:first", "turn_started"]
+    );
+
+    // A steer joins the running turn: no new turn.
+    assert_eq!(
+        h.send(&agent.id, "nudge", SendBehavior::Steer).await,
+        SendOutcome::Steered
+    );
+    assert_eq!(session.next_call().await, Call::Steer("nudge".to_owned()));
+
+    // A queued message starts a turn when the previous one completes.
+    assert_eq!(
+        h.send(&agent.id, "second", SendBehavior::Queue).await,
+        SendOutcome::Queued
+    );
+    session.emit(turn_completed()).await;
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("second".to_owned())
+    );
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+
+    // Idle send.
+    assert_eq!(
+        h.send(&agent.id, "third", SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("third".to_owned())
+    );
+
+    // Interrupting send.
+    assert_eq!(
+        h.send(&agent.id, "fourth", SendBehavior::Interrupt).await,
+        SendOutcome::InterruptedAndSent
+    );
+    assert_eq!(session.next_call().await, Call::Interrupt);
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("fourth".to_owned())
+    );
+
+    assert_eq!(
+        turn_markers(&h.events(&agent.id)),
+        vec![
+            "user:first",
+            "turn_started",
+            "user:nudge",
+            "user:second",
+            "turn_started",
+            "user:third",
+            "turn_started",
+            "user:fourth",
+            "turn_started",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn turn_started_follows_the_queue_head_sent_after_resume() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, session) = h.running("first").await;
+    assert_eq!(
+        h.send(&agent.id, "later", SendBehavior::Queue).await,
+        SendOutcome::Queued
+    );
+    // The provider dies; the queue stays persisted.
+    session
+        .emit(ProviderEvent::Exited {
+            success: false,
+            stderr_tail: "boom".to_owned(),
+        })
+        .await;
+    h.wait_state(&agent.id, AgentState::Failed).await;
+
+    h.manager.resume(&agent.id).await.expect("resume");
+    let mut session = h.next_session().await;
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("later".to_owned())
+    );
+    h.wait_state(&agent.id, AgentState::Running).await;
+    assert_eq!(
+        turn_markers(&h.events(&agent.id)),
+        vec!["user:first", "turn_started", "user:later", "turn_started"]
+    );
+}
+
+#[tokio::test]
+async fn a_chunked_prompt_records_one_turn_start_after_the_last_chunk() {
+    let mut h = Harness::new(DEFAULT);
+    let prompt = "p".repeat(2 * 1024 * 1024);
+    let (agent, _session) = h.running(&prompt).await;
+    let mut events: Vec<AgentEvent> = Vec::new();
+    loop {
+        let since = events.last().map_or(0, |e| e.seq);
+        let page = h
+            .manager
+            .events_page(&AgentEventsParams {
+                agent_id: agent.id.clone(),
+                since_seq: since,
+                limit: 1000,
+            })
+            .expect("events page");
+        if page.is_empty() {
+            break;
+        }
+        events.extend(page);
+    }
+    let kinds: Vec<EventKind> = events.into_iter().map(|e| e.kind).collect();
+    let markers = turn_markers(&kinds);
+    assert!(markers.len() >= 9, "{} markers", markers.len());
+    assert_eq!(markers.last().map(String::as_str), Some("turn_started"));
+    assert_eq!(markers.iter().filter(|m| *m == "turn_started").count(), 1);
+}
+
+#[tokio::test]
+async fn event_log_handles_are_bounded() {
+    let mut h = Harness::new(DEFAULT);
+    // Three agents stay live and keep their handles.
+    let mut live = Vec::new();
+    for i in 0..3 {
+        live.push(h.running(&format!("live {i}")).await);
+    }
+    let mut archived = Vec::new();
+    let mut sessions = Vec::new();
+    for i in 0..100 {
+        let agent = h.create(&format!("a{i}")).await;
+        sessions.push(h.next_session().await);
+        h.manager.archive(&agent.id).await.expect("archive");
+        archived.push(agent);
+    }
+    // Archiving drops the handle.
+    assert!(
+        h.manager.open_log_handles() <= 3 + 64,
+        "{} handles",
+        h.manager.open_log_handles()
+    );
+    // Reading non-live agents re-opens logs but stays bounded.
+    for agent in &archived {
+        assert!(!h.events(&agent.id).is_empty(), "archived log is readable");
+        assert!(
+            h.manager.open_log_handles() <= 3 + 64,
+            "{} handles",
+            h.manager.open_log_handles()
+        );
+    }
+    assert!(h.manager.open_log_handles() >= 3, "live handles are kept");
+
+    // Live agents still append through their cached handle.
+    let (agent, session) = &live[0];
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    assert!(
+        h.events(&agent.id)
+            .contains(&EventKind::TurnCompleted { usage: None })
+    );
+    drop(sessions);
 }

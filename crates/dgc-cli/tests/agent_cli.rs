@@ -14,46 +14,12 @@ use std::process::Output;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use common::{TestEnv, assert_success, stdout};
+use common::{
+    CLAUDE_VERSION, CODEX_VERSION, TestEnv, assert_success, scenario, stdout, write_wrapper,
+};
 use serde_json::Value;
 
-const CLAUDE_VERSION: &str = "2.1.332 (Claude Code)";
-const CODEX_VERSION: &str = "codex-cli 0.172.0";
 const WAIT: Duration = Duration::from_secs(15);
-
-/// The fake provider is built next to `dgc-next` by a workspace build.
-fn fake_provider() -> PathBuf {
-    let fake = Path::new(env!("CARGO_BIN_EXE_dgc-next")).with_file_name("dgc-fake-provider");
-    assert!(
-        fake.is_file(),
-        "{} is missing: run the tests with --workspace (scripts/verify.sh does) so dgc-daemon's \
-         fake provider is built",
-        fake.display()
-    );
-    fake
-}
-
-fn scenario(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/scenarios")
-        .join(format!("{name}.jsonl"))
-}
-
-/// A 0700 script that prints `version` for `--version` and otherwise replays
-/// `scenario` with the fake provider.
-fn write_wrapper(dir: &Path, name: &str, version: &str, scenario: &Path) -> PathBuf {
-    let path = dir.join(name);
-    let script = format!(
-        "#!/bin/sh\n\
-         if [ \"$1\" = \"--version\" ]; then echo '{version}'; exit 0; fi\n\
-         DGC_FAKE_TIMEOUT_MS=60000 exec '{}' '{}' \"$@\"\n",
-        fake_provider().display(),
-        scenario.display()
-    );
-    fs::write(&path, script).expect("write wrapper");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("chmod wrapper");
-    path
-}
 
 /// Run git hermetically; panics on failure.
 fn git(cwd: &Path, args: &[&str]) {

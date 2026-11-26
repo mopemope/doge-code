@@ -13,6 +13,8 @@
 //!   never block: a subscriber that stops reading only lags itself.
 //! - The message queue is persisted to `<state>/agents/<id>/queue.json` on
 //!   every change and loaded again by `resume`.
+//! - Open log handles are bounded (see [`LogCache`]): live agents keep theirs,
+//!   at most [`MAX_IDLE_LOG_HANDLES`] other agents' handles are cached.
 //! - Lock order: `live` → `logs` → one `EventLog`. `permissions` is never held
 //!   while taking another lock, and no lock is held across an `.await`.
 //!   Agents that are not live are changed only while holding `live`, so such a
@@ -21,7 +23,7 @@
 //!   out fails the agent, so a wedged session never blocks archive.
 //! - Tracing carries ids and states only, never prompt or output text.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -59,6 +61,9 @@ use crate::time::now_rfc3339;
 pub const EVENTS_CHANNEL_CAPACITY: usize = 1024;
 const QUEUE_VERSION: u32 = 1;
 const QUEUE_FILE: &str = "queue.json";
+/// Most event log handles kept open for agents that are not live (read
+/// through `events_page`), beyond the handles of live agents.
+const MAX_IDLE_LOG_HANDLES: usize = 64;
 /// Directory under the state dir holding agent records (same as `Store`).
 const AGENTS_DIR: &str = "agents";
 /// How long archive (and a failing agent) waits for its session to end.
@@ -208,6 +213,102 @@ struct PendingEntry {
     provider_request_id: String,
 }
 
+struct CachedLog {
+    log: Arc<Mutex<EventLog>>,
+    /// Value of [`LogCache::tick`] at the last use.
+    last_used: u64,
+}
+
+/// Open event logs, one handle per agent, opened on first use.
+///
+/// Handles of live agents are never evicted: a live agent appends through
+/// its handle, and a second handle for the same file would hand out `seq`
+/// numbers twice. Handles of agents that are not live are evicted least
+/// recently used first beyond [`MAX_IDLE_LOG_HANDLES`], and dropped when the
+/// agent is archived.
+///
+/// Log-lock invariant (the subscription seam relies on it): `emit` appends
+/// and broadcasts under the agent's log lock, and `events_page` reads under
+/// the same lock. Eviction keeps that intact because it only removes a handle
+/// that nothing else holds (`Arc::strong_count == 1`, checked under the
+/// `logs` lock, which also guards every clone), so no append or read can be
+/// in flight on an evicted handle. Re-opening the log of an agent that is not
+/// live is safe: the only appends to such an agent are state changes made
+/// while holding `live`, each through whichever single handle is cached.
+#[derive(Default)]
+struct LogCache {
+    logs: HashMap<AgentId, CachedLog>,
+    /// Agents with an actor; maintained under `live` by `register_live` and
+    /// `Shared::finish`.
+    live: HashSet<AgentId>,
+    tick: u64,
+}
+
+impl LogCache {
+    fn get(&mut self, id: &AgentId) -> Option<Arc<Mutex<EventLog>>> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.logs.get_mut(id).map(|cached| {
+            cached.last_used = tick;
+            Arc::clone(&cached.log)
+        })
+    }
+
+    fn insert(&mut self, id: &AgentId, log: Arc<Mutex<EventLog>>) {
+        self.tick += 1;
+        self.logs.insert(
+            id.clone(),
+            CachedLog {
+                log,
+                last_used: self.tick,
+            },
+        );
+        self.evict();
+    }
+
+    /// Drop least recently used handles of non-live agents beyond the bound.
+    /// Handles in use are skipped; the cache may exceed the bound until they
+    /// are released.
+    fn evict(&mut self) {
+        let mut idle = self
+            .logs
+            .iter()
+            .filter(|(id, _)| !self.live.contains(*id))
+            .map(|(id, cached)| (cached.last_used, id.clone(), Arc::strong_count(&cached.log)))
+            .collect::<Vec<_>>();
+        if idle.len() <= MAX_IDLE_LOG_HANDLES {
+            return;
+        }
+        idle.sort_by_key(|(last_used, ..)| *last_used);
+        let excess = idle.len() - MAX_IDLE_LOG_HANDLES;
+        let mut removed = 0;
+        for (_, id, holders) in idle {
+            if removed == excess {
+                break;
+            }
+            if holders == 1 {
+                self.logs.remove(&id);
+                removed += 1;
+            }
+        }
+    }
+
+    fn mark_live(&mut self, id: &AgentId) {
+        self.live.insert(id.clone());
+    }
+
+    fn mark_not_live(&mut self, id: &AgentId) {
+        self.live.remove(id);
+        self.evict();
+    }
+
+    /// Forget the agent's handle (it was archived; nothing appends again).
+    fn forget(&mut self, id: &AgentId) {
+        self.live.remove(id);
+        self.logs.remove(id);
+    }
+}
+
 /// State shared by the manager and every actor.
 struct Shared {
     store: Arc<Store>,
@@ -216,8 +317,7 @@ struct Shared {
     events: broadcast::Sender<AgentEvent>,
     /// Command channels of live agents.
     live: Mutex<HashMap<AgentId, mpsc::Sender<Command>>>,
-    /// Open event logs, one per agent, opened on first use.
-    logs: Mutex<HashMap<AgentId, Arc<Mutex<EventLog>>>>,
+    logs: Mutex<LogCache>,
     permissions: Mutex<HashMap<PermissionId, PendingEntry>>,
 }
 
@@ -233,13 +333,23 @@ impl Shared {
     fn log(&self, id: &AgentId) -> Result<Arc<Mutex<EventLog>>, AgentError> {
         let mut logs = lock(&self.logs);
         if let Some(log) = logs.get(id) {
-            return Ok(Arc::clone(log));
+            return Ok(log);
         }
         let log = EventLog::open(&self.agent_dir(id), id.clone(), self.events_max_bytes)
             .map_err(storage)?;
         let log = Arc::new(Mutex::new(log));
-        logs.insert(id.clone(), Arc::clone(&log));
+        logs.insert(id, Arc::clone(&log));
         Ok(log)
+    }
+
+    /// Add a live agent to `live` (held by the caller) and pin its log.
+    fn register_live(
+        &self,
+        live: &mut HashMap<AgentId, mpsc::Sender<Command>>,
+        id: &AgentId,
+    ) -> mpsc::Receiver<Command> {
+        lock(&self.logs).mark_live(id);
+        register(live, id)
     }
 
     /// Append `kind` to the agent's log, then broadcast it. Broadcasting under
@@ -274,6 +384,18 @@ impl Shared {
         Ok(())
     }
 
+    /// Record the message that starts a turn: its `UserMessage` chunks, then
+    /// one `TurnStarted`.
+    fn emit_turn_start(
+        &self,
+        id: &AgentId,
+        text: &str,
+        behavior: SendBehavior,
+    ) -> Result<(), AgentError> {
+        self.emit_user(id, text, behavior)?;
+        self.emit(id, EventKind::TurnStarted).map(drop)
+    }
+
     fn emit_or_warn(&self, id: &AgentId, kind: EventKind) {
         if let Err(err) = self.emit(id, kind) {
             warn!(agent_id = %id, error = %err, "could not record agent event");
@@ -298,8 +420,12 @@ impl Shared {
     fn finish(&self, agent: &mut Agent, state: AgentState) {
         let mut live = lock(&self.live);
         live.remove(&agent.id);
+        lock(&self.logs).mark_not_live(&agent.id);
         if let Err(err) = self.store_state(agent, state) {
             warn!(agent_id = %agent.id, ?state, error = %err, "could not store final agent state");
+        }
+        if state == AgentState::Archived {
+            lock(&self.logs).forget(&agent.id);
         }
         info!(agent_id = %agent.id, ?state, "agent is no longer live");
     }
@@ -327,7 +453,7 @@ impl AgentManager {
                 events_max_bytes: config.events_max_bytes,
                 events,
                 live: Mutex::new(HashMap::new()),
-                logs: Mutex::new(HashMap::new()),
+                logs: Mutex::new(LogCache::default()),
                 permissions: Mutex::new(HashMap::new()),
             }),
             adapters,
@@ -406,7 +532,7 @@ impl AgentManager {
             )
             .and_then(|_| {
                 self.shared
-                    .emit_user(&agent.id, &params.initial_prompt, SendBehavior::Queue)
+                    .emit_turn_start(&agent.id, &params.initial_prompt, SendBehavior::Queue)
             });
         if let Err(err) = recorded {
             // Do not leave a record that claims to be starting.
@@ -415,7 +541,9 @@ impl AgentManager {
             let _ = self.shared.put_agent(&agent);
             return Err(err);
         }
-        let commands = register(&mut lock(&self.shared.live), &agent.id);
+        let commands = self
+            .shared
+            .register_live(&mut lock(&self.shared.live), &agent.id);
         info!(agent_id = %agent.id, provider = ?agent.provider, auto_approve, "agent created");
         let launch = Launch {
             adapter,
@@ -447,7 +575,7 @@ impl AgentManager {
             let queue = load_queue(&self.shared.queue_path(id))?;
             agent.last_error = None;
             self.shared.store_state(&mut agent, AgentState::Starting)?;
-            let commands = register(&mut live, id);
+            let commands = self.shared.register_live(&mut live, id);
             (agent, workspace.path, adapter, queue, commands)
         };
         info!(agent_id = %agent.id, queued = queue.len(), "agent resuming");
@@ -549,6 +677,7 @@ impl AgentManager {
             return Err(AgentError::state(agent.state));
         }
         self.shared.store_state(&mut agent, AgentState::Archived)?;
+        lock(&self.shared.logs).forget(id);
         info!(agent_id = %agent.id, "agent archived");
         Ok(agent)
     }
@@ -583,6 +712,12 @@ impl AgentManager {
     pub fn subscribe(&self, agent: Option<AgentId>) -> broadcast::Receiver<AgentEvent> {
         let _ = agent;
         self.shared.events.subscribe()
+    }
+
+    /// Number of cached event log handles. For tests.
+    #[doc(hidden)]
+    pub fn open_log_handles(&self) -> usize {
+        lock(&self.shared.logs).logs.len()
     }
 
     /// Stored events of one agent with `seq > since_seq`.

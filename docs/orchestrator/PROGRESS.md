@@ -4,7 +4,7 @@
 最初にここを読み「現在の作業」から再開する。
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
-- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md)
+- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2（TUI）の計画作成
+- タスク: M3（切替: 新バイナリを `dgc` に改名、旧 `src/` と旧専用依存・ドキュメント・skills を削除）の計画作成
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）、Task 14（M1 受け入れ）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M2（TUI）の計画を作成する（superpowers:writing-plans、計画は docs/superpowers/plans/）。M1 の保留指摘は末尾「M1 レビューで保留した指摘と判断」から優先度を付けて取り込む。M1 は PR #184（`feat/orchestrator-m1` → `develop`）でレビュー待ち。M0 は PR #183 でマージ済み
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2（TUI）完了、最終レビューと修正の再レビュー済み（2026-11-26）、PR #185（`feat/orchestrator-m2` → `develop`）でレビュー待ち
+- 次の一手: M3 の計画を作成する（superpowers:writing-plans）。M1/M2 の保留指摘（本ファイル末尾）から、切替前に直すものを選んで計画に含める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -28,8 +28,8 @@
 | M | 内容 | 状態 | 計画 |
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
-| M1 | デーモン中核と CLI（`dgc-next`） | 完了（最終レビューと修正の再レビュー済み、2026-11-26） | m1-daemon |
-| M2 | TUI | 未着手 | 未作成 |
+| M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
+| M2 | TUI | 完了（最終レビュー済み、2026-11-26） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
@@ -62,9 +62,21 @@
 | 13 | エージェント操作の公開（ソケットと CLI） | 完了 | `feat(cli): expose agent and permission commands` |
 | 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 完了 | `docs(orchestrator): complete M1 acceptance` |
 
+### M2
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 完了 | `fix(daemon): bound event log handles and record turn starts` |
+| 2 | TUI の状態と更新（純粋部分） | 完了 | `feat(cli): add TUI state and update logic` |
+| 3 | 描画 | 完了 | `feat(cli): render the TUI layout` |
+| 4 | ランタイムと起動コマンド | 完了 | `feat(cli): run the TUI against the daemon` |
+| 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 完了 | `docs(orchestrator): complete M2 acceptance` |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M2): TUI の画面構成はサイドバー（プロジェクト／ワークスペース／エージェントのツリー）+ 選択エージェントのストリームと入力欄（ユーザー決定）。`dgc-next tui` と引数なしの `dgc-next` で起動。
 
 - 2026-11-25: 信頼境界は UID。dgc が起動したエージェントは信頼する（ユーザー決定）。
 - 2026-11-25: 権限の自動承認系 mode は M1 から `--mode` 明示で使える（設計者判断）。
@@ -349,7 +361,151 @@
   `git status` にも `-c` が伝わるため、判定を経ずに呼ばれても未追跡ファイルを消さない）。`status.showUntrackedFiles=no` の設定下で
   未追跡ファイルだけの worktree が消えた穴を塞ぐ。gitignore されたファイルは git 上「作業」ではないため force なしでも消える（README に記載）。
   コントローラ裁定: main へマージ済みでも base より先のコミットがあれば `--force` が必要（README に明記）。
+- 2026-11-26 (M2 Task 1): `AgentManager` の EventLog ハンドルキャッシュ（`Shared::logs`）を `LogCache` にして上限を設けた。
+  生きているエージェント（actor あり）のハンドルは常に保持し、非 live のエージェントは直近に使った最大 64 件
+  （`MAX_IDLE_LOG_HANDLES`）まで。超過分は最も古いものから閉じ、archive 時はそのエージェントのハンドルを閉じる。
+  他で使用中（`Arc::strong_count > 1`）のハンドルは追い出さない。`emit`（追記+broadcast）と `events_page`（読み出し）が
+  同じログロックを使う不変条件は、追い出しが「誰も持っていないハンドルだけ」を `logs` ロック下で外すことで保たれる。
+  テスト用に `AgentManager::open_log_handles()`（`#[doc(hidden)] pub`）を追加。
+- 2026-11-26 (M2 Task 1): `EventKind::TurnStarted` を、ターンを始める `UserMessage` の直後に 1 回記録する（初期プロンプト、
+  Idle からの送信、キュー先頭の送信（ターン完了時・resume 後）、interrupt_and_send）。steer（実行中ターンへの合流）では記録しない。
+  長文でチャンク分割された `UserMessage` は最後のチャンクの後に 1 回。
+- 2026-11-26 (M2 Task 2): 新依存なし。`tui/mod.rs` に `#![allow(dead_code)]`（Task 4 で外す）。`AppEvent`/`Effect`/`RequestTag`/`ConnectionState` は
+  `tui/mod.rs`、`AppState` ほかは `tui::state`、`update` は `tui::update`、`KeyInput`/`LineEditor` は `tui::input`。
+  `ConnectionState::Reconnecting` が `AppState` の初期接続状態。`RequestTag` は Send/Respond/CreateAgent/CreateWorkspace/Interrupt/Resume/Archive。
+  設計判断: (1) 履歴読み込み中（選択直後・再接続・lagged 後）の生イベントは保留し、履歴完了（空ページ）後に適用する。
+  seq だけで重複排除すると、先着の生イベントが古い履歴を隠すため。(2) 権限ダイアログは Tree フォーカス、または入力欄が空の Input
+  フォーカスでだけ自動で開く（書きかけのメッセージの `a`/`d` が権限に答えないため）。Esc で閉じた権限は `dismissed` に入り自動では
+  再表示されない（`p` で再表示）。(3) 選択エージェントが Snapshot/archive で変わったら、Input フォーカスは Tree に戻す。
+  (4) 作成ダイアログは RpcDone まで開いたまま（`submitting` で二重送信防止、失敗はダイアログとステータスに表示）。成功したら
+  結果の Agent/Workspace を木に挿入して選択する。(5) 送信失敗時は入力欄が空なら送ったテキストを戻す。(6) Ctrl-C はどのフォーカスでも終了
+  （README のキー表に載せる）。(7) 未知エージェントのイベントによる `LoadSnapshot` は応答待ちの間は 1 回だけ（20 Tick で再試行可）。
+  (8) フォーム内の移動は ↑↓、Tab は provider（ワークスペースは local/worktree）切替。
+- 2026-11-26 (M2 Task 2 レビュー修正、コントローラ裁定): 上の (2)(3) を次で置き換える。
+  (a) 権限ダイアログは Input フォーカス中・他のダイアログ表示中には決して自動で開かない。開くのは Tree フォーカスで、選択中
+  エージェントに未 dismiss の権限があり、入力欄が空のときの自動と、Tree での明示的な `p`（入力欄が空でなくても開く）だけ。
+  Input 中は `AppState::permission_hint()`（`⚠ permission waiting — Esc then p to review`）を入力欄タイトルとステータスに出す。
+  (b) ダイアログが開く／権限が差し替わるたびに a/s/d を 3 Tick（M2 Task 4 で 2 から変更。開いた直後に Tick が来ても残り 2 Tick は
+  250 ms の完全な周期なので 500 ms 以上）無視する（`Dialog::permission_armed()`、
+  ダイアログに「keys enabled shortly」を表示）。Esc とナビゲーションは有効。
+  Input の送信先は入力欄を開いた時点のエージェント（`input_target`）。そのエージェントが archive／snapshot で消えても Input
+  フォーカスは維持し、「送信先なし」（`input_target_missing()`、送信は `select an agent first`、入力テキストは保持、ダイアログは開かない）。
+  履歴読み込みに世代（generation）を導入: `Effect::LoadHistory` と `AppEvent::History` に `generation: u64` を追加し、現在の世代
+  でないページは破棄する（選択 A→B→A、Lagged/Connected 中の再読み込みで古い連鎖が `last_seq` を進めて穴を作るのを防ぐ）。Task 4 の
+  backend はページの `generation` を `LoadHistory` からそのまま返す。`agent.events` が失敗したら、空の `done: true` ページ
+  （同じ generation）と `RpcDone{ request: RequestTag::LoadHistory{agent_id}, result: Err }` を返す（読み込み中のまま固まらず、
+  ステータスに出る）。Snapshot は、要求中に届いたライブの権限イベント（追加・解決）を適用し直す（`permission_log`、要求から応答
+  まで、または 20 Tick／切断まで）。
+- 2026-11-26 (M2 Task 3): 新依存 `ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }` と
+  `crossterm = "0.29"` を `[workspace.dependencies]` と `crates/dgc-cli` に追加（バージョンはルートパッケージと同一。Cargo.lock は dgc-cli
+  の依存 2 行のみ変化、新規クレートなし）。`tui::render::render(&AppState, &mut Frame)` は `AppState` だけを読む。
+  設計判断: (1) レイアウトは 左ツリー（幅 30%・18〜40 桁、端末幅 < 50 なら 16 桁で、狭いときはプロバイダ名を省き名前を `…` で切る。
+  `[auto]` は必ず残す）/ 右上ストリーム / 右下入力欄（権限ヒント表示中は 4 行）/ 最下行ステータス。ダイアログは右ペイン中央に重ねる。
+  (2) エスケープ: `Row.label`・ストリーム行・`Status.error`・`Disconnected.reason`・フォーム `error`・`ConfirmArchive.title` は state 側で
+  済んでおり二重にかけない。render 側でかけるのは、ストリーム見出しとダイアログ見出しのエージェント名（`escape_line`）、
+  権限の `summary`（`escape_text`、改行は行区切りとして保持）、入力欄・フォームの編集テキスト（`escape_line`）。`PendingPermission.raw` は
+  表示しない（利用者が答える対象は summary。raw を出すとさらに長大な未整形テキストを表示することになる）。
+  (3) 権限ダイアログは、選択中でないエージェントの要求でも「エージェント短縮 id・provider・title」、kind、summary 全文を折り返して表示し、
+  選択中でなければ黄色で `(not the selected agent)` を出す。（レビュー修正で置き換え。下の 2026-11-26 M2 Task 3 レビュー修正を参照）
+  (4) `!dialog.permission_armed()` の間は `keys enabled shortly` と、淡色（DIM）の `[a]llow [s]ession [d]eny` を出す。armed で通常表示。
+  (5) Input フォーカスで権限待ちなら `permission_hint()` を入力欄の最初の行に黒地・黄背景で、ステータスバーにも出す。
+  `input_target_missing()` のとき入力欄タイトルに赤字で `no target — select an agent`。
+  (6) `output::kind_name` を `pub` にした（権限ダイアログの kind 表示に再利用）。新規ファイル `render.rs`（レビュー修正後は幾何・折り返しを `tui/layout.rs` に分離）。
+- 2026-11-26 (M2 Task 3 レビュー修正、コントローラ裁定): 「権限の確認画面は承認する内容をそのまま見せる」を守るため次を変更。
+  (a) 長い summary の中央を隠す head/tail 表示と、誤った `permit ls` の「全文」案内を廃止（`permit ls` も同じ 4 KiB に切られた文字列を出す）。
+  summary は常に全体を折り返して持ち、スクロールで読む（↑↓ 1 行、PgUp/PgDn 1 ページ、Home/End）。
+  (b) 配置計算を純粋関数 `tui::layout::permission_layout(size, summary)` に一本化し、描画（`render`）と a/s の判定（`update`）が同じ結果を使う。
+  ヘッダ（3 行: エージェント・選択外の注記・kind）とフッタ（armed ヒント 1 行、スクロール表示、短縮警告、凡例）を先に確保し、残りが summary の
+  表示行数。確保量は armed/スクロール状態に依存しない。1 行も取れなければ `too_small`（超過扱い）で、`window too small — enlarge or [d]eny` と凡例だけを出す。
+  (c) `Dialog::Permission` に `scroll` / `seen_rows` / `seen_end` を追加。`a`/`s` は armed かつ `seen_end` のときだけ受け付け、`d`（armed が必要）と
+  Esc は常に使える。`seen_end` は summary の全行が（上からのスクロールで連続して）画面に出たときだけ真。裁定の文言（「最後の行が一度見えた」）より
+  厳しくした: End/Home で末尾へ跳ぶと中間の行が一度も見えないまま許可できてしまい、中間に細工したコマンドを隠せるため。そのため End だけでは
+  a/s は有効にならず、上から PgDn/↓ で読み進める（末尾から PgUp で戻って先頭側の既読範囲に繋ぐ読み方は数えない）。収まる場合は即 true。
+  端末サイズが変わる（`Resize`）と折り返しが変わるので先頭から読み直し（収まるようになれば即 true）。表示中は
+  `rows X–Y of N — scroll to the end to enable [a]/[s]`、読了後は `rows X–Y of N`、読了までは a/s の凡例を淡色にする。
+  (d) 折り返しの継続行（要求の改行ではなく幅で折れた行）には淡色の `↪` を左端 1 桁に付ける（シェルでは改行がコマンド区切りのため）。
+  全行に 1 桁のガターを取るため本文幅は dialog 内幅 - 1。
+  (e) ヘッダのエージェント行は 1 行に切る（id・provider が先頭、長い title は `…`）。
+  (f) 文字幅は grapheme 単位（ratatui の `styled_graphemes` と `Span::width`）で測る。char 単位の合計では `⚠\u{fe0f}`（2 桁）等が 1 桁と数えられて
+  行末で最後の grapheme が描画されずに消えた。折り返し・切り詰め・末尾取りの全部が同じ関数群（`tui/layout.rs`）を使う。
+  (g) 既知の制限（プラン水準の裁定）: プロトコルは summary を 4 KiB で切る（`…(truncated, N bytes total)`）。切られた要求には赤字で
+  `this request was shortened by dgc — the full command is not shown` を出す。a/s は読了後に使える。完全なコマンドは表示できない。
+  (h) 契約（Task 4 へ）: `permission_layout` は `AppState.size` を使うので、ランタイムは起動直後に実端末サイズの `AppEvent::Resize` を 1 回送り、
+  以後のリサイズごとに送ること（既定の 80x24 のままだと、描画側の幅と a/s 判定の幅がずれる）。描画は実際のフレームサイズで配置する。
+- 2026-11-26 (M2 Task 3 レビュー修正 2、コントローラ裁定): 権限ダイアログが「描かれていない文字を承認させる」経路を塞ぐ。
+  (i) 幅は ratatui が描画に使う `CellWidth::cell_width()`（半角濁点・半濁点 U+FF9E/U+FF9F を 1 桁と数える）で grapheme 単位に測る
+  （`unicode-width` との差で、行が収まると判断したのに ratatui が行を途中で切ることがあった）。
+  (ii) `permission_layout` は「どの行も 1 桁のガター + 本文が内幅に収まる」ことを保証できなければ `too_small`（a/s 無効、`d` は有効）にする。
+  本文幅は `内幅 - 1`（以前の `.max(1)` を廃止）。内幅が凡例の最長項目（`[Esc] close`）以下のときも `too_small`。端末 19〜20 桁（右ペイン 3〜4 桁）で
+  何も描かれないのに a が通る経路と、2 桁幅の CJK が落ちる経路を閉じる。
+  (iii) summary 中の `↪`（U+21AA）は `\u{21aa}` にエスケープする。本物の行頭の `↪` が折り返しの継続行に見えないようにする（ガターの `↪` だけが折り返しを意味する）。
+  (iv) ダイアログの幅の上限（72）と内側の高さは `permission_layout` の値を描画が使う（二重定義を除去）。
 
+- 2026-11-26 (M2 Task 4): 新依存なし（`dgc-client` の tokio に既存 crate の feature `macros` を追加）。
+  (1) `tui::backend::Backend::start(paths, exe)` は 1 タスクで RPC 接続と全エージェント購読接続を持つ。Effect は RPC 接続で順に実行
+  （`LoadSnapshot` = project.list + workspace.list + agent.list{include_archived:false} + permission.list、`LoadHistory` = agent.events
+  を 1 ページだけ取り `done = ページが空`、次のページは `update` が要求する。generation は Effect からそのまま返す。失敗は空の done ページ +
+  `RpcDone{LoadHistory, Err}`）。どちらかの接続が切れたら `Disconnected` を 1 回、1 秒ごとに再接続（購読も張り直してから）して `Connected`。
+  切断中の `Call`/`LoadHistory` はすぐ失敗を返す（再接続後に古い操作を実行しない）。`connect_or_spawn` は最初の 1 回だけで、以後は
+  `connect` のみ（ユーザーの `daemon stop` を TUI が覆さない）。R キーでの再起動は入れず、理由文に「`dgc-next daemon start` starts it」を出す。
+  (2) インターフェースの変更: Effect の送信側は `mpsc::Sender` ではなく `mpsc::UnboundedSender`（UI 側が送信で待たないため。UI→backend
+  と backend→UI が両方満杯で止まる経路をなくす。イベント側は容量 256 の有界のままで、溢れたら購読がデーモン側で lagged になる）。
+  (3) 購読のデコードできない event は lagged と同じ扱い（再購読と再読込）。`Resubscribe` は古い購読タスクを abort して新しい接続で購読する。
+  `dgc-client` の購読タスクは受信側が落ちたらすぐ接続を閉じるよう修正（以前は次の通知が来るまで残り、lagged 後は通知が来ないので
+  接続が漏れていた）。
+  (4) `tui::Runtime<B: ratatui Backend, U>` が状態・端末・Effect 送信を持ち、最初に実サイズの `Resize` を `update` に渡す。各イベントの前に
+  `terminal.size()` と `state.size` を比べ、違えば `Resize` を先に渡す。描画したフレームの大きさが `state.size` と違えば `Resize` を渡して描き直す。
+  デーモンイベントは最大 64 件まとめて処理してから 1 回描画。Tick は `TICK = 250 ms`、`MissedTickBehavior::Delay`。
+  `PERMISSION_ARM_TICKS` を 3 に上げた（上の Task 2 レビュー修正 (b)）。
+  (5) `tui::run`: 標準出力が端末でなければ `the TUI needs a terminal`。raw mode 直後に Drop ガード、パニックフック（復元してから既存フック）、
+  代替画面、マウスなし。SIGTERM/SIGHUP/SIGINT でも通常終了経路で復元。入力は専用スレッドが `crossterm::event::poll(100 ms)` + `read` し、
+  チャネルが閉じたら終わる（join しない）。tracing subscriber は入れない。終了してもデーモンとエージェントは止めない。
+  (6) `dgc-next tui` と引数なしの `dgc-next` で起動。`--json` 付きは `the TUI has no JSON mode`。
+  (7) テスト構成: dgc-cli はライブラリを持たないので `tests/tui_backend.rs` は `#[path]` で `src/output.rs` と `src/tui/mod.rs` を取り込む
+  （そのため tui/output の単体テストがこのテストバイナリでも走る）。偽プロバイダのラッパー生成（`fake_provider`/`scenario`/`write_wrapper`）は
+  `tests/common` に移した。テストの `exe` は `DGC_STATE_ROOT` を固定する `dgc-next` のラッパーで、spawn されたデーモンも一時ディレクトリに置く。
+- 2026-11-26 (M2 Task 4 レビュー修正、コントローラ裁定): (a) Snapshot が読めない（エラー応答、結果がデコードできない。例: 版の違う古いデーモンが
+  `permission.list` を知らない）ときは接続断として扱う: `Disconnected{reason: "cannot load the snapshot: …"}`（update がエスケープ）を出して
+  1 秒ごとに再接続・再読込する。`RequestTag::LoadSnapshot` を足してステータスのエラーに出す案は採らなかった（エラー表示は 10 Tick で消え、
+  空のツリーが「Connected」のまま残るため）。直後の再接続で `Connected` が一瞬出るが、同じイベントのまとまりで処理されるので表示は理由付きの切断のまま。
+  (b) 端末サイズが変わる `Resize`（同じサイズなら何もしない）で権限ダイアログを再び 3 Tick 無効にする（`AppState::rearm_permission`）。
+  大きくなった直後は、まだ描画していない配置で `seen_end` が真になり得て、リサイズ前に打った `a` が通ってしまうため。
+  (c) RPC 呼び出し（`subscribe` を含む）は 1 回ごとに 15 s（`backend::CALL_TIMEOUT`）で打ち切る。超えたら待っていた要求は `RpcDone Err`
+  （`the daemon did not answer within 15 s`）になり、接続断（同じ理由の `Disconnected`）→ 再接続。遅れた応答が次の要求の応答と取り違えられないよう、
+  接続は使い続けない。テスト用に `Backend::start_with_timeout(paths, exe, timeout)`。dgc-cli の dev-dependencies に tokio の `net`/`io-util`
+  feature を追加（テストの偽デーモン用。新 crate なし、Cargo.lock 変化なし）。
+- 2026-11-26 (M2 最終レビュー修正 1): 接続が `serve` 中に失われた（snapshot が読めない、呼び出し失敗、購読が閉じた）後も、`Disconnected` を
+  出してから `RETRY_INTERVAL`（1 s）待ってから再接続する（待つ間も Effect は即失敗で答え、UI が閉じれば終わる）。以前は即再接続しており、
+  hello には答えるが list 呼び出しに失敗するデーモンとは 2 s で 7000 回以上接続し直していた。
+- 2026-11-26 (M2 最終レビュー修正 2、コントローラ裁定): bracketed paste を有効にする（`run` の `enter_screen` で `EnableBracketedPaste`、
+  `restore_terminal` の `leave_screen` で `DisableBracketedPaste`。Drop ガード・パニックフック・シグナル終了のどの経路も `restore_terminal` を通る）。
+  `TermEvent::Paste(String)` / `AppEvent::Paste(String)` を追加。貼り付けはフォーカス中のテキスト欄（入力欄、またはフォームの編集中の欄）だけに
+  1 行として入る（`LineEditor::paste`: `\r\n`・`\n`・`\r`・`\t` はそれぞれ空白 1 個、他の制御文字は捨てる）。ツリー、権限ダイアログ、archive 確認、
+  プロバイダ／isolation の選択欄では無視する（貼り付けがキーとして働く経路はない）。以前は貼り付けがキー入力として再生され、複数行は 1 行ずつ
+  `agent.send`、タブで送信モードが変わり、ツリーでは `x`/`q`/`A`…`y` が実行されていた。
+- 2026-11-26 (M2 最終レビュー修正 3): `agent.send` の成功応答の `outcome`（`SendOutcome`）をステータスバーに出す: `queued — delivered when the turn ends` /
+  `sent` / `steered` / `interrupted and sent`（`Status.notice`、アクセント色）。エラーと同じく 10 Tick で消え、エラーが出ると置き換わり、次の成功で消える
+  （`clear_error` が両方を消す）。デコードできない outcome は何も出さない。実行中のエージェントへの queue 送信が受理されたか分からず再送して重複する問題への対処。
+- 2026-11-26 (M2 最終レビュー修正 4、コントローラ裁定): 接続中は snapshot 要求が無い状態で 20 Tick（5 s、`SNAPSHOT_REFRESH_TICKS`）ごとに
+  `LoadSnapshot` を要求する（要求中は数えない。要求すると数え直し。切断中は数えず、切断でリセット）。別のクライアントが追加・archive した
+  プロジェクト／ワークスペースはライブイベントが無く、以前は Connected/Lagged/未知のエージェントのときしか読み直さなかった。ツリーで `R`
+  （Shift-r）は今すぐ要求する（要求中なら何もしない。未接続なら `not connected to the daemon`）。プロジェクトが無いときツリー枠に
+  `no projects — add one with: dgc-next project add <path>` を出す。ステータスバーのキー案内に `R refresh`。
+  定期 snapshot は通常の snapshot と同じ処理を通る: 開いている権限ダイアログの arming（`ticks_until_armed`）・scroll・seen_rows・seen_end は
+  変えない（テスト `a_periodic_snapshot_leaves_an_open_dialog_as_it_was`）。要求中のライブの権限イベントは従来どおり `permission_log` で再適用される。
+  副次効果: 保留していた「重なった snapshot（Connected と Lagged の 2 つが飛んでいて、1 つ目の応答の後に届いた権限を、それより前に読まれた
+  2 つ目の応答が消す）」は、次の定期 snapshot（5 s 以内）で権限が戻ることで解消する（テスト
+  `the_periodic_snapshot_brings_back_a_permission_an_overlapping_snapshot_erased`。戻ったダイアログは改めて 3 Tick 無効）。
+- 2026-11-26 (M2 最終レビュー修正 5、コントローラ裁定): RPC の打ち切りを呼び出しごとに分ける（`backend::CallTimeouts{read, mutating}`、
+  既定 `CALL_TIMEOUTS` = 読み取り 15 s / 変更 90 s）。変更系は `agent.send` / `agent.create` / `agent.interrupt` / `agent.resume` / `agent.archive` /
+  `permission.respond` / `workspace.create` / `workspace.archive`（`backend::is_mutating`）、それ以外（snapshot の 4 つの list、`agent.events`、
+  `subscribe`）は 15 s。デーモン側の上限（Claude の control 20 s、プロバイダ呼び出し 30 s、git 30 s）より短い 15 s で健全な変更呼び出しを
+  切断扱いにし、再送で二重配送・worktree 再作成の失敗を招いていた。テスト用の `Backend::start_with_timeout(paths, exe, timeout)` は
+  `start_with_timeouts(paths, exe, CallTimeouts)` に置き換え（上の M2 Task 4 レビュー修正 (c) の 15 s は読み取りのみに変更）。
+- 2026-11-26 (M2 最終レビュー修正 6、コントローラ裁定): `agent.create` の成功は、送信したフォーム（`submitting` 中の NewAgent）がまだ開いている
+  ときだけそれを閉じて新しいエージェントを選択する。Esc で閉じた後なら、ツリーに追加するだけでカーソルは動かさない（以前は選択が新しい
+  エージェントに飛び、利用者の `x`/`r`/`A` がそちらに当たった）。その間に開いた別のフォーム（submitting でない）は閉じない。
+  同じ扱いを `workspace.create` にも適用した（ブリーフは agent のみ。カーソルが飛ぶと次の `n` が意図しないワークスペースに作るため、同じ誤対象の類）。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -529,6 +685,157 @@
     | `cargo test --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli`（2 回） | 2 回とも PASS（295 passed / 0 failed） |
     | `bash scripts/verify.sh guidance` | PASS（193 tests） |
   旧 `src/` の全体テストと実 CLI での手動確認（Codex の `item/permissions/requestApproval` は実機未記録）は未実施。
+- 2026-11-26 M2 Task 1（固定ツールチェーン 1.99.0）。RED: `cargo test --locked -p dgc-daemon --test agent_manager` が新規 4 テスト
+  と更新した `create_runs_initial_prompt_then_idle` で FAIL（TurnStarted 欠落、ハンドル 103 件）。GREEN 後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-daemon --test agent_manager` | PASS（27 passed） |
+    | `cargo test --locked -p dgc-daemon --test server` | PASS（23 passed、変更なし） |
+    | `cargo test --locked -p dgc-cli --test agent_cli` | PASS（12 passed、変更なし） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+- 2026-11-26 M2 Task 2（固定ツールチェーン 1.99.0）。実装を先に書いたため RED は `update` を空 Vec 返しのスタブにして確認
+  （35/39 が FAIL。残り 4 件は `update` に依存しない input/tree の 3 件と空振りで通る 1 件）、実装に戻して GREEN:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（39 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+- 2026-11-26 M2 Task 2 レビュー修正（固定ツールチェーン 1.99.0）。新規テストを先に書き、現行コードで RED を確認（13 件が実行時 FAIL、
+  `generation` 系は未実装でコンパイルエラー 23 件、API だけ足すと 18 件 FAIL、世代カウンタだけで 17 件 FAIL）してから実装:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（61 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+- 2026-11-26 M2 Task 3（固定ツールチェーン 1.99.0）。テストを先に書き（`render` は何も描かないスタブ）、RED: `cargo test --locked -p dgc-cli
+  --bin dgc-next tui::render` が 16 件すべて FAIL（0 passed / 16 failed、バッファが空）。実装後 GREEN:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::render` | PASS（17 passed） |
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（78 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（rustup run 1.94.0 cargo check --locked --workspace --all-targets --all-features） |
+- 2026-11-26 M2 Task 3 レビュー修正（固定ツールチェーン 1.99.0）。新規テストを先に書き、旧コードで RED（10 件が FAIL: 未読の要求に a/s が通る、
+  Resize で有効/無効にならない、End で中間を飛ばして許可できる、スクロール表示なし、小端末でフッタ欠落、長い title でフッタ欠落、`↪` なし、
+  短縮警告なし、`⚠\u{fe0f}` が 40 個中 24 個しか描画されない）。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（89 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS |
+- 2026-11-26 M2 Task 3 レビュー修正 2（固定ツールチェーン 1.99.0）。新規テストを先に書き、旧コードで RED（4 件 FAIL: 行が ratatui の描画幅より広い、
+  19〜24 桁でテキストが描かれないのに a が通る、行頭 `↪` が画面に出る、レイアウト不変条件）。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（94 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS |
+
+- 2026-11-26 M2 Task 4（固定ツールチェーン 1.99.0）。テストを先に書き RED を確認: `cargo test --locked -p dgc-client --lib
+  dropping_the_subscription` が FAIL（5 s 待っても接続が閉じない）。`cargo test --locked -p dgc-cli --bin dgc-next tui::` と `--test tui_backend`
+  は未実装 API でコンパイルエラー（`Backend`/`Runtime`/`run_loop`/`key_input`/`tick_interval`/`TerminalGuard` など）。API を入れた後
+  `PERMISSION_ARM_TICKS = 2` のまま 2 件 FAIL（500 ms を満たさない）。実装後 GREEN。加えて故意の改変で該当テストが落ちることを確認
+  （サイズ同期を外す、描画時の補正を外す、短いページを done 扱い、再接続で spawn、Resubscribe を無視）:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（104 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（117 passed = 新規 7 + 取り込んだ単体テスト。5 回連続 PASS、デーモン・偽プロバイダの残存なし） |
+    | `cargo test --locked -p dgc-cli -p dgc-client` | PASS（dgc-next 110、agent_cli 12、daemon_cli 7、tui_backend 117、version 1、workspace_cli 3、dgc-client 13） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（dgc-client の Cargo.toml を変更したため） |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+- 2026-11-26 M2 Task 4 レビュー修正（固定ツールチェーン 1.99.0）。新規テストを先に書き RED を確認: `growing_the_terminal_rearms_the_permission_dialog`
+  が FAIL（リサイズ前に打った `a` が `permission.respond` を送る）。`backend_reports_a_snapshot_it_cannot_load` と
+  `backend_gives_up_on_a_daemon_that_does_not_answer` は `start_with_timeout` 未実装でコンパイルエラー、タイムアウトを無視するスタブでは
+  どちらも 30 s 待ってもイベントが来ず FAIL。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（105 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（120 passed、6 回連続、残存プロセスなし） |
+    | `cargo test --locked -p dgc-cli` / `-p dgc-client` | PASS |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（dgc-cli の Cargo.toml を変更したため） |
+- 2026-11-26 M2 Task 5 受け入れ（Linux、固定ツールチェーン 1.99.0）。手動確認なので TDD は適用しない。コードは変更していない。
+  Step 1（偽プロバイダ、PASS）: tmux（`-L dgcm2`、120x32）の実 pty で `dgc-next tui` を操作。`claude_path` は `dgc-fake-provider` を実行する
+  ラッパー（手書きの合成シナリオ。長い複数行 Bash 権限要求 43 行 → allow → ターン継続 → queue/interrupt/steer の各送信に対応）。使い捨て git
+  リポジトリ、スクラッチの `DGC_STATE_ROOT`。画面は `docs/orchestrator/m2-tui-screen.txt`（19 枚）。確認できたこと:
+  空のツリー（`w` はプロジェクト未選択で `select a project first`）、`w` でローカルと worktree ワークスペース作成、`n` でエージェント作成、
+  権限ダイアログ（開いた直後の `a` は無視 = `keys enabled shortly`、未スクロールの `a` は無視、↓/End で全行が一度見えた後の `a` は許可）、
+  ストリーム（許可・ツール結果・応答・turn completed）、`i` で入力、送信 3 モード（idle への queue = sent、実行中の queue 2 件、steer、
+  interrupt。steer/interrupt で `queued message discarded` と `user (steer)` / `user (interrupt)` がストリームに出る）、Input フォーカスの権限ヒント
+  （ダイアログは自動で開かず、Esc 後 `p` で再表示）、`A` の確認ダイアログ、60x20 の狭い端末、`q` で終了しエージェントは running のまま、
+  再起動後にツリーとストリームが再表示、TUI を開いたまま `daemon stop` → ステータスバーに `daemon disconnected: ...retrying every second`、
+  `daemon start` → 自動再接続し、エージェントは stopped 表示。バグは見つからず。
+  Step 2（実 Claude 2.1.332、`--model haiku`、`--mode manual`（自動承認ではない）、使い捨てリポジトリ、PASS）: TUI の `w` → `n`（model/mode/prompt を
+  フォームに入力、プロンプトは hello.txt を Write ツールで作らせる短文）→ file_change の権限ダイアログが出た → `a` → `tool result` → `assistant: done` →
+  `turn completed` → idle まで 1 ターン。観察: haiku は Write の絶対パスの途中の `/` を `-` に取り違え（`.../doge-code-e2584448...` のように）、
+  リポジトリの外の別ディレクトリに hello.txt を作った（ダイアログがそのパスを表示していたので利用者は気付ける。dgc の不具合ではない）。
+  後始末として、その余分なディレクトリを削除。TUI/デーモン/tmux は停止し、残存する `dgc-next`/`dgc-fake-provider`/`claude -p` なし。
+  Step 3（固定ツールチェーン cargo/rustc 1.99.0）:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（1.94.0） |
+    | `cargo test --locked --workspace --no-fail-fast --config 'env.TMPDIR.value="/var/tmp"' --config 'env.TMPDIR.force=true' -- --test-threads=1` | PASS（2972 passed / 0 failed / 0 ignored、残存プロセスなし） |
+  README を書いた後に実行した。コミット後（21c110a）に `bash scripts/verify.sh guidance` を再実行して PASS（193 tests）。
+- 2026-11-26 M2 Task 5 修正ラウンド 1（固定ツールチェーン 1.99.0）。レビュー指摘: (1) README が権限ダイアログを「要求全体を表示」と書いていた
+  のを、実際の「dgc の 1 行 summary（Claude のファイル系ツールはパスのみで内容は出ない）」に直した。a/s は「summary 全体が画面に出た後」に有効、
+  4 KiB 短縮は summary が不完全になる場合の 1 つ、と明記。(2) 入力欄の書きかけが全エージェントで共有され、別のエージェントに送られる不具合を修正
+  （コントローラ裁定でバグ）。`AppState.drafts: HashMap<AgentId, LineEditor>` に他エージェントの下書きを退避し、`state.input` は常に
+  `input_target` の下書き。ツリーでの選択変更（`settle`）と `i` で `bind_draft` が入れ替える。自動で開く権限ダイアログの空判定は
+  選択中エージェント自身の下書き（`draft_is_empty`）。送信失敗時の復元も対象エージェントの下書きへ。入力欄の題に `→ <短縮 id> <title>`（`escape_line`、24 桁まで）を
+  出し、別のエージェントを選んだツリーでは他人の下書きを表示しない。新規エージェントのフォームのプロンプトは `(required)` に変更。
+  README の入力節、狭いツリーの文、初回接続だけデーモンを spawn する文を修正。
+  RED（実装前、`cargo test --locked -p dgc-cli --bin dgc-next tui::`）: 105 passed / 3 failed。`a_draft_stays_with_its_agent`（a2 の入力に a1 の文字が残る）、
+  `another_agents_draft_does_not_block_the_permission_dialog`（a2 の権限が開かない）、`input_title_names_the_target_and_hides_another_agents_draft`（題に対象がない）。
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（108 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（123 passed、残存プロセスなし） |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `cargo fmt --all --check` | 差分なし |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests、PROGRESS 更新後に実行） |
+- 2026-11-26 M2 最終レビュー修正 1〜6（固定ツールチェーン 1.99.0）。各項目でテストを先に書き RED を確認してから実装（詳細は
+  `.superpowers/sdd/2026-11-26-orchestrator-m2-tui/final-fix-report.md`）。RED: (1) `backend_waits_a_second_before_reconnecting_after_a_lost_snapshot`
+  が FAIL（2 s で 7206 回 Connected）。(2) 貼り付けを従来どおりキーとして再生するスタブで 8 件 FAIL（入力欄で `agent.send` 3 回・タブで steer、
+  ツリーで `agent.interrupt` + 送信、権限ダイアログで `permission.respond` allow、archive 確認で `agent.archive`、フォームで `agent.create`、
+  貼り付けた `q` で終了、bracketed paste 未有効、1 行化なし）。(3) `Status.notice` を設定しないスタブで 3 件 FAIL。(4) 5 件 FAIL（定期／`R` の
+  `LoadSnapshot` なし、空ツリーの案内なし。重なった snapshot が権限を消すことは再現）。(5) 全呼び出しが読み取りの上限を使うスタブで
+  `backend_gives_mutating_calls_longer_than_reads` が FAIL（`did not answer within 0.3 s`）。(6) 2 件 FAIL（Esc 後の作成成功で選択が新しい
+  エージェント／ワークスペースに移る）。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（128 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（146 passed、2 回連続、残存プロセスなし） |
+    | `cargo test --locked -p dgc-cli` | PASS |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+  依存の追加・Cargo.lock の変化なし（bracketed paste は crossterm の既定 feature）。手動確認（tmux の実 pty、120x30、`$HOME/.cache` 下の
+  使い捨て `DGC_STATE_ROOT`）: 空のツリーに `no projects — add one with:` / `dgc-next project add <path>` が出る。`tmux paste-buffer -p`（bracketed）で
+  `q\nx\tA y\n` を貼り付けても TUI は終了せず何も起きない（打鍵の `q` では終了）。TUI を開いたまま別のシェルで `project add` すると、キーを押さずに
+  約 6 s 後のツリーに出た。入力欄・フォームへの貼り付けは単体テストのみ（実エージェントでは未確認）。デーモンは `daemon stop` で停止、残存プロセスなし。
+
+## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
+
+M2 最終レビューで扱いを決める。（3 件目は修正ラウンド 1 でバグと裁定され修正済み。他は使い勝手の指摘。）
+- （修正済み、M2 最終レビュー修正 3）実行中のエージェントへ queue で送ってもストリームにもステータスにも何も出ない（`RpcDone` の `queued` 結果を表示していない。
+  メッセージは配送時か破棄時にイベントとして出る）。受理されたか分からない。ステータスバーに送信結果を出すようにした。
+- （修正済み、修正ラウンド 1）新規エージェントのフォームのプロンプト欄が `(optional)` と表示されるのに空だと `prompt is required` だった。表示を `(required)` に変更。
+- （修正済み、修正ラウンド 1。バグと裁定）入力欄の書きかけの文字がエージェント間で共有され、A 宛てに打った文字が B を選んで `i` → Enter で B に送られた
+  （steer/interrupt モードでは B を中断する）。下書きをエージェントごとに持つようにした。
+- （仕様どおり）`End` で末尾に跳んでも、先頭の画面と重なって全行が一度見えていれば `a`/`s` が有効になる。厳格な経路の検証は単体テストにある。
 
 ## 保留中の小さな改善
 
@@ -567,7 +874,7 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Task 6: minor (deferred): test guard may miss a still-booting daemon after a failed run; VersionMismatch after spawn reported as SpawnTimeout; Client::call has no overall timeout (wedged daemon hangs CLI); dgc-cli uses tokio::sync without declaring `sync` feature (unification); missing tests (symlinked daemon.log, log 0600, id-0 error path, pending-notification overflow); pre-existing daemon.log mode not tightened; stop's lock probe can make a concurrent autostart lose
 - Task 7: minor (deferred): missing project dir leaves workspace un-archivable → project never removable (consider re-grade at final review); worktree_requires_a_git_repository can't distinguish non-repo vs subdir and manager git inherits global config/hooks in tests; git timeout kills only git not its descendants; failed branch delete only warns (no response field)
 - Task 7: minor (deferred): `git worktree list -z` needs git >= 2.36 (no fallback/doc; fails closed); locked worktree with missing dir makes archive fail permanently; lib test name says prefix but checks suffix
-- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
+- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth; M2 Task 1 で解消); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
 - Task 8: minor (deferred): biased select can starve commands under a flooding provider (fairness cap suggested); drain loop has no yield/bound (use len snapshot); no test for Exited during drain; caller gets timeout error before stored state flips (≤5s)
 - Task 9: minor (deferred): Codex command deny never recorded — Deny mapping on commands unexercised (ruling: cancel when decline not offered)
 - Task 10: minor (deferred): tests hard-code sorted-key output (preserve_order unification risk); uncaptured ${name} in expect matches literally (should exit 2); capture line extra keys ignored; stdin read error treated as EOF; lossy UTF-8 on input
@@ -577,10 +884,10 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Task 12: minor (deferred): steer fallback logs only debug (could hide a malformed steer); per-turn usage correlation untested
 - Task 13: minor (deferred): lagged next_seq imprecise for live-only subscriptions; concurrent resume can leave an agent running in an archived workspace; --version probe buffers unbounded stdout and kills only direct child (reuse process-group kill); missing tests (unsubscribe stops delivery, all-agents subscription, follow exit 1 on Failed / WaitingPermission continues); resolve.rs ETXTBSY flake risk; idle subscription connections accumulate after lag
 - Task 13: minor (deferred): non-autostart CLI calls during daemon startup block up to 15s then HelloTimeout; connect_or_spawn worst case can exceed SPAWN_WAIT; bind→chmod umask window (mitigated by 0700 dir; umask(0o177) around bind would harden)
-- Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it; idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
-- Task 14: minor (deferred): README lists `turn started` (never emitted) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
+- Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it (M2 Task 1 で解消); idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
+- Task 14: minor (deferred): README lists `turn started` (never emitted; M2 Task 1 で emit するようになった) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
 - Task 14: minor (deferred): README "does not log prompt text" true for daemon.log but events.jsonl stores prompts too — wording should say so
-- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (fix before M4); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
+- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (M2 Task 1 で解消); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
 - Final: minor (deferred): create_workspace rollback uses branch -d (fresh branch can be left behind with --base other); structural test only matches os("--force")/os("-D") form; second archive check after agents archived can refuse (no loss); discard_queue save failure only warns; ToolCall.name / usage unbounded at source; pre-fix oversized legacy events end logs with an error; gitignored files removed by non-force archive (documented)
 
 ### コントローラの判断（Ruling）
@@ -611,3 +918,49 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Final: Ruling: steer fallback (interrupt_and_send) also clears the queue — consistent with "interrupt clears the queue" — cost if wrong: a queued message is dropped when a steer falls back
 - Final: Ruling: item 1 residual is load-bearing (directly violates the user's archive decision) — resumed the fixer for this one-line fix + test, verified by the controller running the named test rather than a second review round — cost if wrong: an unreviewed small diff in the archive path
 - 2026-11-26 M1 最終: 修正の再レビュー後、残り 1 件（未追跡ファイル検出が git 設定に左右される）を 02ae35c で修正し、コントローラが該当テスト 2 件を実行して確認。ワークスペース全体を直列・TMPDIR=/var/tmp で 2742 passed / 0 failed、guidance PASS、msrv PASS（固定ツールチェーン 1.99.0）。
+
+## M2 レビューで保留した指摘と判断（2026-11-26、実行台帳から移記）
+
+M2 はタスクごとのレビューと全体の最終レビュー（修正の再レビューまで）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): steer-fallback TurnStarted untested; adjacency asserted only for initial prompt; LogCache eviction tests thin (held handle skip, >64 live, mark_not_live, stored-archive forget); EventLog::open (full scan) under global logs mutex on cold reopen stalls emits; evict/mark_not_live O(n) per call
+- Task 2: minor (deferred): pending-live overflow at 2000 drops all (restart load instead); single `unsent` slot can restore a possibly-sent message (double send); create-dialog success after Esc still jumps selection; Enter toggles collapse (brief says expand) — align README; selection fallback tests only next sibling; Tree::rows / agents_in_order duplicate filters
+- Task 2: minor (deferred, re-grade at final): failed-send text restores into another agent's input (condition should be input_target == agent_id) — wrong-destination class; overlapping snapshot requests can still erase a fresh permission (count outstanding requests); permission id uniqueness assumption undocumented
+- Task 3: minor (deferred): create-dialog WARNING pushed off in tiny terminals (Enter still works) — move it next to mode field; status bar error can push permission hint off-screen; no test for tree vertical overflow
+- Task 3: minor (deferred): a single grapheme wider than 69 cols makes the dialog too_small at any size with an un-actionable "enlarge" message (fails safe); look-alike arrows (↳ ⤷ ⮡) not escaped; halfwidth render test doesn't guard N1 (layout test does)
+- Task 4: minor (deferred): subtask panic treated as connection close (terminal restored by hook but loop keeps drawing on main screen) — treat JoinError::is_panic as fatal; input thread I/O error detail lost; draw stops after MAX_REDRAWS without final redraw; fixed sleeps in tests (1.5 s quit, 500 ms resubscribe); no backend-level test that Resubscribe closes old connection; effects queued just before quit dropped silently
+- Task 4: minor (deferred): incompatible daemon → reconnect/snapshot-fail loop ~4 calls/s; 15 s timeout also hits slow healthy calls
+- Task 5: minor (deferred, re-grade at final): input draft shared across agents → text typed for A can be sent to B (wrong-destination class); new-agent form labels prompt "(optional)" but requires it; queue send to running agent gives no feedback
+- Task 5: minor (deferred): queue send to running agent gives no feedback (documented); failed send text dropped if user already typed new text; screen capture 1 caption mentions a message not captured; disconnected status bar truncates key hints
+- Task 5: minor (deferred): drafts map never pruned (archived/removed agents' drafts stay); no tests for failed-send restore after selection change / draft kept when target archived
+- Final: minor (deferred): reconnect race can skip part of the stream until reselect (display only); send mode global & sticky (interrupt persists across agents); history loaded from seq 0 each selection (O(n²) read_page, plan tail paging in protocol work); empty summary still allows a/s; auto-approve list duplicated vs daemon; single unsent slot; stream lines bounded by count not bytes
+- Final: minor (deferred): periodic snapshots can pile up behind a slow daemon (pending expires at 5 s; merge queued LoadSnapshot); empty-tree hint shows before first snapshot / while disconnected; two creates in flight share RequestTag (first success can close the second form; error resets submitting → duplicate create); terminals without bracketed paste still replay keys (document); >1 MiB paste exceeds message limit (unchecked)
+
+### コントローラの判断（Ruling）
+
+- Ruling: none needed at pre-flight
+- Task 1: Ruling: steer that falls back to interrupt_and_send records UserMessage{Steer} + TurnStarted — it really starts a new turn — cost if wrong: one extra marker in logs
+- Task 2: dispatched implementer aead8da436e1389b1 (sonnet), BASE 10d07ff; Ruling: tui/mod.rs carries #![allow(dead_code)] until Task 4 wires it — keeps clippy -D warnings clean for an unwired module — cost if wrong: Task 4 must remove it
+- Task 2: Ruling: accept post-hoc RED instead of discarding the code — the tests were shown to fail against a stub and the reviewer judges their strength; redoing costs a full re-implementation — cost if wrong: some tests may encode the implementation rather than the requirement
+- Task 2: Ruling: permission dialog never auto-opens in Input focus (indicator instead) or over another dialog; opens via `p` or auto only in Tree focus with empty editor; decision keys ignored for 2 Ticks (≥500 ms) after any open/replacement — prevents typed text from approving unread commands — cost if wrong: half-second delay before answering
+- Task 2: Ruling: when the selected agent disappears, Input focus stays with a "no target" state, text kept, no auto dialogs — cost if wrong: user must re-select before sending
+- Task 2: Ruling: history loads carry a generation in Effect::LoadHistory / AppEvent::History; failed LoadHistory reported as History{events:[],done:true,generation} + status error — interface change carried to Task 4 — cost if wrong: none
+- Task 3: Ruling: shared pure permission_layout used by render+update; Dialog::Permission gets scroll + seen_end; a/s only when armed && seen_end (d/Esc always); header 1 line, footer reserved first; "window too small" → a/s disabled; soft-wrap rows marked ↪ — the user must be able to read every line before allowing — cost if wrong: extra scrolling for long requests
+- Task 3: Ruling: grapheme-width measurement folded into the fix (dropped graphemes alter the approved text) though reviewer graded Minor
+- Task 3: Ruling: protocol 4 KiB summary cap is a known limitation — dialog shows a red "shortened by dgc — full command not shown" line; a/s still allowed after seen_end — cost if wrong: a >4 KiB request can be approved without full text (future: raise cap / show raw)
+- Task 3: Ruling: accept stricter seen_end = every summary row has been on screen (End/Home only peek) — literal "last line visible" would let End enable a/s with the middle unread — cost if wrong: more scrolling
+- Task 3: Ruling: fold N3 (escape U+21AA in summaries) into round 2 — same spoofing class as finding 3 — cost if wrong: none
+- Task 4: dispatched implementer a596bdfa18caecc0c (opus), BASE 6f52669; Ruling: reconnects use plain connect (no respawn after user's daemon stop); first connect uses connect_or_spawn — cost if wrong: TUI won't auto-restart a stopped daemon
+- Task 4: Ruling: fold Minor 1 (size change re-arms permission dialog) — same "approve unseen rows" class as Task 2/3 rulings — cost if wrong: extra 0.75 s after resize
+- Task 4: Ruling: fold Minor 3 (15 s RPC timeout → Stop::Lost + RpcDone Err) — a wedged daemon otherwise freezes permission answers silently — cost if wrong: slow daemon ops (>15 s) reported as disconnect
+- Task 5: Ruling: fix finding 3 in code (per-agent drafts + target shown in input title) rather than only disclose — wrong-destination sends can interrupt another agent — cost if wrong: small state-model change late in M2
+- Task 5: Ruling: fold one-word "(optional)"→"(required)" label and README wording fixes into the round
+- Final: Ruling: paste inserts into the focused editor only, newlines/tabs → spaces, ignored outside text fields — cost if wrong: multi-line messages flattened
+- Final: Ruling: periodic snapshot every 5 s + R refresh + empty-tree hint — cost if wrong: small periodic load
+- Final: Ruling: per-call timeouts (reads 15 s, mutating 90 s) folded in — prevents duplicate sends on slow healthy calls
+- Final: Ruling: create success after Esc does not move selection (folded, wrong-target class)
+- Final: fix wave done 8b24f22..b8795d7 (7 commits); Ruling: item 6 applied to workspace.create too (same class) — accepted
+
+- 2026-11-26 M2 最終検証（固定ツールチェーン 1.99.0）: fmt / clippy -D warnings / ワークスペース全体のテスト（直列、TMPDIR=/var/tmp）3021 passed / 0 failed / guidance / tui-deps / msrv すべて PASS。

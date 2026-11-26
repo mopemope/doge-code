@@ -121,7 +121,7 @@ pub fn outcome_name(outcome: SendOutcome) -> &'static str {
     }
 }
 
-fn kind_name(kind: PermissionKind) -> &'static str {
+pub fn kind_name(kind: PermissionKind) -> &'static str {
     match kind {
         PermissionKind::Command => "command",
         PermissionKind::FileChange => "file_change",
