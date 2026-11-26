@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 完了（Task 5 受け入れ済み）。次は M2 全体の最終レビューと PR
+- タスク: M2 完了（Task 5 受け入れ済み、最終レビュー指摘 6 件修正済み）。次は修正の再レビューと PR
 - 状態: 完了
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）。M2 Task 4 完了（ランタイム、デーモン I/O、`dgc-next tui`）。M2 Task 5 完了（偽プロバイダと実 Claude で受け入れ、画面記録、README の TUI 節、全体検証）
-- 次の一手: M2 全体の最終レビュー（ブランチ `feat/orchestrator-m2`）、下の「M2 受け入れで見つかった小さな指摘」3 件の扱いを決める、PR 作成。その後 M3（旧 `src/` 削除、`dgc` に改名）の計画を作る
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）。M2 Task 4 完了（ランタイム、デーモン I/O、`dgc-next tui`）。M2 Task 5 完了（偽プロバイダと実 Claude で受け入れ、画面記録、README の TUI 節、全体検証）。M2 最終レビュー修正 1〜6（再接続の待ち、bracketed paste、送信結果の表示、定期 snapshot と `R`、変更系 RPC の 90 s、Esc 後の作成で選択を動かさない）
+- 次の一手: 最終レビュー修正 1〜6（決定事項の「M2 最終レビュー修正」）の再レビュー、PR 作成。その後 M3（旧 `src/` 削除、`dgc` に改名）の計画を作る
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -805,6 +805,27 @@
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
     | `cargo fmt --all --check` | 差分なし |
     | `bash scripts/verify.sh guidance` | PASS（193 tests、PROGRESS 更新後に実行） |
+- 2026-11-26 M2 最終レビュー修正 1〜6（固定ツールチェーン 1.99.0）。各項目でテストを先に書き RED を確認してから実装（詳細は
+  `.superpowers/sdd/2026-11-26-orchestrator-m2-tui/final-fix-report.md`）。RED: (1) `backend_waits_a_second_before_reconnecting_after_a_lost_snapshot`
+  が FAIL（2 s で 7206 回 Connected）。(2) 貼り付けを従来どおりキーとして再生するスタブで 8 件 FAIL（入力欄で `agent.send` 3 回・タブで steer、
+  ツリーで `agent.interrupt` + 送信、権限ダイアログで `permission.respond` allow、archive 確認で `agent.archive`、フォームで `agent.create`、
+  貼り付けた `q` で終了、bracketed paste 未有効、1 行化なし）。(3) `Status.notice` を設定しないスタブで 3 件 FAIL。(4) 5 件 FAIL（定期／`R` の
+  `LoadSnapshot` なし、空ツリーの案内なし。重なった snapshot が権限を消すことは再現）。(5) 全呼び出しが読み取りの上限を使うスタブで
+  `backend_gives_mutating_calls_longer_than_reads` が FAIL（`did not answer within 0.3 s`）。(6) 2 件 FAIL（Esc 後の作成成功で選択が新しい
+  エージェント／ワークスペースに移る）。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（128 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（146 passed、2 回連続、残存プロセスなし） |
+    | `cargo test --locked -p dgc-cli` | PASS |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+  依存の追加・Cargo.lock の変化なし（bracketed paste は crossterm の既定 feature）。手動確認（tmux の実 pty、120x30、`$HOME/.cache` 下の
+  使い捨て `DGC_STATE_ROOT`）: 空のツリーに `no projects — add one with:` / `dgc-next project add <path>` が出る。`tmux paste-buffer -p`（bracketed）で
+  `q\nx\tA y\n` を貼り付けても TUI は終了せず何も起きない（打鍵の `q` では終了）。TUI を開いたまま別のシェルで `project add` すると、キーを押さずに
+  約 6 s 後のツリーに出た。入力欄・フォームへの貼り付けは単体テストのみ（実エージェントでは未確認）。デーモンは `daemon stop` で停止、残存プロセスなし。
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 
