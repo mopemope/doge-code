@@ -175,7 +175,7 @@ discarded); the TUI does not confirm a queued send otherwise. If the send
 fails, the text returns to an empty input and the error shows in the status
 bar. If the agent you were typing to is archived or disappears, the input keeps
 its text and shows `no target — select an agent`; leave with `Esc` and pick
-another agent.
+another agent. The text stays with that removed agent and is not shown again.
 
 Permission dialog: a pending permission of the selected agent opens a dialog
 automatically when you are in the tree and the input is empty. While you type
@@ -187,7 +187,8 @@ shows the command, file tools (Write, Edit, ...) show only the path and never
 the content to be written, and other tools show the first of `command`,
 `file_path`, `notebook_path` or `path`, else the input as compact JSON. For
 Codex it is a summary of the file change or of the requested permissions. The
-full raw request is in `dgc-next permit ls --json` (`raw`). Long summaries wrap;
+provider's payload is in `dgc-next permit ls --json` (`raw`, up to 64 KiB;
+larger payloads are replaced by `{"truncated":true}`). Long summaries wrap;
 a `↪` in the left margin marks a wrapped continuation, not a new line. Rules, all
 there so a keystroke you typed for something else cannot approve a summary you
 did not read (reading the summary is not the same as reading everything the
