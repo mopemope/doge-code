@@ -339,6 +339,8 @@ pub struct StreamBuffer {
     scroll: usize,
     loading: bool,
     pending: Vec<AgentEvent>,
+    /// Identifies the current history load; pages of older loads are stale.
+    generation: u64,
 }
 
 impl StreamBuffer {
@@ -358,12 +360,17 @@ impl StreamBuffer {
         self.scroll
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }
 
     /// Start over for `agent_id` (empty buffer, history to be loaded).
     pub(super) fn reset(&mut self, agent_id: Option<AgentId>) {
+        self.generation += 1;
         self.loading = agent_id.is_some();
         self.agent_id = agent_id;
         self.lines.clear();
@@ -374,6 +381,7 @@ impl StreamBuffer {
 
     /// Keep the lines and load what is missing after `last_seq`.
     pub(super) fn begin_catch_up(&mut self) {
+        self.generation += 1;
         self.loading = self.agent_id.is_some();
     }
 
@@ -593,6 +601,9 @@ pub enum Dialog {
         permission: PendingPermission,
         /// `permission.respond` is in flight.
         sending: bool,
+        /// Ticks left before a/s/d are accepted ([`PERMISSION_ARM_TICKS`] when
+        /// the dialog opens); the dialog shows "keys enabled shortly" until 0.
+        ticks_until_armed: u8,
     },
     NewAgent(NewAgentForm),
     NewWorkspace(NewWorkspaceForm),
@@ -601,6 +612,22 @@ pub enum Dialog {
         /// Escaped.
         title: String,
     },
+}
+
+impl Dialog {
+    /// A permission dialog showing `permission`, its keys not yet enabled.
+    pub fn permission(permission: PendingPermission) -> Self {
+        Self::Permission {
+            permission,
+            sending: false,
+            ticks_until_armed: PERMISSION_ARM_TICKS,
+        }
+    }
+
+    /// Whether a/s/d are accepted (always true for other dialogs).
+    pub fn permission_armed(&self) -> bool {
+        !matches!(self, Self::Permission { ticks_until_armed, .. } if *ticks_until_armed > 0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -614,6 +641,21 @@ pub struct Status {
 
 /// Ticks an error stays in the status line.
 pub const ERROR_TICKS: u32 = 10;
+
+/// Ticks after a permission dialog opens (or its permission changes) during
+/// which a/s/d are ignored, so a key meant for something else cannot answer.
+pub const PERMISSION_ARM_TICKS: u8 = 2;
+
+/// Shown (status line and input title) while typing at an agent that waits
+/// for a permission answer: the dialog never opens over the input.
+pub const PERMISSION_HINT: &str = "\u{26a0} permission waiting \u{2014} Esc then p to review";
+
+/// A permission change seen live while a snapshot was being fetched.
+#[derive(Debug, Clone)]
+pub(super) enum PermissionChange {
+    Added(PendingPermission),
+    Resolved(PermissionId),
+}
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -635,6 +677,12 @@ pub struct AppState {
     pub(super) snapshot_pending: Option<u32>,
     /// The last sent message, restored into the input if sending fails.
     pub(super) unsent: Option<(AgentId, String)>,
+    /// The agent the input was opened on; messages go there, whatever the
+    /// tree cursor does afterwards.
+    pub(super) input_target: Option<AgentId>,
+    /// Permission changes since the pending snapshot was requested, applied
+    /// again on top of it (the snapshot may be older than they are).
+    pub(super) permission_log: Vec<PermissionChange>,
 }
 
 impl Default for AppState {
@@ -657,6 +705,8 @@ impl Default for AppState {
             dismissed: HashSet::new(),
             snapshot_pending: None,
             unsent: None,
+            input_target: None,
+            permission_log: Vec::new(),
         }
     }
 }
@@ -685,6 +735,47 @@ impl AppState {
 
     pub fn selected_agent_id(&self) -> Option<AgentId> {
         self.selected_agent().map(|a| a.id.clone())
+    }
+
+    /// The agent the input sends to, while it still exists.
+    pub fn input_target(&self) -> Option<&Agent> {
+        let id = self.input_target.as_ref()?;
+        self.tree
+            .agent(id)
+            .filter(|a| a.state != AgentState::Archived)
+    }
+
+    /// Typing with the input focused but its agent gone (archived or dropped
+    /// by a snapshot): sending is refused until the user selects an agent.
+    pub fn input_target_missing(&self) -> bool {
+        self.focus == Focus::Input && self.input_target().is_none()
+    }
+
+    /// The agent whose stream is shown: the input's target while typing,
+    /// else the one under the cursor.
+    pub fn stream_agent_id(&self) -> Option<AgentId> {
+        let focus = if self.focus == Focus::Dialog {
+            self.focus_before_dialog
+        } else {
+            self.focus
+        };
+        if focus == Focus::Input {
+            self.input_target().map(|a| a.id.clone())
+        } else {
+            self.selected_agent_id()
+        }
+    }
+
+    /// [`PERMISSION_HINT`] while typing at an agent with a pending permission.
+    pub fn permission_hint(&self) -> Option<&'static str> {
+        if self.focus != Focus::Input {
+            return None;
+        }
+        let target = self.input_target()?;
+        self.permissions
+            .iter()
+            .any(|p| p.agent_id == target.id)
+            .then_some(PERMISSION_HINT)
     }
 
     pub fn permission_count(&self) -> usize {

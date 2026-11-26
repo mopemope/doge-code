@@ -381,6 +381,20 @@
   結果の Agent/Workspace を木に挿入して選択する。(5) 送信失敗時は入力欄が空なら送ったテキストを戻す。(6) Ctrl-C はどのフォーカスでも終了
   （README のキー表に載せる）。(7) 未知エージェントのイベントによる `LoadSnapshot` は応答待ちの間は 1 回だけ（20 Tick で再試行可）。
   (8) フォーム内の移動は ↑↓、Tab は provider（ワークスペースは local/worktree）切替。
+- 2026-11-26 (M2 Task 2 レビュー修正、コントローラ裁定): 上の (2)(3) を次で置き換える。
+  (a) 権限ダイアログは Input フォーカス中・他のダイアログ表示中には決して自動で開かない。開くのは Tree フォーカスで、選択中
+  エージェントに未 dismiss の権限があり、入力欄が空のときの自動と、Tree での明示的な `p`（入力欄が空でなくても開く）だけ。
+  Input 中は `AppState::permission_hint()`（`⚠ permission waiting — Esc then p to review`）を入力欄タイトルとステータスに出す。
+  (b) ダイアログが開く／権限が差し替わるたびに a/s/d を 2 Tick（250 ms Tick で 500 ms 以上）無視する（`Dialog::permission_armed()`、
+  ダイアログに「keys enabled shortly」を表示）。Esc とナビゲーションは有効。
+  Input の送信先は入力欄を開いた時点のエージェント（`input_target`）。そのエージェントが archive／snapshot で消えても Input
+  フォーカスは維持し、「送信先なし」（`input_target_missing()`、送信は `select an agent first`、入力テキストは保持、ダイアログは開かない）。
+  履歴読み込みに世代（generation）を導入: `Effect::LoadHistory` と `AppEvent::History` に `generation: u64` を追加し、現在の世代
+  でないページは破棄する（選択 A→B→A、Lagged/Connected 中の再読み込みで古い連鎖が `last_seq` を進めて穴を作るのを防ぐ）。Task 4 の
+  backend はページの `generation` を `LoadHistory` からそのまま返す。`agent.events` が失敗したら、空の `done: true` ページ
+  （同じ generation）と `RpcDone{ request: RequestTag::LoadHistory{agent_id}, result: Err }` を返す（読み込み中のまま固まらず、
+  ステータスに出る）。Snapshot は、要求中に届いたライブの権限イベント（追加・解決）を適用し直す（`permission_log`、要求から応答
+  まで、または 20 Tick／切断まで）。
 
 ## 検証記録
 
@@ -575,6 +589,13 @@
     | コマンド | 結果 |
     |---|---|
     | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（39 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+- 2026-11-26 M2 Task 2 レビュー修正（固定ツールチェーン 1.99.0）。新規テストを先に書き、現行コードで RED を確認（13 件が実行時 FAIL、
+  `generation` 系は未実装でコンパイルエラー 23 件、API だけ足すと 18 件 FAIL、世代カウンタだけで 17 件 FAIL）してから実装:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（61 passed） |
     | `cargo fmt --all --check` | 差分なし |
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
 

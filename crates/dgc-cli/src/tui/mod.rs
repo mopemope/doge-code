@@ -30,13 +30,28 @@ pub enum ConnectionState {
 /// What an RPC call was for, so [`AppEvent::RpcDone`] can update the state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestTag {
-    Send { agent_id: AgentId },
-    Respond { permission_id: PermissionId },
+    Send {
+        agent_id: AgentId,
+    },
+    Respond {
+        permission_id: PermissionId,
+    },
     CreateAgent,
     CreateWorkspace,
-    Interrupt { agent_id: AgentId },
-    Resume { agent_id: AgentId },
-    Archive { agent_id: AgentId },
+    Interrupt {
+        agent_id: AgentId,
+    },
+    Resume {
+        agent_id: AgentId,
+    },
+    Archive {
+        agent_id: AgentId,
+    },
+    /// A failed history load: the backend reports the error with this tag
+    /// (`RpcDone` with `Err`), in addition to the empty final `History` page.
+    LoadHistory {
+        agent_id: AgentId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,10 +66,19 @@ pub enum AppEvent {
     /// A live event from the subscription.
     AgentEvent(AgentEvent),
     /// One `agent.events` page; `done` when the page was empty.
+    ///
+    /// Contract with the backend: `generation` is copied from the
+    /// `Effect::LoadHistory` that asked for the page (every page of one
+    /// chain carries it); pages of an older generation are discarded. A
+    /// failed `agent.events` call must be reported as an empty `done: true`
+    /// page with that generation, followed or preceded by `RpcDone` with
+    /// `RequestTag::LoadHistory` and `Err`, so loading never sticks and the
+    /// error shows in the status line.
     History {
         agent_id: AgentId,
         events: Vec<AgentEvent>,
         done: bool,
+        generation: u64,
     },
     RpcDone {
         request: RequestTag,
@@ -73,9 +97,12 @@ pub enum AppEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     LoadSnapshot,
+    /// Fetch events after `since_seq`. The result must come back as
+    /// `AppEvent::History` carrying the same `generation`.
     LoadHistory {
         agent_id: AgentId,
         since_seq: u64,
+        generation: u64,
     },
     Call {
         request: RequestTag,

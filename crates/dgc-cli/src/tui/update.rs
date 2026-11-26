@@ -7,11 +7,14 @@ use dgc_protocol::methods::{
     AgentIdParams, AgentSendParams, PERMISSION_RESPOND, PermissionRespondParams, WORKSPACE_CREATE,
     WorkspaceCreateParams,
 };
-use dgc_protocol::model::{Agent, Decision, Isolation, SendBehavior, Workspace};
+use dgc_protocol::model::{
+    Agent, AgentState, Decision, Isolation, PendingPermission, SendBehavior, Workspace,
+};
 
 use super::input::{Key, KeyInput};
 use super::state::{
-    AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, default_title,
+    AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PermissionChange,
+    default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
@@ -33,6 +36,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.snapshot_pending = None;
             state.tree.replace(projects, workspaces, agents);
             state.permissions = permissions;
+            // The snapshot may predate live permission events: apply them again.
+            for change in std::mem::take(&mut state.permission_log) {
+                match change {
+                    PermissionChange::Added(permission) => add_permission(state, permission),
+                    PermissionChange::Resolved(id) => state.permissions.retain(|p| p.id != id),
+                }
+            }
             let pending = &state.permissions;
             state
                 .dismissed
@@ -43,7 +53,8 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             agent_id,
             events,
             done,
-        } => on_history(state, &agent_id, &events, done, &mut fx),
+            generation,
+        } => on_history(state, &agent_id, &events, done, generation, &mut fx),
         AppEvent::RpcDone { request, result } => on_rpc_done(state, request, result, &mut fx),
         AppEvent::Connection(connection) => on_connection(state, connection, &mut fx),
         AppEvent::Lagged => {
@@ -59,23 +70,18 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
 }
 
 /// Bring the derived state in line after any change: the stream follows the
-/// selected agent, and a pending permission opens its dialog.
+/// selected agent (the input's target while typing), and a pending permission
+/// may open its dialog.
 fn settle(state: &mut AppState, fx: &mut Vec<Effect>) {
-    let wanted = state.selected_agent_id();
+    let wanted = state.stream_agent_id();
     if state.stream.agent_id() != wanted.as_ref() {
         state.stream.reset(wanted.clone());
         if let Some(agent_id) = wanted {
             fx.push(Effect::LoadHistory {
                 agent_id,
                 since_seq: 0,
+                generation: state.stream.generation(),
             });
-        }
-        // Never keep typing at an agent the user did not choose.
-        if state.focus == Focus::Input {
-            state.focus = Focus::Tree;
-        }
-        if state.focus_before_dialog == Focus::Input {
-            state.focus_before_dialog = Focus::Tree;
         }
     }
     if let Some(Dialog::Permission { permission, .. }) = &state.dialog
@@ -86,15 +92,12 @@ fn settle(state: &mut AppState, fx: &mut Vec<Effect>) {
     open_pending_permission(state);
 }
 
+/// Open the dialog of the selected agent's next pending permission, but only
+/// from the tree with an empty input. It never opens over the input or over
+/// another dialog: keys typed there must not answer a request, and even here
+/// the dialog ignores a/s/d for its first ticks.
 fn open_pending_permission(state: &mut AppState) {
-    let allowed = match state.focus {
-        Focus::Tree => true,
-        // A decision key typed into a half-written message must not answer
-        // a permission request: wait until the input is empty.
-        Focus::Input => state.input.is_empty(),
-        Focus::Dialog => false,
-    };
-    if !allowed {
+    if state.focus != Focus::Tree || !state.input.is_empty() {
         return;
     }
     let Some(agent_id) = state.selected_agent_id() else {
@@ -106,10 +109,7 @@ fn open_pending_permission(state: &mut AppState) {
         .find(|p| p.agent_id == agent_id && !state.dismissed.contains(&p.id))
         .cloned();
     if let Some(permission) = next {
-        state.open_dialog(Dialog::Permission {
-            permission,
-            sending: false,
-        });
+        state.open_dialog(Dialog::permission(permission));
     }
 }
 
@@ -128,6 +128,7 @@ fn catch_up_selected(state: &mut AppState, fx: &mut Vec<Effect>) {
         fx.push(Effect::LoadHistory {
             agent_id,
             since_seq: state.stream.last_seq(),
+            generation: state.stream.generation(),
         });
     }
 }
@@ -145,10 +146,17 @@ fn on_connection(state: &mut AppState, connection: ConnectionState, fx: &mut Vec
         catch_up_selected(state, fx);
     } else {
         state.snapshot_pending = None;
+        state.permission_log.clear();
     }
 }
 
 fn on_tick(state: &mut AppState) {
+    if let Some(Dialog::Permission {
+        ticks_until_armed, ..
+    }) = &mut state.dialog
+    {
+        *ticks_until_armed = ticks_until_armed.saturating_sub(1);
+    }
     if state.status.error.is_some() {
         state.status.error_ticks += 1;
         if state.status.error_ticks >= ERROR_TICKS {
@@ -159,6 +167,7 @@ fn on_tick(state: &mut AppState) {
         *ticks += 1;
         if *ticks >= SNAPSHOT_RETRY_TICKS {
             state.snapshot_pending = None;
+            state.permission_log.clear();
         }
     }
 }
@@ -172,9 +181,12 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
             state.tree.set_agent_state(&event.agent_id, *agent_state);
         }
         EventKind::PermissionRequested { permission } => {
-            if !state.permissions.iter().any(|p| p.id == permission.id) {
-                state.permissions.push(permission.clone());
+            if state.snapshot_pending.is_some() {
+                state
+                    .permission_log
+                    .push(PermissionChange::Added(permission.clone()));
             }
+            add_permission(state, permission.clone());
         }
         EventKind::PermissionResolved { id, .. } => remove_permission(state, id),
         _ => {}
@@ -184,7 +196,19 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
     }
 }
 
+fn add_permission(state: &mut AppState, permission: PendingPermission) {
+    if !state.permissions.iter().any(|p| p.id == permission.id) {
+        state.permissions.push(permission);
+    }
+}
+
+/// A permission ended (resolved, cancelled or answered by us).
 fn remove_permission(state: &mut AppState, id: &PermissionId) {
+    if state.snapshot_pending.is_some() {
+        state
+            .permission_log
+            .push(PermissionChange::Resolved(id.clone()));
+    }
     state.permissions.retain(|p| &p.id != id);
     state.dismissed.remove(id);
 }
@@ -194,9 +218,12 @@ fn on_history(
     agent_id: &AgentId,
     events: &[AgentEvent],
     done: bool,
+    generation: u64,
     fx: &mut Vec<Effect>,
 ) {
-    if state.stream.agent_id() != Some(agent_id) {
+    // A page of an older load (the user moved on, or a reconnect started a
+    // new one) must not move `last_seq` past what the current load fetches.
+    if state.stream.agent_id() != Some(agent_id) || generation != state.stream.generation() {
         return;
     }
     let advanced = state.stream.history_page(events);
@@ -207,6 +234,7 @@ fn on_history(
         fx.push(Effect::LoadHistory {
             agent_id: agent_id.clone(),
             since_seq: state.stream.last_seq(),
+            generation,
         });
     }
 }
@@ -231,7 +259,10 @@ fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
             if let Some((sent_to, text)) = state.unsent.take()
                 && sent_to == agent_id
                 && state.input.is_empty()
-                && state.selected_agent_id().as_ref() == Some(&agent_id)
+                && state
+                    .tree
+                    .agent(&agent_id)
+                    .is_some_and(|a| a.state != AgentState::Archived)
             {
                 state.input.set_text(&text);
             }
@@ -240,6 +271,7 @@ fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
             if let Some(Dialog::Permission {
                 permission,
                 sending,
+                ..
             }) = &mut state.dialog
                 && permission.id == permission_id
             {
@@ -258,7 +290,10 @@ fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
                 form.error = Some(message.clone());
             }
         }
-        RequestTag::Interrupt { .. } | RequestTag::Resume { .. } | RequestTag::Archive { .. } => {}
+        RequestTag::Interrupt { .. }
+        | RequestTag::Resume { .. }
+        | RequestTag::Archive { .. }
+        | RequestTag::LoadHistory { .. } => {}
     }
     state.set_error(message);
 }
@@ -304,7 +339,10 @@ fn on_rpc_ok(
                 Err(_) => request_snapshot(state, fx, false),
             }
         }
-        RequestTag::Interrupt { .. } | RequestTag::Resume { .. } | RequestTag::Archive { .. } => {}
+        RequestTag::Interrupt { .. }
+        | RequestTag::Resume { .. }
+        | RequestTag::Archive { .. }
+        | RequestTag::LoadHistory { .. } => {}
     }
 }
 
@@ -482,7 +520,8 @@ fn move_cursor(state: &mut AppState, delta: isize) {
 }
 
 fn focus_input(state: &mut AppState) {
-    if state.selected_agent().is_some() {
+    if let Some(agent_id) = state.selected_agent_id() {
+        state.input_target = Some(agent_id);
         state.focus = Focus::Input;
     } else {
         state.set_error("select an agent first".to_owned());
@@ -549,16 +588,16 @@ fn go_to_next_waiting_agent(state: &mut AppState) {
         state.set_error("no permission request is pending".to_owned());
         return;
     };
-    let dismissed: Vec<PermissionId> = state
+    let permission = state
         .permissions
         .iter()
-        .filter(|p| p.agent_id == agent_id)
-        .map(|p| p.id.clone())
-        .collect();
-    for id in &dismissed {
-        state.dismissed.remove(id);
-    }
+        .find(|p| p.agent_id == agent_id)
+        .cloned();
     state.tree.reveal(&NodeId::Agent(agent_id));
+    if let Some(permission) = permission {
+        state.dismissed.remove(&permission.id);
+        state.open_dialog(Dialog::permission(permission));
+    }
 }
 
 fn input_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
@@ -579,7 +618,7 @@ fn send_message(state: &mut AppState, fx: &mut Vec<Effect>) {
     if text.trim().is_empty() {
         return;
     }
-    let Some(agent_id) = state.selected_agent_id() else {
+    let Some(agent_id) = state.input_target().map(|a| a.id.clone()) else {
         state.set_error("select an agent first".to_owned());
         return;
     };
@@ -619,6 +658,7 @@ fn permission_key(state: &mut AppState, key: &KeyInput, fx: &mut Vec<Effect>) {
     let Some(Dialog::Permission {
         permission,
         sending,
+        ticks_until_armed,
     }) = &mut state.dialog
     else {
         return;
@@ -636,7 +676,8 @@ fn permission_key(state: &mut AppState, key: &KeyInput, fx: &mut Vec<Effect>) {
         Some('d') => Decision::Deny,
         _ => return,
     };
-    if *sending {
+    // Not yet armed (just opened or replaced), or already answering.
+    if *sending || *ticks_until_armed > 0 {
         return;
     }
     let params = PermissionRespondParams {
@@ -973,28 +1014,47 @@ mod tests {
 
         /// The empty last page of a history load.
         fn finish_history(&mut self, agent: &AgentId) {
-            update(
-                &mut self.state,
-                AppEvent::History {
-                    agent_id: agent.clone(),
-                    events: Vec::new(),
-                    done: true,
-                },
-            );
+            let generation = self.state.stream.generation();
+            update(&mut self.state, last_page(agent, generation));
         }
 
         fn history(&mut self, agent: &AgentId, seqs: std::ops::RangeInclusive<u64>, done: bool) {
-            let events = seqs
-                .map(|seq| text(agent, seq, &format!("t{seq}")))
-                .collect();
-            update(
-                &mut self.state,
-                AppEvent::History {
-                    agent_id: agent.clone(),
-                    events,
-                    done,
-                },
-            );
+            let generation = self.state.stream.generation();
+            update(&mut self.state, page(agent, seqs, done, generation));
+        }
+    }
+
+    fn tick(state: &mut AppState, times: usize) {
+        for _ in 0..times {
+            update(state, AppEvent::Tick);
+        }
+    }
+
+    fn requested(agent: &AgentId, seq: u64, permission: &PendingPermission) -> AppEvent {
+        AppEvent::AgentEvent(event(
+            agent,
+            seq,
+            EventKind::PermissionRequested {
+                permission: permission.clone(),
+            },
+        ))
+    }
+
+    fn resolved(agent: &AgentId, seq: u64, permission: &PendingPermission) -> AppEvent {
+        AppEvent::AgentEvent(event(
+            agent,
+            seq,
+            EventKind::PermissionResolved {
+                id: permission.id.clone(),
+                resolution: Resolution::Cancelled,
+            },
+        ))
+    }
+
+    fn open_permission_id(state: &AppState) -> Option<PermissionId> {
+        match &state.dialog {
+            Some(Dialog::Permission { permission, .. }) => Some(permission.id.clone()),
+            _ => None,
         }
     }
 
@@ -1002,10 +1062,51 @@ mod tests {
         state.stream.lines().iter().cloned().collect()
     }
 
-    fn load_history(agent: &Agent, since_seq: u64) -> Effect {
+    /// The effect for the load that is current in `state`.
+    fn load_history(state: &AppState, agent: &Agent, since_seq: u64) -> Effect {
         Effect::LoadHistory {
             agent_id: agent.id.clone(),
             since_seq,
+            generation: state.stream.generation(),
+        }
+    }
+
+    /// The generation of the single `LoadHistory` in `fx`.
+    fn generation_of(fx: &[Effect]) -> u64 {
+        let generations: Vec<u64> = fx
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadHistory { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(generations.len(), 1, "{fx:?}");
+        generations[0]
+    }
+
+    /// The empty page that ends a history load.
+    fn last_page(agent: &AgentId, generation: u64) -> AppEvent {
+        AppEvent::History {
+            agent_id: agent.clone(),
+            events: Vec::new(),
+            done: true,
+            generation,
+        }
+    }
+
+    fn page(
+        agent: &AgentId,
+        seqs: std::ops::RangeInclusive<u64>,
+        done: bool,
+        generation: u64,
+    ) -> AppEvent {
+        AppEvent::History {
+            agent_id: agent.clone(),
+            events: seqs
+                .map(|seq| text(agent, seq, &format!("t{seq}")))
+                .collect(),
+            done,
+            generation,
         }
     }
 
@@ -1014,12 +1115,18 @@ mod tests {
         let mut f = Fixture::new();
         assert_eq!(f.state.stream.agent_id(), None);
         assert_eq!(press_key(&mut f.state, Key::Down), vec![], "workspace row");
-        assert_eq!(press(&mut f.state, 'j'), vec![load_history(&f.a1, 0)]);
+        assert_eq!(
+            press(&mut f.state, 'j'),
+            vec![load_history(&f.state, &f.a1, 0)]
+        );
         assert_eq!(f.state.stream.agent_id(), Some(&f.a1.id));
         assert!(f.state.stream.is_loading());
         // Moving to the next agent starts over for it.
         f.history(&f.a1.id.clone(), 1..=2, false);
-        assert_eq!(press(&mut f.state, 'j'), vec![load_history(&f.a2, 0)]);
+        assert_eq!(
+            press(&mut f.state, 'j'),
+            vec![load_history(&f.state, &f.a2, 0)]
+        );
         assert!(f.state.stream.lines().is_empty());
         assert_eq!(f.state.stream.last_seq(), 0);
     }
@@ -1029,24 +1136,21 @@ mod tests {
         let mut f = Fixture::new();
         f.select_a1();
         let id = f.a1.id.clone();
-        let page = |seqs: std::ops::RangeInclusive<u64>, done| AppEvent::History {
-            agent_id: id.clone(),
-            events: seqs.map(|s| text(&id, s, &format!("t{s}"))).collect(),
-            done,
-        };
+        let generation = f.state.stream.generation();
         assert_eq!(
-            update(&mut f.state, page(1..=3, false)),
-            vec![load_history(&f.a1, 3)]
+            update(&mut f.state, page(&id, 1..=3, false, generation)),
+            vec![load_history(&f.state, &f.a1, 3)]
         );
         // The next page repeats seq 3.
         assert_eq!(
-            update(&mut f.state, page(3..=5, false)),
-            vec![load_history(&f.a1, 5)]
+            update(&mut f.state, page(&id, 3..=5, false, generation)),
+            vec![load_history(&f.state, &f.a1, 5)]
         );
         let last = AppEvent::History {
             agent_id: id.clone(),
             events: Vec::new(),
             done: true,
+            generation,
         };
         assert_eq!(update(&mut f.state, last), vec![]);
         assert!(!f.state.stream.is_loading());
@@ -1065,14 +1169,8 @@ mod tests {
         let id = f.a1.id.clone();
         f.history(&id, 1..=2, false);
         // A misbehaving backend repeating the page must not loop forever.
-        let fx = update(
-            &mut f.state,
-            AppEvent::History {
-                agent_id: id.clone(),
-                events: vec![text(&id, 2, "t2")],
-                done: false,
-            },
-        );
+        let generation = f.state.stream.generation();
+        let fx = update(&mut f.state, page(&id, 2..=2, false, generation));
         assert_eq!(fx, vec![]);
         assert!(!f.state.stream.is_loading());
     }
@@ -1082,14 +1180,8 @@ mod tests {
         let mut f = Fixture::new();
         f.select_a1();
         let other = f.a2.id.clone();
-        let fx = update(
-            &mut f.state,
-            AppEvent::History {
-                agent_id: other.clone(),
-                events: vec![text(&other, 1, "x")],
-                done: false,
-            },
-        );
+        let generation = f.state.stream.generation();
+        let fx = update(&mut f.state, page(&other, 1..=1, false, generation));
         assert_eq!(fx, vec![]);
         assert!(f.state.stream.lines().is_empty());
         assert!(f.state.stream.is_loading());
@@ -1257,6 +1349,7 @@ mod tests {
         f.select_a1();
         assert_eq!(f.state.focus, Focus::Dialog);
         assert!(matches!(f.state.dialog, Some(Dialog::Permission { .. })));
+        tick(&mut f.state, 2);
 
         let fx = press(&mut f.state, 'a');
         assert_eq!(
@@ -1294,6 +1387,7 @@ mod tests {
             let perm = permission(&f.a1.id);
             f.snapshot_with(vec![perm.clone()]);
             f.select_a1();
+            tick(&mut f.state, 2);
             let fx = press(&mut f.state, c);
             assert_eq!(
                 fx,
@@ -1314,6 +1408,7 @@ mod tests {
         let perm = permission(&f.a1.id);
         f.snapshot_with(vec![perm.clone()]);
         f.select_a1();
+        tick(&mut f.state, 2);
         press(&mut f.state, 'a');
         update(
             &mut f.state,
@@ -1356,7 +1451,10 @@ mod tests {
         let mut f = Fixture::new();
         let perm = permission(&f.a2.id);
         f.snapshot_with(vec![perm.clone()]);
-        assert_eq!(press(&mut f.state, 'p'), vec![load_history(&f.a2, 0)]);
+        assert_eq!(
+            press(&mut f.state, 'p'),
+            vec![load_history(&f.state, &f.a2, 0)]
+        );
         assert_eq!(f.state.selected_agent_id(), Some(f.a2.id.clone()));
         assert!(matches!(
             &f.state.dialog,
@@ -1403,27 +1501,190 @@ mod tests {
     }
 
     #[test]
-    fn permission_does_not_interrupt_a_half_written_message() {
+    fn ctrl_u_then_a_does_not_answer_a_permission() {
         let mut f = Fixture::new();
         f.select_a1();
         press_key(&mut f.state, Key::Enter);
         type_text(&mut f.state, "add");
         let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert!(f.state.dialog.is_none(), "no dialog while typing");
+        assert_eq!(f.state.input.text(), "add");
+        // Emptying the input does not open it either...
+        key(&mut f.state, KeyInput::ctrl('u'));
+        assert!(f.state.dialog.is_none());
+        assert_eq!(f.state.focus, Focus::Input);
+        // ...so the next typed `a` is text, not an answer.
+        assert_eq!(press(&mut f.state, 'a'), vec![]);
+        assert_eq!(f.state.input.text(), "a");
+        assert_eq!(f.state.permission_count(), 1);
+    }
+
+    #[test]
+    fn backspacing_the_input_empty_does_not_open_a_permission() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press_key(&mut f.state, Key::Enter);
+        type_text(&mut f.state, "a");
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        press_key(&mut f.state, Key::Backspace);
+        assert!(f.state.dialog.is_none());
+        assert_eq!(press(&mut f.state, 'd'), vec![]);
+        assert_eq!(f.state.input.text(), "d");
+    }
+
+    #[test]
+    fn typing_after_sending_does_not_answer_a_permission() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press_key(&mut f.state, Key::Enter);
+        type_text(&mut f.state, "run it");
+        assert_eq!(press_key(&mut f.state, Key::Enter).len(), 1);
+        assert!(f.state.input.is_empty());
+        // The agent asks for permission right after the message is sent.
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert!(f.state.dialog.is_none());
+        assert_eq!(press(&mut f.state, 'a'), vec![]);
+        assert_eq!(f.state.input.text(), "a");
+        assert_eq!(f.state.permission_count(), 1);
+    }
+
+    #[test]
+    fn esc_to_tree_opens_pending_permission_but_keys_wait_two_ticks() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press_key(&mut f.state, Key::Enter);
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert!(f.state.dialog.is_none(), "never opens in the input");
+        press_key(&mut f.state, Key::Esc);
+        assert_eq!(open_permission_id(&f.state), Some(perm.id.clone()));
+        // A key typed right after Esc must not answer.
+        assert_eq!(press(&mut f.state, 'a'), vec![]);
+        tick(&mut f.state, 1);
+        assert_eq!(press(&mut f.state, 'a'), vec![]);
+        tick(&mut f.state, 1);
+        assert_eq!(press(&mut f.state, 'a').len(), 1);
+    }
+
+    #[test]
+    fn decision_keys_are_ignored_for_two_ticks_after_a_dialog_opens() {
+        let mut f = Fixture::new();
+        f.snapshot_with(vec![permission(&f.a1.id)]);
+        f.select_a1();
+        assert!(f.state.dialog.is_some());
+        for c in ['a', 's', 'd'] {
+            assert_eq!(press(&mut f.state, c), vec![], "{c} right after opening");
+        }
+        tick(&mut f.state, 1);
+        assert_eq!(press(&mut f.state, 's'), vec![], "one tick is not enough");
+        tick(&mut f.state, 1);
+        assert_eq!(press(&mut f.state, 's').len(), 1);
+
+        // Esc is not delayed.
+        let mut f = Fixture::new();
+        f.snapshot_with(vec![permission(&f.a1.id)]);
+        f.select_a1();
+        press_key(&mut f.state, Key::Esc);
+        assert!(f.state.dialog.is_none());
+    }
+
+    #[test]
+    fn resolve_then_next_permission_opens_and_an_immediate_key_is_ignored() {
+        let mut f = Fixture::new();
+        let p1 = permission(&f.a1.id);
+        let p2 = permission(&f.a1.id);
+        f.snapshot_with(vec![p1.clone(), p2.clone()]);
+        f.select_a1();
+        tick(&mut f.state, 2);
+        assert_eq!(open_permission_id(&f.state), Some(p1.id.clone()));
+        // P1 is resolved elsewhere; P2 takes its place in the same update.
+        update(&mut f.state, resolved(&f.a1.id, 1, &p1));
+        assert_eq!(open_permission_id(&f.state), Some(p2.id.clone()));
+        assert_eq!(
+            press(&mut f.state, 'a'),
+            vec![],
+            "meant for P1, must not answer P2"
+        );
+        tick(&mut f.state, 2);
+        let fx = press(&mut f.state, 'a');
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::Call { request: RequestTag::Respond { permission_id }, .. }]
+                if *permission_id == p2.id
+        ));
+    }
+
+    #[test]
+    fn our_own_answer_then_the_next_permission_is_guarded_too() {
+        let mut f = Fixture::new();
+        let p1 = permission(&f.a1.id);
+        let p2 = permission(&f.a1.id);
+        f.snapshot_with(vec![p1.clone(), p2.clone()]);
+        f.select_a1();
+        tick(&mut f.state, 2);
+        press(&mut f.state, 'a');
         update(
             &mut f.state,
-            AppEvent::AgentEvent(event(
-                &f.a1.id,
-                1,
-                EventKind::PermissionRequested {
-                    permission: perm.clone(),
+            AppEvent::RpcDone {
+                request: RequestTag::Respond {
+                    permission_id: p1.id.clone(),
                 },
-            )),
+                result: Ok(json!({})),
+            },
         );
-        assert!(f.state.dialog.is_none(), "typed 'a' must not allow");
-        assert_eq!(f.state.input.text(), "add");
-        // Once the message is gone, the dialog opens.
-        key(&mut f.state, KeyInput::ctrl('u'));
-        assert!(matches!(f.state.dialog, Some(Dialog::Permission { .. })));
+        assert_eq!(open_permission_id(&f.state), Some(p2.id.clone()));
+        assert_eq!(press(&mut f.state, 'a'), vec![]);
+    }
+
+    #[test]
+    fn a_draft_in_the_tree_blocks_auto_open_but_p_opens_explicitly() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press_key(&mut f.state, Key::Enter);
+        type_text(&mut f.state, "draft");
+        press_key(&mut f.state, Key::Esc);
+        assert_eq!(f.state.focus, Focus::Tree);
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert!(f.state.dialog.is_none(), "the draft is not empty");
+        press(&mut f.state, 'p');
+        assert_eq!(open_permission_id(&f.state), Some(perm.id.clone()));
+        assert_eq!(f.state.input.text(), "draft");
+    }
+
+    #[test]
+    fn a_permission_of_an_unselected_agent_opens_no_dialog() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        let other = permission(&f.a2.id);
+        update(&mut f.state, requested(&f.a2.id, 1, &other));
+        assert!(f.state.dialog.is_none());
+        assert_eq!(f.state.focus, Focus::Tree);
+        assert_eq!(f.state.permission_count(), 1);
+        // Neither does a snapshot that carries it.
+        f.snapshot_with(vec![other]);
+        assert!(f.state.dialog.is_none());
+    }
+
+    #[test]
+    fn a_new_permission_does_not_replace_an_open_dialog() {
+        let mut f = Fixture::new();
+        let p1 = permission(&f.a1.id);
+        f.snapshot_with(vec![p1.clone()]);
+        f.select_a1();
+        assert_eq!(f.state.focus, Focus::Dialog);
+        let p2 = permission(&f.a1.id);
+        let p3 = permission(&f.a2.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &p2));
+        update(&mut f.state, requested(&f.a2.id, 1, &p3));
+        assert_eq!(open_permission_id(&f.state), Some(p1.id.clone()));
+        assert_eq!(f.state.permission_count(), 3);
+        // A snapshot does not replace it either.
+        f.snapshot_with(vec![p2, p1.clone(), p3]);
+        assert_eq!(open_permission_id(&f.state), Some(p1.id));
     }
 
     #[test]
@@ -1469,16 +1730,60 @@ mod tests {
         let rows = f.state.rows();
         assert_eq!(rows[3].agent_state, Some(AgentState::Running));
 
-        // The selected agent is archived: the cursor moves to its sibling and
-        // typing does not continue at the other agent.
+        // The agent being typed at is archived: the cursor falls back to the
+        // sibling but the input keeps focus and has no target.
         press_key(&mut f.state, Key::Enter);
         assert_eq!(f.state.focus, Focus::Input);
+        type_text(&mut f.state, "q");
         let fx = update(&mut f.state, state_changed(&f.a1, 1, AgentState::Archived));
         assert_eq!(f.state.rows().len(), 3);
-        assert_eq!(f.state.selected_agent_id(), Some(f.a2.id.clone()));
-        assert_eq!(fx, vec![load_history(&f.a2, 0)]);
-        assert_eq!(f.state.focus, Focus::Tree);
+        assert_eq!(fx, vec![]);
+        assert_eq!(
+            f.state.focus,
+            Focus::Input,
+            "typing must not become commands"
+        );
+        assert_eq!(f.state.stream.agent_id(), None);
+        assert_eq!(f.state.input.text(), "q");
+        assert_eq!(press(&mut f.state, 'x'), vec![], "`x` is text here");
+        assert_eq!(f.state.input.text(), "qx");
+        // Sending says there is nowhere to send to, and keeps the text.
+        assert_eq!(press_key(&mut f.state, Key::Enter), vec![]);
+        assert_eq!(
+            f.state.status.error.as_deref(),
+            Some("select an agent first")
+        );
+        assert_eq!(f.state.input.text(), "qx");
         assert_eq!(f.state.agent_count(), 1);
+        // Back in the tree the sibling is shown.
+        let fx = press_key(&mut f.state, Key::Esc);
+        assert_eq!(f.state.selected_agent_id(), Some(f.a2.id.clone()));
+        assert_eq!(fx, vec![load_history(&f.state, &f.a2, 0)]);
+    }
+
+    #[test]
+    fn a_sibling_permission_cannot_be_answered_after_the_target_is_lost() {
+        let mut f = Fixture::new();
+        f.snapshot_with(vec![permission(&f.a2.id)]);
+        f.select_a1();
+        press_key(&mut f.state, Key::Enter);
+        // a1 disappears from a snapshot; the cursor falls back to a2.
+        update(
+            &mut f.state,
+            AppEvent::Snapshot {
+                projects: vec![f.project.clone()],
+                workspaces: vec![f.workspace.clone()],
+                agents: vec![f.a2.clone()],
+                permissions: vec![permission(&f.a2.id)],
+            },
+        );
+        assert_eq!(f.state.focus, Focus::Input);
+        assert!(f.state.dialog.is_none());
+        for c in ['a', 's', 'd'] {
+            assert_eq!(press(&mut f.state, c), vec![]);
+        }
+        assert_eq!(f.state.input.text(), "asd");
+        assert_eq!(f.state.permission_count(), 1);
     }
 
     #[test]
@@ -1562,7 +1867,7 @@ mod tests {
             },
         );
         assert_eq!(f.state.selected_agent_id(), Some(f.a2.id.clone()));
-        assert_eq!(fx, vec![load_history(&f.a2, 0)]);
+        assert_eq!(fx, vec![load_history(&f.state, &f.a2, 0)]);
         // The whole project goes away: nothing is selected.
         let fx = update(
             &mut f.state,
@@ -1664,7 +1969,7 @@ mod tests {
             vec![
                 Effect::Resubscribe,
                 Effect::LoadSnapshot,
-                load_history(&f.a1, 3)
+                load_history(&f.state, &f.a1, 3)
             ]
         );
         assert_eq!(f.state.stream.lines().len(), 3, "the lines stay");
@@ -1709,7 +2014,10 @@ mod tests {
             &mut f.state,
             AppEvent::Connection(ConnectionState::Connected),
         );
-        assert_eq!(fx, vec![Effect::LoadSnapshot, load_history(&f.a1, 4)]);
+        assert_eq!(
+            fx,
+            vec![Effect::LoadSnapshot, load_history(&f.state, &f.a1, 4)]
+        );
         assert_eq!(f.state.status.connection, ConnectionState::Connected);
     }
 
@@ -1851,7 +2159,7 @@ mod tests {
         assert!(f.state.dialog.is_none());
         assert_eq!(f.state.focus, Focus::Tree);
         assert_eq!(f.state.selected_agent_id(), Some(created.id.clone()));
-        assert_eq!(fx, vec![load_history(&created, 0)]);
+        assert_eq!(fx, vec![load_history(&f.state, &created, 0)]);
         assert!(f.state.status.error.is_none());
     }
 
@@ -2022,5 +2330,327 @@ mod tests {
             },
         );
         assert_eq!(state.size, (60, 15));
+    }
+
+    #[test]
+    fn snapshot_keeps_a_permission_requested_after_it_was_asked_for() {
+        let mut f = Fixture::new();
+        let stranger = AgentId::generate();
+        let fx = update(
+            &mut f.state,
+            AppEvent::AgentEvent(text(&stranger, 1, "hello")),
+        );
+        assert_eq!(fx, vec![Effect::LoadSnapshot]);
+        // The permission arrives live; the snapshot (taken earlier) lacks it.
+        let perm = permission(&stranger);
+        update(&mut f.state, requested(&stranger, 2, &perm));
+        assert_eq!(f.state.permission_count(), 1);
+        f.snapshot_with(vec![]);
+        assert_eq!(f.state.permission_count(), 1);
+        // The next snapshot, requested after it, is authoritative again.
+        f.snapshot_with(vec![]);
+        assert_eq!(f.state.permission_count(), 0);
+    }
+
+    #[test]
+    fn snapshot_does_not_resurrect_a_permission_resolved_after_it_was_asked_for() {
+        let mut f = Fixture::new();
+        let perm = permission(&f.a1.id);
+        f.snapshot_with(vec![perm.clone()]);
+        let stranger = AgentId::generate();
+        update(
+            &mut f.state,
+            AppEvent::AgentEvent(text(&stranger, 1, "hello")),
+        );
+        update(&mut f.state, resolved(&f.a1.id, 1, &perm));
+        assert_eq!(f.state.permission_count(), 0);
+        // The stale snapshot still lists it.
+        f.snapshot_with(vec![perm]);
+        assert_eq!(f.state.permission_count(), 0);
+        assert!(!f.state.rows().iter().any(|r| r.waiting_permission));
+    }
+
+    #[test]
+    fn our_own_answer_during_a_snapshot_request_is_not_resurrected() {
+        let mut f = Fixture::new();
+        let perm = permission(&f.a1.id);
+        f.snapshot_with(vec![perm.clone()]);
+        f.select_a1();
+        tick(&mut f.state, 2);
+        press(&mut f.state, 'a');
+        let fx = update(
+            &mut f.state,
+            AppEvent::Connection(ConnectionState::Connected),
+        );
+        assert!(fx.contains(&Effect::LoadSnapshot));
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request: RequestTag::Respond {
+                    permission_id: perm.id.clone(),
+                },
+                result: Ok(json!({})),
+            },
+        );
+        f.snapshot_with(vec![perm]);
+        assert_eq!(f.state.permission_count(), 0);
+    }
+
+    #[test]
+    fn snapshot_without_a_request_in_flight_is_authoritative() {
+        let mut f = Fixture::new();
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert_eq!(f.state.permission_count(), 1);
+        f.snapshot_with(vec![]);
+        assert_eq!(f.state.permission_count(), 0);
+    }
+
+    #[test]
+    fn auto_approve_modes_warn_per_provider() {
+        let warns = |provider, mode: &str| {
+            let mut form = NewAgentForm::new(WorkspaceId::generate());
+            form.provider = provider;
+            form.mode.set_text(mode);
+            form.auto_approve_mode()
+        };
+        for mode in ["bypassPermissions", "auto", "acceptEdits", " auto "] {
+            assert!(warns(ProviderKind::Claude, mode), "claude {mode}");
+        }
+        for mode in ["", "default", "plan", "full-access", "Auto"] {
+            assert!(!warns(ProviderKind::Claude, mode), "claude {mode:?}");
+        }
+        assert!(warns(ProviderKind::Codex, "full-access"));
+        for mode in [
+            "",
+            "read-only",
+            "workspace-write",
+            "untrusted",
+            "auto",
+            "acceptEdits",
+        ] {
+            assert!(!warns(ProviderKind::Codex, mode), "codex {mode:?}");
+        }
+    }
+
+    #[test]
+    fn daemon_text_in_labels_and_titles_is_escaped() {
+        let mut p = project("p\x1b[2J\u{202e}x");
+        p.name = "p\x1b[2J\u{202e}x".to_owned();
+        let mut ws = workspace(&p.id, "2026-01-01T00:00:01Z");
+        ws.isolation = Isolation::Worktree;
+        ws.branch = Some("b\nfake\r".to_owned());
+        let mut a = agent(
+            &ws.id,
+            "t\x07\u{9b}\u{202e}\nrow",
+            ProviderKind::Claude,
+            "2026-01-01T00:00:02Z",
+        );
+        a.title = "t\x07\u{9b}\u{202e}\nrow".to_owned();
+        let mut state = AppState::default();
+        update(
+            &mut state,
+            AppEvent::Snapshot {
+                projects: vec![p],
+                workspaces: vec![ws],
+                agents: vec![a.clone()],
+                permissions: vec![],
+            },
+        );
+        let labels: Vec<String> = state.rows().into_iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "p\\x1b[2J\\u{202e}x".to_owned(),
+                "ws b\\nfake\\r (wt)".to_owned(),
+                "t\\x07\\u{9b}\\u{202e}\\nrow".to_owned(),
+            ]
+        );
+        for label in &labels {
+            assert!(!label.chars().any(char::is_control), "{label:?}");
+            assert!(!label.contains('\u{202e}'), "{label:?}");
+        }
+        press(&mut state, 'j');
+        press(&mut state, 'j');
+        press(&mut state, 'j');
+        press(&mut state, 'A');
+        match &state.dialog {
+            Some(Dialog::ConfirmArchive { title, .. }) => {
+                assert_eq!(title, "t\\x07\\u{9b}\\u{202e}\\nrow");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_new_history_load_has_its_own_generation() {
+        let mut f = Fixture::new();
+        press_key(&mut f.state, Key::Down);
+        let g1 = generation_of(&press_key(&mut f.state, Key::Down));
+        let g2 = generation_of(&press_key(&mut f.state, Key::Down));
+        let g3 = generation_of(&press_key(&mut f.state, Key::Up));
+        let g4 = generation_of(&update(&mut f.state, AppEvent::Lagged));
+        let g5 = generation_of(&update(
+            &mut f.state,
+            AppEvent::Connection(ConnectionState::Connected),
+        ));
+        let all = [g1, g2, g3, g4, g5];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b, "{all:?}");
+            }
+        }
+        assert_eq!(f.state.stream.generation(), g5);
+    }
+
+    #[test]
+    fn late_pages_from_an_old_load_chain_cause_no_gap_and_no_duplicate() {
+        let mut f = Fixture::new();
+        press_key(&mut f.state, Key::Down);
+        let a1 = f.a1.id.clone();
+        let g1 = generation_of(&press_key(&mut f.state, Key::Down));
+        // The first chain gets its first page and asks for the next.
+        let fx = update(&mut f.state, page(&a1, 1..=3, false, g1));
+        assert_eq!(generation_of(&fx), g1);
+        // The user moves A -> B -> A quickly: a new chain starts from 0.
+        press_key(&mut f.state, Key::Down);
+        let g3 = generation_of(&press_key(&mut f.state, Key::Up));
+        assert_ne!(g1, g3);
+        assert_eq!(f.state.stream.last_seq(), 0);
+
+        // The old chain's next page arrives late: it must not move last_seq.
+        let fx = update(&mut f.state, page(&a1, 10..=12, false, g1));
+        assert_eq!(fx, vec![]);
+        assert_eq!(f.state.stream.last_seq(), 0);
+        // Nor may its end marker stop the new chain's loading.
+        update(&mut f.state, last_page(&a1, g1));
+        assert!(f.state.stream.is_loading());
+
+        // The new chain delivers everything.
+        let fx = update(&mut f.state, page(&a1, 1..=3, false, g3));
+        assert_eq!(fx, vec![load_history(&f.state, &f.a1, 3)]);
+        // Another stale page between the new pages is ignored too.
+        update(&mut f.state, page(&a1, 10..=12, false, g1));
+        let fx = update(&mut f.state, page(&a1, 4..=9, false, g3));
+        assert_eq!(fx, vec![load_history(&f.state, &f.a1, 9)]);
+        update(&mut f.state, last_page(&a1, g3));
+        assert!(!f.state.stream.is_loading());
+        // And once it is finished, so is any straggler.
+        assert_eq!(update(&mut f.state, page(&a1, 1..=5, false, g1)), vec![]);
+        assert_eq!(
+            lines(&f.state)
+                .iter()
+                .map(|l| l.split(' ').next().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            (1..=9).map(|s| format!("[{s}]")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lagged_during_a_load_starts_a_new_chain() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        let a1 = f.a1.id.clone();
+        let g1 = f.state.stream.generation();
+        update(&mut f.state, page(&a1, 1..=3, false, g1));
+        let fx = update(&mut f.state, AppEvent::Lagged);
+        let g2 = f.state.stream.generation();
+        assert_ne!(g1, g2);
+        assert_eq!(
+            fx,
+            vec![
+                Effect::Resubscribe,
+                Effect::LoadSnapshot,
+                load_history(&f.state, &f.a1, 3)
+            ]
+        );
+        // The old chain's continuation arrives late and is dropped.
+        assert_eq!(update(&mut f.state, page(&a1, 4..=5, false, g1)), vec![]);
+        assert_eq!(f.state.stream.last_seq(), 3);
+        // A live event meanwhile is held until the new chain is complete.
+        update(&mut f.state, AppEvent::AgentEvent(text(&a1, 8, "t8")));
+        update(&mut f.state, page(&a1, 4..=7, false, g2));
+        update(&mut f.state, last_page(&a1, g2));
+        assert_eq!(
+            lines(&f.state)
+                .iter()
+                .map(|l| l.split(' ').next().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            (1..=8).map(|s| format!("[{s}]")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn failed_history_load_ends_loading_and_shows_the_error() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        let a1 = f.a1.id.clone();
+        let generation = f.state.stream.generation();
+        // The backend reports a failed load as an empty final page plus the error.
+        update(&mut f.state, last_page(&a1, generation));
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request: RequestTag::LoadHistory {
+                    agent_id: a1.clone(),
+                },
+                result: Err("agent.events: boom\x1b".to_owned()),
+            },
+        );
+        assert!(!f.state.stream.is_loading());
+        assert_eq!(
+            f.state.status.error.as_deref(),
+            Some("agent.events: boom\\x1b")
+        );
+        // Live events show again instead of being held forever.
+        update(&mut f.state, AppEvent::AgentEvent(text(&a1, 1, "t1")));
+        assert_eq!(f.state.stream.lines().len(), 1);
+    }
+
+    #[test]
+    fn permission_hint_and_missing_target_are_exposed_to_the_renderer() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        assert_eq!(f.state.permission_hint(), None);
+        press_key(&mut f.state, Key::Enter);
+        assert!(!f.state.input_target_missing());
+        assert_eq!(f.state.permission_hint(), None);
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        let hint = f.state.permission_hint().expect("hint while typing");
+        assert!(hint.contains("Esc") && hint.contains('p'), "{hint}");
+        press_key(&mut f.state, Key::Esc);
+        assert_eq!(f.state.permission_hint(), None, "the dialog shows it now");
+
+        // Losing the target is visible too.
+        let mut f = Fixture::new();
+        f.select_a1();
+        press_key(&mut f.state, Key::Enter);
+        update(
+            &mut f.state,
+            AppEvent::AgentEvent(event(
+                &f.a1.id,
+                1,
+                EventKind::StateChanged {
+                    state: AgentState::Archived,
+                },
+            )),
+        );
+        assert!(f.state.input_target_missing());
+    }
+
+    #[test]
+    fn permission_dialog_reports_when_its_keys_are_enabled() {
+        let mut f = Fixture::new();
+        f.snapshot_with(vec![permission(&f.a1.id)]);
+        f.select_a1();
+        let armed = |state: &AppState| state.dialog.as_ref().is_some_and(Dialog::permission_armed);
+        assert!(!armed(&f.state));
+        tick(&mut f.state, 1);
+        assert!(!armed(&f.state));
+        tick(&mut f.state, 1);
+        assert!(armed(&f.state));
+        tick(&mut f.state, 5);
+        assert!(armed(&f.state));
     }
 }
