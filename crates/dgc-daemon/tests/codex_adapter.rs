@@ -23,7 +23,7 @@ use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, SendBehavior,
     SendOutcome, Workspace, WorkspaceState,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
 
@@ -202,6 +202,88 @@ async fn codex_rate_limit_event_routine_update_is_dropped() {
         "{events:?}"
     );
     shutdown_quietly(session).await;
+}
+
+async fn rate_limit_turns(name: &str, count: usize) -> Vec<Vec<ProviderEvent>> {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter(name);
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    let mut turns = Vec::new();
+    for _ in 0..count {
+        session.send_user(PONG).await.expect("send_user");
+        turns.push(turn_events(&mut session).await);
+    }
+    shutdown_quietly(session).await;
+    turns
+}
+
+fn rate_limited_details(events: &[ProviderEvent]) -> Vec<&Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Event(EventKind::RateLimited { detail }) => Some(detail),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn codex_usage_limit_error_emits_rate_limited() {
+    let turns = rate_limit_turns("rate_limited_error", 2).await;
+    for (turn, reason) in turns
+        .iter()
+        .zip(["usageLimitExceeded", "rateLimitExceeded"])
+    {
+        assert_eq!(
+            rate_limited_details(turn),
+            [&json!({"provider": "codex", "reason": reason})]
+        );
+        assert!(
+            turn.iter()
+                .any(|event| matches!(event, ProviderEvent::Event(EventKind::Error { .. }))),
+            "{turn:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn codex_rate_limit_reached_type_emits_rate_limited() {
+    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    let details = rate_limited_details(&turns[0]);
+    let detail = details
+        .first()
+        .expect("reached limit event with a reset time");
+    assert_eq!(detail["reason"], "rate_limit_reached");
+    assert_eq!(detail["resets_at"], 1700003600);
+    assert_eq!(
+        rate_limited_details(&turns[1]),
+        [&json!({"provider": "codex", "reason": "workspace_owner_usage_limit_reached"})]
+    );
+}
+
+#[tokio::test]
+async fn codex_null_reached_type_is_ignored() {
+    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    assert!(rate_limited_details(&turns[2]).is_empty(), "{:?}", turns[2]);
+}
+
+#[tokio::test]
+async fn rate_limited_is_emitted_once_per_turn() {
+    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    for turn in &turns[..2] {
+        assert_eq!(rate_limited_details(turn).len(), 1, "{turn:?}");
+    }
+}
+
+#[tokio::test]
+async fn rate_limited_detail_carries_no_account_data() {
+    let turns = rate_limit_turns("rate_limited_snapshot", 3).await;
+    assert_eq!(
+        rate_limited_details(&turns[0]).first().copied(),
+        Some(&json!({
+            "provider": "codex", "reason": "rate_limit_reached", "resets_at": 1700003600
+        }))
+    );
 }
 
 /// With no turn running, steer returns false and neither steer nor interrupt

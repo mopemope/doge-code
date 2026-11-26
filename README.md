@@ -191,6 +191,10 @@ daemon-supplied text (agent output, summaries, errors) escaped (`\r`, `\t`,
 `\x1b`, `\u{202e}`; newlines are kept only where text may span lines), so a
 terminal escape cannot hide or rewrite what is displayed.
 
+Claude Code and Codex usage-limit notifications produce one `rate limited`
+event per turn at most. Its detail includes the provider, the reason, and
+the reset time in Unix seconds when reported.
+
 ## Terminal UI
 
 `dgc tui` (or `dgc` with no arguments) opens a full-screen terminal UI for all

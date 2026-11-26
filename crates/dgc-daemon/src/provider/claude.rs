@@ -25,7 +25,8 @@
 //!   - `control_request` `can_use_tool` → `PermissionRequested` (`Bash` →
 //!     Command, `Edit|Write|MultiEdit|NotebookEdit` → FileChange, others →
 //!     Tool); other control requests are answered with an error response.
-//!   - `rate_limit_event` arrives with every reply and is dropped.
+//!   - `rate_limit_event` with a status other than `allowed`, or HTTP 429 in
+//!     an `assistant` or `result` row, → `RateLimited` once per turn.
 //!   - An oversized stdout line → `Error` and the session continues.
 //!   - Anything else (hook and thinking-token `system` lines, unknown types)
 //!     is ignored with a debug log of its type.
@@ -272,6 +273,7 @@ struct State {
     /// How many of the in-flight turns have seen their `system/init`. The
     /// CLI runs turns in order, so these are the oldest ones.
     turns_started: u32,
+    rate_limit_emitted: bool,
     /// `result`s still to arrive for interrupted turns; they are dropped.
     swallow_results: u32,
     /// Every interrupted turn had started when the interrupt was answered,
@@ -282,6 +284,20 @@ struct State {
     interrupting: bool,
     /// Stdout reached EOF.
     exited: bool,
+}
+
+impl State {
+    fn rate_limited(&mut self, reason: &str, resets_at: Option<i64>) -> Option<ProviderEvent> {
+        if self.rate_limit_emitted || self.swallow_results > 0 {
+            return None;
+        }
+        self.rate_limit_emitted = true;
+        let mut detail = json!({"provider": "claude", "reason": reason});
+        if let Some(resets_at) = resets_at {
+            detail["resets_at"] = json!(resets_at);
+        }
+        Some(ProviderEvent::Event(EventKind::RateLimited { detail }))
+    }
 }
 
 /// State shared by the session and its stdout reader task.
@@ -451,6 +467,9 @@ impl ProviderSession for ClaudeSession {
                 let mut state = self.shared.state();
                 if state.exited {
                     return Err(ProviderError::Exited);
+                }
+                if state.turns_in_flight == 0 {
+                    state.rate_limit_emitted = false;
                 }
                 state.turns_in_flight += 1;
             }
@@ -671,16 +690,29 @@ async fn handle_line(shared: &Shared, text: &str) -> Vec<ProviderEvent> {
                 Vec::new()
             }
         },
-        "assistant" => assistant_events(&message),
+        "assistant" => {
+            let mut events = assistant_events(&message);
+            if message["api_error_status"].as_u64() == Some(429) {
+                events.extend(shared.state().rate_limited("http_429", None));
+            }
+            events
+        }
         "user" => tool_results(&message),
         "result" => turn_result(shared, &message),
         "rate_limit_event" => {
-            // Sent with every reply, also when no limit was hit. TODO(M4):
-            // emit `RateLimited` once a reached-limit sample has been
-            // recorded (`rate_limit_info.status != "allowed"` is the
-            // unconfirmed candidate).
-            debug!("dropped routine claude rate limit update");
-            Vec::new()
+            let info = &message["rate_limit_info"];
+            match info["status"].as_str() {
+                Some("allowed") => {
+                    debug!("dropped routine claude rate limit update");
+                    Vec::new()
+                }
+                Some(status) => shared
+                    .state()
+                    .rate_limited(status, info["resetsAt"].as_i64())
+                    .into_iter()
+                    .collect(),
+                None => Vec::new(),
+            }
         }
         other => {
             debug!(message_type = other, "ignoring unknown claude message");
@@ -703,6 +735,7 @@ fn turn_started(shared: &Shared) {
         state.turns_in_flight = state.turns_in_flight.saturating_sub(missing);
         state.turns_started = state.turns_started.saturating_sub(missing);
         state.swallow_results = 0;
+        state.rate_limit_emitted = false;
     }
     if state.turns_started < state.turns_in_flight {
         state.turns_started += 1;
@@ -859,7 +892,7 @@ fn tool_results(message: &Value) -> Vec<ProviderEvent> {
 }
 
 fn turn_result(shared: &Shared, message: &Value) -> Vec<ProviderEvent> {
-    {
+    let rate_limited = {
         let mut state = shared.state();
         state.turns_in_flight = state.turns_in_flight.saturating_sub(1);
         state.turns_started = state.turns_started.saturating_sub(1);
@@ -867,11 +900,20 @@ fn turn_result(shared: &Shared, message: &Value) -> Vec<ProviderEvent> {
         state.permissions.clear();
         if state.swallow_results > 0 {
             state.swallow_results -= 1;
+            state.rate_limit_emitted = false;
             debug!("dropped result of interrupted claude turn");
             return Vec::new();
         }
-    }
-    let mut events = Vec::with_capacity(2);
+        let rate_limited = if message["api_error_status"].as_u64() == Some(429) {
+            state.rate_limited("http_429", None)
+        } else {
+            None
+        };
+        state.rate_limit_emitted = false;
+        rate_limited
+    };
+    let mut events = Vec::with_capacity(3);
+    events.extend(rate_limited);
     if message["is_error"].as_bool().unwrap_or(false) {
         let text = message["result"].as_str().unwrap_or("").trim();
         let error = if text.is_empty() {

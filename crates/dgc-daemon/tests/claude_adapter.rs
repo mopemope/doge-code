@@ -1,6 +1,7 @@
 //! ClaudeAdapter driven against `dgc-fake-provider` replaying scenarios that
 //! were converted from real Claude Code 2.1.332 recordings
-//! (`tests/fixtures/claude/scenarios/`). The fake checks every line the
+//! (`tests/fixtures/claude/scenarios/`; synthetic ones say so in their header).
+//! The fake checks every line the
 //! adapter writes and its argv; a mismatch makes it exit 3 (timeout: 4), which
 //! the tests see as an unexpected `Exited` carrying the fake's stderr.
 
@@ -21,6 +22,7 @@ use dgc_protocol::methods::{AgentCreateParams, AgentEventsParams};
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, Workspace, WorkspaceState,
 };
+use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
 
@@ -176,6 +178,77 @@ async fn claude_simple_turn() {
     assert_eq!(events[1], text("pong"));
     assert_eq!(usage_output_tokens(&events[2]), 4);
     shutdown_quietly(session).await;
+}
+
+async fn rate_limit_turns(name: &str, count: usize) -> Vec<Vec<ProviderEvent>> {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter(name);
+    let mut session = start(&adapter, spec(&dir, Some("haiku"), None)).await;
+    let mut turns = Vec::new();
+    for _ in 0..count {
+        session
+            .send_user("Reply with exactly the word: pong")
+            .await
+            .expect("send_user");
+        turns.push(turn_events(&mut session).await);
+    }
+    shutdown_quietly(session).await;
+    turns
+}
+
+fn rate_limited_details(events: &[ProviderEvent]) -> Vec<&Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Event(EventKind::RateLimited { detail }) => Some(detail),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn claude_rate_limit_rejected_status_emits_rate_limited() {
+    let turns = rate_limit_turns("rate_limited_status", 2).await;
+    assert_eq!(
+        rate_limited_details(&turns[0]).first().copied(),
+        Some(&json!({"provider": "claude", "reason": "rejected", "resets_at": 1700000000}))
+    );
+    assert_eq!(
+        rate_limited_details(&turns[1]).first().copied(),
+        Some(&json!({"provider": "claude", "reason": "allowed_warning"}))
+    );
+}
+
+#[tokio::test]
+async fn claude_429_result_emits_rate_limited() {
+    let turns = rate_limit_turns("rate_limited_429", 2).await;
+    for turn in &turns {
+        assert_eq!(
+            rate_limited_details(turn),
+            [&json!({"provider": "claude", "reason": "http_429"})]
+        );
+    }
+    assert!(
+        turns[0]
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Event(EventKind::Error { .. }))),
+        "{:?}",
+        turns[0]
+    );
+}
+
+#[tokio::test]
+async fn claude_allowed_status_is_ignored() {
+    let turns = rate_limit_turns("simple_turn", 1).await;
+    assert!(rate_limited_details(&turns[0]).is_empty(), "{turns:?}");
+}
+
+#[tokio::test]
+async fn rate_limited_is_emitted_once_per_turn() {
+    let turns = rate_limit_turns("rate_limited_status", 2).await;
+    for turn in &turns {
+        assert_eq!(rate_limited_details(turn).len(), 1, "{turn:?}");
+    }
 }
 
 #[tokio::test]

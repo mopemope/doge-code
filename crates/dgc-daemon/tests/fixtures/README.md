@@ -207,8 +207,12 @@ initialize → user を送る。`system/init` と `result` の `session_id` は*
  "uuid":"..","session_id":".."}
 ```
 
-制限に達していなくても API 呼び出しごとに出る。観測した `status` は `"allowed"` のみで、制限到達時の値
-（`rejected` 等）や `result` 側の表現は**未観測**。→ `rate_limited` への変換は `status != "allowed"` を条件にするのが妥当だが、実値は未確認。
+制限に達していなくても API 呼び出しごとに出る。観測した `status` は `"allowed"` のみで、上限到達時の実際の
+`rate_limit_event`、`assistant`、`result` は**未観測**。dgc は、記録した通常応答と API エラー行の形式に基づき、
+`rate_limit_info.status` が `"allowed"` 以外の文字列なら、その値を理由として `rate_limited` を記録する。
+`rate_limit_info.resetsAt` が整数ならリセット時刻も記録する。`assistant` または `result` 行で
+`api_error_status` が整数の `429` の場合は、理由を `http_429` とする。到達ケースは
+`claude/scenarios/rate_limited_*.jsonl` の合成シナリオで検証する。
 
 ### その他の出力（無視してよいもの）
 
@@ -369,8 +373,15 @@ stderr にはモデルエラーは出ない。stderr には tracing ログ（ANS
 ```
 
 制限に達していなくてもモデル応答ごとに出る（`thread/tokenUsage/updated` の直後）。`balance` は文字列または null。
-観測した `rateLimitReachedType` は `null` のみで、制限到達時の値は**未観測**。→ 単にこの通知を `rate_limited` に
-変換すると毎ターン発火する。到達判定は `rateLimitReachedType != null`（または `usedPercent >= 100`）にする必要があるが、実値は未確認。
+観測した `rateLimitReachedType` は `null` のみで、上限到達時の実際の通知は**未観測**。dgc は、Codex CLI 0.172.0 の
+app-server 生成スキーマに基づき、次のどちらかで `rate_limited` を記録する。
+
+- `ErrorNotification` の `params.error.codexErrorInfo` が `usageLimitExceeded` または `rateLimitExceeded`。
+- `AccountRateLimitsUpdatedNotification` の `params.rateLimits.rateLimitReachedType` が非 null の列挙値。
+  `primary` と `secondary` に整数の `resetsAt` があれば、そのうち最も早い時刻も記録する。
+
+該当する列挙値を理由とし、`rateLimitReachedType: null` の通知は無視する。到達ケースは
+`codex/scenarios/rate_limited_*.jsonl` の合成シナリオで検証する。
 
 ---
 

@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 Task 2（上限検知）
+- タスク: M4 Task 3（プロファイル）
 - 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1 の履歴末尾取得、送信モード、スナップショット合流、起動失敗時のキュー保存を実装・検証。
-- 次の一手: M4 計画の Task 2 Step 1 で、使用量上限を検知する合成シナリオとアダプタのテストを追加する（ブランチ `feat/orchestrator-m4`）。
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1 の前提修正と Task 2 の Claude・Codex の使用量上限検知を実装・検証。
+- 次の一手: M4 計画の Task 3 Step 1 で、プロファイルの読み込み、一覧、エージェント作成への反映のテストを追加する（ブランチ `feat/orchestrator-m4`）。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -86,7 +86,7 @@
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
 | 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 完了 | `fix: tail history reads and other prerequisites for handoff` |
-| 2 | 上限検知（アダプタ） | 未着手 | |
+| 2 | 上限検知（アダプタ） | 完了 | `feat(daemon): detect provider usage limits` |
 | 3 | プロファイル | 未着手 | |
 | 4 | 引き継ぎ（デーモン、CLI、TUI） | 未着手 | |
 | 5 | M4 受け入れ | 未着手 | |
@@ -601,6 +601,15 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-26 M4 Task 2（Linux、Rust 1.99.0）:
+  - RED: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter --no-fail-fast` で
+    上限イベントが生成されず Claude 3 件、Codex 4 件が失敗。通常通知を無視するテストは通過。
+  - GREEN: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter` で Claude 18 件、Codex 25 件 PASS。
+  - `cargo fmt --all`、`cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`、
+    `bash scripts/verify.sh rust`（599 件）、`guidance` PASS。
+  - Claude Code 2.1.332 の記録と Codex CLI 0.172.0 の app-server 生成スキーマを根拠に、上限到達は合成シナリオで検証。
+    実プロバイダの上限到達は未観測。macOS での確認は未実施。
 
 - 2026-11-26 M4 Task 1（Linux、Rust 1.99.0）:
   - RED: 末尾読み取り API の未定義、RPC での `tail` 無視、起動失敗後の `queue.json` 不在、TUI の末尾要求不在・送信モード残留・
