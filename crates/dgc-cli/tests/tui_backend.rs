@@ -744,6 +744,45 @@ async fn backend_reports_a_snapshot_it_cannot_load() {
 }
 
 #[tokio::test]
+async fn backend_waits_a_second_before_reconnecting_after_a_lost_snapshot() {
+    // A daemon that answers `hello` but fails a list call: every connection
+    // is lost right after `Connected`. Reconnecting at once would loop as
+    // fast as round trips allow.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    let server = fake_daemon(&paths, |method| match method {
+        PROJECT_LIST => Some(Err(RpcError::new(METHOD_NOT_FOUND, "no projects today"))),
+        _ => Some(Ok(json!({}))),
+    });
+    let (fx, mut rx) = Backend::start(paths, no_exe());
+    let mut state = AppState::default();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut connected = 0;
+    let mut disconnected = 0;
+    while let Ok(Some(event)) = timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        rx.recv(),
+    )
+    .await
+    {
+        match &event {
+            AppEvent::Connection(ConnectionState::Connected) => connected += 1,
+            event if is_disconnected(event) => disconnected += 1,
+            _ => {}
+        }
+        for effect in tui::update::update(&mut state, event) {
+            fx.send(effect).expect("backend alive");
+        }
+    }
+    assert!(disconnected >= 1, "the lost snapshot is reported");
+    assert!(
+        (1..=3).contains(&connected),
+        "reconnects wait a second each: {connected} connections in 2 s"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn backend_gives_up_on_a_daemon_that_does_not_answer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = DaemonPaths::under(dir.path());

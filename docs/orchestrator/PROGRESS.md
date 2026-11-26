@@ -474,6 +474,9 @@
   （`the daemon did not answer within 15 s`）になり、接続断（同じ理由の `Disconnected`）→ 再接続。遅れた応答が次の要求の応答と取り違えられないよう、
   接続は使い続けない。テスト用に `Backend::start_with_timeout(paths, exe, timeout)`。dgc-cli の dev-dependencies に tokio の `net`/`io-util`
   feature を追加（テストの偽デーモン用。新 crate なし、Cargo.lock 変化なし）。
+- 2026-11-26 (M2 最終レビュー修正 1): 接続が `serve` 中に失われた（snapshot が読めない、呼び出し失敗、購読が閉じた）後も、`Disconnected` を
+  出してから `RETRY_INTERVAL`（1 s）待ってから再接続する（待つ間も Effect は即失敗で答え、UI が閉じれば終わる）。以前は即再接続しており、
+  hello には答えるが list 呼び出しに失敗するデーモンとは 2 s で 7000 回以上接続し直していた。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。

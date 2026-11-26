@@ -176,6 +176,11 @@ impl Backend {
                 return;
             }
             reported = true;
+            // A daemon that accepts connections but fails right after must
+            // not be retried as fast as round trips allow.
+            if self.wait_disconnected(RETRY_INTERVAL).await.is_err() {
+                return;
+            }
         }
     }
 
