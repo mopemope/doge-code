@@ -309,6 +309,7 @@ impl Harness {
                 agent_id: id.clone(),
                 since_seq: 0,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page")
             .into_iter()
@@ -946,6 +947,7 @@ async fn restart_recovery_marks_running_as_stopped() {
                 agent_id: id.clone(),
                 since_seq: 0,
                 limit: 10,
+                tail: None,
             })
             .expect("events");
         let stopped_event = events.iter().any(|e| {
@@ -1205,6 +1207,86 @@ async fn hung_start_fails_agent() {
 }
 
 #[tokio::test]
+async fn failed_start_keeps_initial_prompt_for_resume() {
+    for options in [
+        Options {
+            fail_start: true,
+            ..DEFAULT
+        },
+        Options {
+            start_hangs: true,
+            ..DEFAULT
+        },
+    ] {
+        let mut h = Harness::new(options);
+        let agent = h.create("recover this prompt").await;
+        h.wait_state(&agent.id, AgentState::Failed).await;
+        assert_eq!(h.queue_texts(&agent.id), ["recover this prompt"]);
+        // A failed resume must leave exactly the original pending item.
+        h.manager.resume(&agent.id).await.expect("resume");
+        h.wait_state(&agent.id, AgentState::Failed).await;
+        assert_eq!(h.queue_texts(&agent.id), ["recover this prompt"]);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        h.manager = new_manager(&h.store, &h.paths, DEFAULT, tx);
+        h.sessions = rx;
+        h.manager.resume(&agent.id).await.expect("resume");
+        let mut session = h.next_session().await;
+        assert_eq!(session.spec.resume_session_id, None);
+        assert_eq!(
+            session.next_call().await,
+            Call::SendUser("recover this prompt".to_owned())
+        );
+        h.wait_state(&agent.id, AgentState::Running).await;
+        assert!(h.queue_texts(&agent.id).is_empty());
+        session.emit(turn_completed()).await;
+        h.wait_state(&agent.id, AgentState::Idle).await;
+        session.assert_no_call();
+    }
+}
+
+#[tokio::test]
+async fn events_tail_param_returns_last_n() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, session) = h.running("first").await;
+    for _ in 0..1100 {
+        session
+            .emit(ProviderEvent::Event(EventKind::AssistantText {
+                text: "sample".to_owned(),
+                final_: false,
+            }))
+            .await;
+    }
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    let end = dgc_daemon::handlers::agent_events(
+        &h.manager,
+        serde_json::json!({"agent_id": agent.id, "since_seq": 1100}),
+    )
+    .expect("agent.events");
+    let last = end["events"]
+        .as_array()
+        .expect("events")
+        .last()
+        .expect("last event")["seq"]
+        .as_u64()
+        .expect("seq");
+    let request = |tail| {
+        let response = dgc_daemon::handlers::agent_events(
+            &h.manager,
+            serde_json::json!({"agent_id": agent.id, "since_seq": last + 1, "limit": 1, "tail": tail}),
+        ).expect("agent.events");
+        serde_json::from_value::<Vec<AgentEvent>>(response["events"].clone()).expect("events")
+    };
+    assert_eq!(
+        request(3).iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (last - 2..=last).collect::<Vec<_>>()
+    );
+    assert_eq!(request(2000).len(), 1000);
+    assert!(request(0).is_empty());
+}
+
+#[tokio::test]
 async fn buffered_turn_completed_is_applied_before_a_later_command() {
     let mut h = Harness::new(DEFAULT);
     let (agent, mut session) = h.running("first").await;
@@ -1248,6 +1330,7 @@ async fn a_huge_prompt_is_stored_in_bounded_chunks() {
                 agent_id: agent.id.clone(),
                 since_seq: since,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page");
         if page.is_empty() {
@@ -1463,6 +1546,7 @@ async fn a_chunked_prompt_records_one_turn_start_after_the_last_chunk() {
                 agent_id: agent.id.clone(),
                 since_seq: since,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page");
         if page.is_empty() {

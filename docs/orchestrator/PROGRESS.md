@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 Task 1（前提修正）
+- タスク: M4 Task 2（上限検知）
 - 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 計画作成（範囲・引き継ぎ方式・スクリプト方式・スケジュールの欠落時の扱いはユーザー決定、2026-11-26）
-- 次の一手: M4 計画の Task 1 Step 1 から始める（ブランチ `feat/orchestrator-m4`）
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1 の履歴末尾取得、送信モード、スナップショット合流、起動失敗時のキュー保存を実装・検証。
+- 次の一手: M4 計画の Task 2 Step 1 で、使用量上限を検知する合成シナリオとアダプタのテストを追加する（ブランチ `feat/orchestrator-m4`）。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -85,7 +85,7 @@
 
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
-| 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 未着手 | |
+| 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 完了 | `fix: tail history reads and other prerequisites for handoff` |
 | 2 | 上限検知（アダプタ） | 未着手 | |
 | 3 | プロファイル | 未着手 | |
 | 4 | 引き継ぎ（デーモン、CLI、TUI） | 未着手 | |
@@ -94,6 +94,14 @@
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M4 Task 1): TUI は選択時に `tail=2000` を 1 ページ要求し、RPC では直近 1000 件かつ 768 KiB に収まる範囲を返す。
+  最後の 1 件だけで予算を超える場合はその 1 件を返す。初回取得までのライブイベントが保留上限を超えた場合は、
+  取得済みの末尾から順方向に補う。再接続・lagged 後も初回の取得後は順方向に継続する。
+  `logs --tail N --follow` は末尾を表示した直後の seq から購読する。0 件指定では出力を始める位置だけを取得する。
+- 2026-11-26 (M4 Task 1): lagged がスナップショット取得中に届いた場合は、再購読後の更新要求を 1 件にまとめ、取得完了後に送る。
+  起動エラー・タイムアウト時は M1 Task 8 の起動失敗時の方針を更新し、初期プロンプトを通常のキュー項目として保存してから
+  `failed` に遷移する。resume は同じ項目を送信してキューから除く。
 
 - 2026-11-26 (M4 計画): ユーザー決定。M4 はプロファイル・使用量上限時の引き継ぎ・前提修正、スケジュール／heartbeat／ワークスペーススクリプトは M5、エージェント向け MCP は M6。引き継ぎは「上限を検知したら提案し、ユーザーが確認して起動」（自動切替しない）。ワークスペーススクリプトはリポジトリの `dgc.json` に置き、初回と内容変更時に内容（ハッシュ）単位で信頼を確認する。デーモン停止中に過ぎたスケジュールは実行しない（記録のみ）。
 
@@ -258,7 +266,7 @@
 - 2026-11-25 (M1 Task 8): 状態機械の細部（ブリーフに無い部分の判断）: create は `state_changed{starting}` と
   `user_message{初期プロンプト, queue}` を記録してから起動する。起動失敗・初期/queue 先頭の送信失敗・`Exited` は `error`
   イベント（4096 バイトで切り詰め）を出して `failed`（`last_error` に同じ文言。`Exited` は stderr 末尾、空なら定型文）。
-  起動失敗時の初期プロンプトは queue に入れない。ユーザーの send がプロバイダエラーになった場合は状態を変えずに
+  起動失敗時の初期プロンプトの扱いは M4 Task 1 の決定事項を参照。ユーザーの send がプロバイダエラーになった場合は状態を変えずに
   `Provider` エラーを返す（後続の `Exited` で failed になる）。interrupt 後の送信が失敗したら `idle`。
   `waiting_permission` 中の `TurnCompleted` も `running` と同様に扱い、残った保留権限は cancelled にする。
   resume は workspace が active であることを確認し、`last_error` を消す。queue.json の読み込みは `O_NOFOLLOW`、未知 version は
@@ -593,6 +601,18 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-26 M4 Task 1（Linux、Rust 1.99.0）:
+  - RED: 末尾読み取り API の未定義、RPC での `tail` 無視、起動失敗後の `queue.json` 不在、TUI の末尾要求不在・送信モード残留・
+    スナップショット重複、CLI の `--tail` 未定義を確認。
+  - GREEN: `cargo test --locked -p dgc-daemon --test events_log` 14 件、`--test agent_manager` 29 件、
+    `cargo test --locked -p dgc-cli --bin dgc tui::` 132 件、偽プロバイダをビルド後の
+    `cargo test --locked -p dgc-cli --test agent_cli --test tui_backend` 164 件 PASS。
+  - `cargo fmt --all`、`cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`、
+    `bash scripts/verify.sh rust`（590 件）、`guidance`、`tui-deps` PASS。
+  - 隔離した状態ディレクトリと偽プロバイダを使い、tmux で履歴の表示、steer 送信後の queue 復帰、ライブ応答を記録。
+    同じ応答が `logs --tail 2 --follow` に連続した seq で届くことを確認。端末記録と RED/GREEN の出力は Task 1 の作業レポートを参照。
+    実プロバイダと macOS での確認は未実施。
 
 - 2026-11-25 M0 Task 1（Linux）:
   - `python3 -m unittest ... test_development_checks.py`: 新テスト 2 件が RED → 実装後 50 件 PASS。
@@ -1026,14 +1046,14 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 
 - Task 1: minor (deferred): Response/Notification lack jsonrpc field (plan-mandated); limit_raw boundary test at exactly 64 KiB; PROGRESS.md list blank line
 - Task 2: minor (deferred): file modes set via open(2) mode only (umask can make stricter, never looser); list_* order untested; post-rename dir fsync failure returns Err; write_atomic bare relative path; ensure_private_dir creates parents 0700; test gaps (symlink entry in list, dangling target, temp cleanup, events_max_bytes=0)
-- Task 3: minor (deferred): corrupt-line warn repeats per read/open and open scans whole file; 0600 not asserted on events.1.jsonl, pre-existing looser mode not tightened; oversized test doesn't assert fresh file
+- Task 3: minor (deferred): corrupt-line warn repeats per read/open; open scans whole file（M4 Task 1 で解消）; 0600 not asserted on events.1.jsonl, pre-existing looser mode not tightened; oversized test doesn't assert fresh file
 - Task 3: minor (deferred): size undercount after double fault (truncate fails then later write ok then fail+truncate ok); no test drives failure paths through append end to end
 - Task 4: minor (deferred): line.clear() keeps 16 MiB capacity after a huge line; tokio macros feature only needed by tests; wait_gone counts zombies as alive (container pid1 flake risk)
 - Task 5: minor (deferred): writer task outside JoinSet leaks after drain timeout; shutdown ignored if response send fails; no pre-hello timeout / connection cap; second_hello test doesn't assert INVALID_STATE code; responses_wait test relies on 50ms sleep; JoinError from connection task silently dropped
 - Task 6: minor (deferred): test guard may miss a still-booting daemon after a failed run; VersionMismatch after spawn reported as SpawnTimeout; Client::call has no overall timeout (wedged daemon hangs CLI); dgc-cli uses tokio::sync without declaring `sync` feature (unification); missing tests (symlinked daemon.log, log 0600, id-0 error path, pending-notification overflow); pre-existing daemon.log mode not tightened; stop's lock probe can make a concurrent autostart lose
 - Task 7: minor (deferred): missing project dir leaves workspace un-archivable → project never removable (consider re-grade at final review); worktree_requires_a_git_repository can't distinguish non-repo vs subdir and manager git inherits global config/hooks in tests; git timeout kills only git not its descendants; failed branch delete only warns (no response field)
 - Task 7: minor (deferred): `git worktree list -z` needs git >= 2.36 (no fallback/doc; fails closed); locked worktree with missing dir makes archive fail permanently; lib test name says prefix but checks suffix
-- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth; M2 Task 1 で解消); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
+- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth; M2 Task 1 で解消); start failure drops initial prompt（M4 Task 1 で解消）; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
 - Task 8: minor (deferred): biased select can starve commands under a flooding provider (fairness cap suggested); drain loop has no yield/bound (use len snapshot); no test for Exited during drain; caller gets timeout error before stored state flips (≤5s)
 - Task 9: minor (deferred): Codex command deny never recorded — Deny mapping on commands unexercised (ruling: cancel when decline not offered)
 - Task 10: minor (deferred): tests hard-code sorted-key output (preserve_order unification risk); uncaptured ${name} in expect matches literally (should exit 2); capture line extra keys ignored; stdin read error treated as EOF; lossy UTF-8 on input
@@ -1046,7 +1066,7 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it (M2 Task 1 で解消); idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
 - Task 14: minor (deferred): README lists `turn started` (never emitted; M2 Task 1 で emit するようになった) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
 - Task 14: minor (deferred): README "does not log prompt text" true for daemon.log but events.jsonl stores prompts too — wording should say so
-- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (M2 Task 1 で解消); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
+- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (M2 Task 1 で解消); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt（M4 Task 1 で解消）
 - Final: minor (deferred): create_workspace rollback uses branch -d (fresh branch can be left behind with --base other); structural test only matches os("--force")/os("-D") form; second archive check after agents archived can refuse (no loss); discard_queue save failure only warns; ToolCall.name / usage unbounded at source; pre-fix oversized legacy events end logs with an error; gitignored files removed by non-force archive (documented)
 
 ### コントローラの判断（Ruling）
@@ -1084,9 +1104,9 @@ M2 はタスクごとのレビューと全体の最終レビュー（修正の�
 
 ### 保留した Minor 指摘
 
-- Task 1: minor (deferred): steer-fallback TurnStarted untested; adjacency asserted only for initial prompt; LogCache eviction tests thin (held handle skip, >64 live, mark_not_live, stored-archive forget); EventLog::open (full scan) under global logs mutex on cold reopen stalls emits; evict/mark_not_live O(n) per call
-- Task 2: minor (deferred): pending-live overflow at 2000 drops all (restart load instead); single `unsent` slot can restore a possibly-sent message (double send); create-dialog success after Esc still jumps selection; Enter toggles collapse (brief says expand) — align README; selection fallback tests only next sibling; Tree::rows / agents_in_order duplicate filters
-- Task 2: minor (deferred, re-grade at final): failed-send text restores into another agent's input (condition should be input_target == agent_id) — wrong-destination class; overlapping snapshot requests can still erase a fresh permission (count outstanding requests); permission id uniqueness assumption undocumented
+- Task 1: minor (deferred): steer-fallback TurnStarted untested; adjacency asserted only for initial prompt; LogCache eviction tests thin (held handle skip, >64 live, mark_not_live, stored-archive forget); EventLog::open (full scan) under global logs mutex on cold reopen stalls emits（M4 Task 1 で解消）; evict/mark_not_live O(n) per call
+- Task 2: minor (deferred): pending-live overflow at 2000 drops all (restart load instead)（M4 Task 1 で解消）; single `unsent` slot can restore a possibly-sent message (double send); create-dialog success after Esc still jumps selection; Enter toggles collapse (brief says expand) — align README; selection fallback tests only next sibling; Tree::rows / agents_in_order duplicate filters
+- Task 2: minor (deferred, re-grade at final): failed-send text restores into another agent's input (condition should be input_target == agent_id) — wrong-destination class; overlapping snapshot requests can still erase a fresh permission (count outstanding requests)（M4 Task 1 で解消）; permission id uniqueness assumption undocumented
 - Task 3: minor (deferred): create-dialog WARNING pushed off in tiny terminals (Enter still works) — move it next to mode field; status bar error can push permission hint off-screen; no test for tree vertical overflow
 - Task 3: minor (deferred): a single grapheme wider than 69 cols makes the dialog too_small at any size with an un-actionable "enlarge" message (fails safe); look-alike arrows (↳ ⤷ ⮡) not escaped; halfwidth render test doesn't guard N1 (layout test does)
 - Task 4: minor (deferred): subtask panic treated as connection close (terminal restored by hook but loop keeps drawing on main screen) — treat JoinError::is_panic as fatal; input thread I/O error detail lost; draw stops after MAX_REDRAWS without final redraw; fixed sleeps in tests (1.5 s quit, 500 ms resubscribe); no backend-level test that Resubscribe closes old connection; effects queued just before quit dropped silently
@@ -1094,8 +1114,8 @@ M2 はタスクごとのレビューと全体の最終レビュー（修正の�
 - Task 5: minor (deferred, re-grade at final): input draft shared across agents → text typed for A can be sent to B (wrong-destination class); new-agent form labels prompt "(optional)" but requires it; queue send to running agent gives no feedback
 - Task 5: minor (deferred): queue send to running agent gives no feedback (documented); failed send text dropped if user already typed new text; screen capture 1 caption mentions a message not captured; disconnected status bar truncates key hints
 - Task 5: minor (deferred): drafts map never pruned (archived/removed agents' drafts stay); no tests for failed-send restore after selection change / draft kept when target archived
-- Final: minor (deferred): reconnect race can skip part of the stream until reselect (display only); send mode global & sticky (interrupt persists across agents); history loaded from seq 0 each selection (O(n²) read_page, plan tail paging in protocol work); empty summary still allows a/s; auto-approve list duplicated vs daemon; single unsent slot; stream lines bounded by count not bytes
-- Final: minor (deferred): periodic snapshots can pile up behind a slow daemon (pending expires at 5 s; merge queued LoadSnapshot); empty-tree hint shows before first snapshot / while disconnected; two creates in flight share RequestTag (first success can close the second form; error resets submitting → duplicate create); terminals without bracketed paste still replay keys (document); >1 MiB paste exceeds message limit (unchecked)
+- Final: minor (deferred): reconnect race can skip part of the stream until reselect (display only); send mode global & sticky (interrupt persists across agents)（M4 Task 1 で解消）; history loaded from seq 0 each selection (O(n²) read_page, plan tail paging in protocol work)（M4 Task 1 で解消）; empty summary still allows a/s; auto-approve list duplicated vs daemon; single unsent slot; stream lines bounded by count not bytes
+- Final: minor (deferred): periodic snapshots can pile up behind a slow daemon (pending expires at 5 s; merge queued LoadSnapshot)（M4 Task 1 で解消）; empty-tree hint shows before first snapshot / while disconnected; two creates in flight share RequestTag (first success can close the second form; error resets submitting → duplicate create); terminals without bracketed paste still replay keys (document); >1 MiB paste exceeds message limit (unchecked)
 
 ### コントローラの判断（Ruling）
 

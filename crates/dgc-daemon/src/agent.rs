@@ -35,7 +35,8 @@ use dgc_protocol::chunk_text;
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
-    AgentCreateParams, AgentEventsParams, AgentSendParams, PermissionRespondParams,
+    AgentCreateParams, AgentEventsParams, AgentSendParams, MAX_EVENTS_LIMIT,
+    PermissionRespondParams,
 };
 use dgc_protocol::model::{
     Agent, AgentState, PendingPermission, ProviderKind, SendBehavior, SendOutcome, Workspace,
@@ -720,14 +721,16 @@ impl AgentManager {
         lock(&self.shared.logs).logs.len()
     }
 
-    /// Stored events of one agent with `seq > since_seq`.
+    /// One page of stored events, from a sequence cursor or the end of the log.
     pub fn events_page(&self, params: &AgentEventsParams) -> Result<Vec<AgentEvent>, AgentError> {
         self.load(&params.agent_id)?;
         let log = self.shared.log(&params.agent_id)?;
-        let page = lock(&log)
-            .read_page(params.since_seq, params.clamped_limit())
-            .map_err(storage)?;
-        Ok(page)
+        let log = lock(&log);
+        match params.tail {
+            Some(n) => log.read_tail(n.min(MAX_EVENTS_LIMIT)),
+            None => log.read_page(params.since_seq, params.clamped_limit()),
+        }
+        .map_err(storage)
     }
 
     /// At daemon start no provider process exists: mark agents stored as

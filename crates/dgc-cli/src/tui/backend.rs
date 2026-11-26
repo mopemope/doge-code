@@ -19,6 +19,7 @@
 //! Only the first connection may start the daemon: after a `daemon stop`
 //! the TUI waits for someone to start it again instead of undoing the stop.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 
@@ -98,6 +99,7 @@ pub struct Backend {
     paths: DaemonPaths,
     exe: PathBuf,
     effects: mpsc::UnboundedReceiver<Effect>,
+    queued_effects: VecDeque<Effect>,
     events: mpsc::Sender<AppEvent>,
     /// The next connection attempt may start the daemon (the first only).
     may_spawn: bool,
@@ -192,6 +194,7 @@ impl Backend {
             paths,
             exe,
             effects,
+            queued_effects: VecDeque::new(),
             events,
             may_spawn: true,
             timeouts,
@@ -286,7 +289,7 @@ impl Backend {
         loop {
             tokio::select! {
                 _ = &mut deadline => return Ok(()),
-                effect = self.effects.recv() => match effect {
+                effect = next_effect(&mut self.effects, &mut self.queued_effects) => match effect {
                     Some(effect) => self.reject(effect).await?,
                     None => return Err(Stop::UiGone),
                 },
@@ -320,7 +323,7 @@ impl Backend {
     async fn serve(&mut self, connection: &mut Connection) -> Stop {
         loop {
             let result = tokio::select! {
-                effect = self.effects.recv() => match effect {
+                effect = next_effect(&mut self.effects, &mut self.queued_effects) => match effect {
                     Some(effect) => self.execute(connection, effect).await,
                     None => Err(Stop::UiGone),
                 },
@@ -348,19 +351,21 @@ impl Backend {
             Effect::LoadHistory {
                 agent_id,
                 since_seq,
+                tail,
                 generation,
             } => {
                 let params = AgentEventsParams {
                     agent_id: agent_id.clone(),
                     since_seq,
                     limit: MAX_EVENTS_LIMIT,
+                    tail,
                 };
                 match self.events_page(&mut connection.rpc, &params).await {
-                    // Pages are cut by size too: only an empty one is the end.
+                    // A tail is one page. Forward pages continue until empty.
                     Ok(events) => {
                         self.emit(AppEvent::History {
                             agent_id,
-                            done: events.is_empty(),
+                            done: tail.is_some() || events.is_empty(),
                             events,
                             generation,
                         })
@@ -440,6 +445,29 @@ impl Backend {
     async fn emit(&self, event: AppEvent) -> Result<(), Stop> {
         self.events.send(event).await.map_err(|_| Stop::UiGone)
     }
+}
+
+/// Coalesce snapshots waiting in the channel, retaining the order of all
+/// other effects. A refresh queued during execution is eligible to run next.
+async fn next_effect(
+    effects: &mut mpsc::UnboundedReceiver<Effect>,
+    queued: &mut VecDeque<Effect>,
+) -> Option<Effect> {
+    if let Some(effect) = queued.pop_front() {
+        return Some(effect);
+    }
+    let effect = effects.recv().await?;
+    if effect == Effect::LoadSnapshot {
+        for _ in 0..effects.len() {
+            let Ok(effect) = effects.try_recv() else {
+                break;
+            };
+            if effect != Effect::LoadSnapshot {
+                queued.push_back(effect);
+            }
+        }
+    }
+    Some(effect)
 }
 
 fn connected() -> AppEvent {

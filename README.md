@@ -148,7 +148,8 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   and `ls` marks such agents `auto-approve`.
 - `dgc ls [--all]` (archived agents only with `--all`), `dgc show ID`,
   `dgc interrupt ID`, `dgc archive ID`, `dgc resume ID` (restarts a stopped or
-  failed agent from its provider session).
+  failed agent, reusing its provider session when available). If the provider
+  failed to start, resume sends the original prompt from the queue.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An
@@ -171,9 +172,12 @@ access, file system paths) is listed with kind `other` and a
 
 ### Logs
 
-`dgc logs ID [--since SEQ] [--follow]` prints the stored events after `SEQ`;
-`--follow` keeps streaming new ones until Ctrl-C or the daemon stops. `--json`
-prints one event JSON object per line. Each human line is `[seq] <event>`:
+`dgc logs ID [--since SEQ] [--tail N] [--follow]` prints the stored events
+after `SEQ` (all events by default). `--tail N` prints the newest `N` events in
+sequence order and overrides `--since`. The tail page holds up to 1000 events
+within 768 KiB. If the newest event alone exceeds that budget, a positive `N`
+still returns that event. `--follow` keeps streaming until Ctrl-C or the daemon stops.
+`--json` prints one event JSON object per line. Each human line is `[seq] <event>`:
 `user (queue): TEXT`, `assistant: TEXT`, `tool: NAME SUMMARY`,
 `tool result: SUMMARY` / `tool error: SUMMARY`,
 `permission requested PERM_ID (KIND): SUMMARY`,
@@ -199,12 +203,14 @@ running; the next `dgc tui` shows them again. A recorded session is in
 Layout: on the left the tree (project, workspace, agent) with a state symbol per
 agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
 failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
-selected agent's stream (the same events as `dgc logs`, last 2000 lines kept),
+selected agent's stream (a tail page on selection, then live events, with the last
+2000 displayed lines kept),
 below it the input line, and at the bottom a status bar (connection, agent
 count, agents waiting for a permission, errors, key hints). In a narrow tree
 (under 50 columns) provider names are dropped. Agents and permissions update
-live; projects and workspaces added or archived by other commands appear on the
-next reload, every 5 s or at once with `R`. With no project the tree says
+live. Projects and workspaces added or archived by other commands appear on the
+next reload. The TUI requests one after 5 s with no reload pending, or on demand
+with `R`. With no project the tree says
 `no projects — add one with: dgc project add <path>`.
 
 Keys in the tree:
@@ -244,13 +250,14 @@ never sends, never changes the mode and never submits a form. A paste in the
 tree, the permission dialog or the archive confirmation is ignored. The modes
 are the `dgc send` behaviors: `queue` (default; sent when the current turn
 ends), `steer` and `interrupt`. Claude agents cannot steer, so there `steer`
-interrupts and then sends, which also discards the queue. When the daemon
+interrupts and then sends, which also discards the queue. A successful send
+with `steer` or `interrupt` returns the input to `queue`. When the daemon
 accepts a message the status bar says what happened to it for a few seconds:
 `queued — delivered when the turn ends`, `sent`, `steered` or
 `interrupted and sent`. A queued message appears in the stream only when it is
-delivered (or shown as discarded). If the send fails, the text returns to an
-empty input and the error shows in the status bar. If the agent you were typing
-to is archived or disappears, the input keeps its text and shows
+delivered (or shown as discarded). If the send fails, the mode stays selected,
+the text returns to an empty input, and the error shows in the status bar. If the
+agent you were typing to is archived or disappears, the input keeps its text and shows
 `no target — select an agent`; leave with `Esc` and pick another agent. The
 text stays with that removed agent and is not shown again.
 

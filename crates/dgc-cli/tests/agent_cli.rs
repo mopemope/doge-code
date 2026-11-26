@@ -319,6 +319,24 @@ fn logs_since_replays_history() {
 }
 
 #[test]
+fn logs_tail_prints_the_most_recent_events() {
+    let a = AgentEnv::new("claude_turn", None).with_workspace(None);
+    let id = created_id(&a.run_agent("claude", &["--follow", "Say pong"]));
+    let all = a.logs_json(&[&id]);
+    let tail = &all[all.len() - 2..];
+    assert_eq!(a.logs_json(&[&id, "--tail", "2", "--since", "999"]), tail);
+    assert!(a.logs_json(&[&id, "--tail", "0"]).is_empty());
+    let result = a.run(&["logs", &id, "--tail", "2"]);
+    assert_success(&result);
+    let human = stdout(&result);
+    assert!(
+        human.starts_with(&format!("[{}] ", tail[0]["seq"])),
+        "{human}"
+    );
+    assert_eq!(human.lines().count(), 2);
+}
+
+#[test]
 fn auto_approve_mode_warns() {
     let a = AgentEnv::new("claude_bypass", Some("codex_untrusted")).with_workspace(None);
 

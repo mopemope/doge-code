@@ -32,7 +32,7 @@ use dgc_protocol::methods::{
     AGENT_LIST, AGENT_SEND, HELLO, MAX_EVENTS_LIMIT, PERMISSION_LIST, PERMISSION_RESPOND,
     PROJECT_LIST, SUBSCRIBE, WORKSPACE_LIST,
 };
-use dgc_protocol::model::AgentState;
+use dgc_protocol::model::{AgentState, SendBehavior};
 use dgc_protocol::rpc::{METHOD_NOT_FOUND, Request, Response, RpcError};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -305,6 +305,7 @@ async fn backend_snapshot_and_live_events() {
     // An RPC result comes back tagged with its request.
     let request = RequestTag::Send {
         agent_id: agent.clone(),
+        behavior: SendBehavior::Queue,
     };
     fx.send(Effect::Call {
         request: request.clone(),
@@ -389,6 +390,7 @@ async fn backend_reports_disconnect_and_reconnects() {
     let agent_id = AgentId::generate();
     let send = RequestTag::Send {
         agent_id: agent_id.clone(),
+        behavior: SendBehavior::Queue,
     };
     fx.send(Effect::Call {
         request: send.clone(),
@@ -399,6 +401,7 @@ async fn backend_reports_disconnect_and_reconnects() {
     fx.send(Effect::LoadHistory {
         agent_id: agent_id.clone(),
         since_seq: 0,
+        tail: None,
         generation: 4,
     })
     .expect("backend alive");
@@ -512,6 +515,7 @@ async fn backend_history_pages_until_done() {
         fx.send(Effect::LoadHistory {
             agent_id: agent.clone(),
             since_seq: seqs.last().copied().unwrap_or(0),
+            tail: None,
             generation: 7,
         })
         .expect("backend alive");
@@ -546,11 +550,37 @@ async fn backend_history_pages_until_done() {
         "{pages:?}"
     );
 
+    // Tail is a single, nonempty final page, with the request's generation.
+    fx.send(Effect::LoadHistory {
+        agent_id: agent.clone(),
+        since_seq: u64::MAX,
+        tail: Some(3),
+        generation: 8,
+    })
+    .expect("backend alive");
+    let AppEvent::History {
+        agent_id,
+        events,
+        done,
+        generation,
+    } = next_event(&mut rx).await
+    else {
+        panic!("expected a history page")
+    };
+    assert_eq!(agent_id, agent);
+    assert_eq!(generation, 8);
+    assert!(done);
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        seqs[seqs.len() - 3..],
+    );
+
     // A failed load ends its chain and reports the error.
     let unknown = AgentId::generate();
     fx.send(Effect::LoadHistory {
         agent_id: unknown.clone(),
         since_seq: 0,
+        tail: Some(2000),
         generation: 9,
     })
     .expect("backend alive");
@@ -716,6 +746,63 @@ fn no_exe() -> PathBuf {
 }
 
 #[tokio::test]
+async fn backend_coalesces_queued_snapshot_requests() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    let server = slow_fake_daemon(
+        &paths,
+        |method| match method {
+            PROJECT_LIST => Some(Ok(json!({"projects": []}))),
+            WORKSPACE_LIST => Some(Ok(json!({"workspaces": []}))),
+            AGENT_LIST => Some(Ok(json!({"agents": []}))),
+            PERMISSION_LIST => Some(Ok(json!({"permissions": []}))),
+            _ => Some(Ok(json!({}))),
+        },
+        |method| {
+            if method == AGENT_SEND {
+                Duration::from_millis(100)
+            } else {
+                Duration::ZERO
+            }
+        },
+    );
+    let (fx, mut rx) = Backend::start(paths, no_exe());
+    assert_eq!(
+        next_event(&mut rx).await,
+        AppEvent::Connection(ConnectionState::Connected)
+    );
+    let request = RequestTag::Interrupt {
+        agent_id: AgentId::generate(),
+    };
+    let call = Effect::Call {
+        request: request.clone(),
+        method: AGENT_SEND,
+        params: json!({}),
+    };
+    fx.send(call.clone()).expect("backend alive");
+    for _ in 0..3 {
+        fx.send(Effect::LoadSnapshot).expect("backend alive");
+    }
+    fx.send(call).expect("backend alive");
+    assert!(matches!(
+        next_event(&mut rx).await,
+        AppEvent::RpcDone { .. }
+    ));
+    assert!(matches!(
+        next_event(&mut rx).await,
+        AppEvent::Snapshot { .. }
+    ));
+    assert_eq!(
+        next_event(&mut rx).await,
+        AppEvent::RpcDone {
+            request,
+            result: Ok(json!({}))
+        }
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn backend_reports_a_snapshot_it_cannot_load() {
     // An older daemon that does not know `permission.list`.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -868,6 +955,7 @@ async fn backend_gives_mutating_calls_longer_than_reads() {
     );
     let request = RequestTag::Send {
         agent_id: AgentId::generate(),
+        behavior: SendBehavior::Queue,
     };
     fx.send(Effect::Call {
         request: request.clone(),

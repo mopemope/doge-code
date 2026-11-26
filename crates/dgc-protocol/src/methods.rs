@@ -139,6 +139,9 @@ pub struct AgentEventsParams {
     pub since_seq: u64,
     #[serde(default = "default_events_limit")]
     pub limit: u32,
+    /// When set, return the newest events, ignoring `since_seq` and `limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<u32>,
 }
 
 impl AgentEventsParams {
@@ -252,6 +255,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"agent_id": id})).unwrap();
         assert_eq!(p.since_seq, 0);
         assert_eq!(p.limit, MAX_EVENTS_LIMIT);
+        assert_eq!(p.tail, None);
         let big = AgentEventsParams {
             limit: 5000,
             ..p.clone()

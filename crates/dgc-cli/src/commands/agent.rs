@@ -106,6 +106,9 @@ pub enum AgentCommand {
         /// Only events after this seq.
         #[arg(long, default_value_t = 0)]
         since: u64,
+        /// Print the newest N stored events, ignoring --since.
+        #[arg(long, value_name = "N")]
+        tail: Option<u32>,
         #[arg(long)]
         follow: bool,
     },
@@ -205,11 +208,20 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
             let agent: Agent = client.call(AGENT_RESUME, &AgentIdParams { id }).await?;
             print_agent(&agent, json)?;
         }
-        AgentCommand::Logs { id, since, follow } => {
+        AgentCommand::Logs {
+            id,
+            since,
+            tail,
+            follow,
+        } => {
+            let since = match tail {
+                Some(n) => print_tail(&mut client, &id, n, follow, json).await?,
+                None => since,
+            };
             if follow {
                 drop(client);
                 follow_events(&id, since, json, |_| None::<()>).await?;
-            } else {
+            } else if tail.is_none() {
                 print_history(&mut client, &id, since, json).await?;
             }
         }
@@ -262,6 +274,7 @@ async fn print_history(client: &mut Client, id: &AgentId, since: u64, json: bool
             agent_id: id.clone(),
             since_seq: cursor,
             limit: MAX_EVENTS_LIMIT,
+            tail: None,
         };
         let result: Value = client.call(AGENT_EVENTS, &params).await?;
         let events: Vec<AgentEvent> = serde_json::from_value(result["events"].clone())?;
@@ -274,6 +287,31 @@ async fn print_history(client: &mut Client, id: &AgentId, since: u64, json: bool
             cursor = event.seq;
         }
     }
+}
+
+/// Print one tail page and return its newest sequence for `--follow`.
+async fn print_tail(
+    client: &mut Client,
+    id: &AgentId,
+    n: u32,
+    follow: bool,
+    json: bool,
+) -> CliResult<u64> {
+    let params = AgentEventsParams {
+        agent_id: id.clone(),
+        since_seq: 0,
+        limit: MAX_EVENTS_LIMIT,
+        // A zero tail still needs the newest sequence to start following.
+        tail: Some(if follow { n.max(1) } else { n }),
+    };
+    let result: Value = client.call(AGENT_EVENTS, &params).await?;
+    let events: Vec<AgentEvent> = serde_json::from_value(result["events"].clone())?;
+    if n > 0 {
+        for event in &events {
+            print_event(event, json)?;
+        }
+    }
+    Ok(events.last().map_or(0, |event| event.seq))
 }
 
 /// States that end `run --follow`.

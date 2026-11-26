@@ -589,6 +589,7 @@ impl Harness {
                 agent_id: id.clone(),
                 since_seq: 0,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page")
             .into_iter()

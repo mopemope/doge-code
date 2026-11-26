@@ -134,7 +134,7 @@ pub async fn agent_resume(agents: &AgentManager, params: Value) -> Result<Value,
     encode(&agents.resume(&params.id).await?)
 }
 
-/// One page of stored events (`limit` is clamped to the maximum page).
+/// One page of stored events. `tail` replaces forward paging when supplied.
 pub fn agent_events(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {
     let params: AgentEventsParams = parse(params)?;
     Ok(json!({ "events": agents.events_page(&params)? }))

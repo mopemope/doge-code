@@ -1799,6 +1799,7 @@ mod tests {
             AppEvent::RpcDone {
                 request: RequestTag::Send {
                     agent_id: AgentId::generate(),
+                    behavior: SendBehavior::Queue,
                 },
                 result: Ok(serde_json::json!({"outcome": "queued"})),
             },

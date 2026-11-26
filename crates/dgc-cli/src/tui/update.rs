@@ -14,13 +14,10 @@ use dgc_protocol::model::{
 use super::input::{Key, KeyInput};
 use super::state::{
     AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PermissionChange,
-    SNAPSHOT_REFRESH_TICKS, ScrollMotion, default_title,
+    SNAPSHOT_REFRESH_TICKS, STREAM_CAP, ScrollMotion, default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
-
-/// Ticks after which an unanswered snapshot request may be repeated.
-const SNAPSHOT_RETRY_TICKS: u32 = 20;
 
 /// Apply `event` to `state`; the returned effects are for the runtime to run.
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
@@ -33,7 +30,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             agents,
             permissions,
         } => {
-            state.snapshot_pending = None;
+            state.snapshot_pending = false;
             state.tree.replace(projects, workspaces, agents);
             state.permissions = permissions;
             // The snapshot may predate live permission events: apply them again.
@@ -47,6 +44,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state
                 .dismissed
                 .retain(|id| pending.iter().any(|p| &p.id == id));
+            if std::mem::take(&mut state.snapshot_refresh_again) {
+                request_snapshot(state, &mut fx, false);
+            }
         }
         AppEvent::AgentEvent(event) => on_agent_event(state, event, &mut fx),
         AppEvent::History {
@@ -96,6 +96,7 @@ fn settle(state: &mut AppState, fx: &mut Vec<Effect>) {
             fx.push(Effect::LoadHistory {
                 agent_id,
                 since_seq: 0,
+                tail: Some(STREAM_CAP as u32),
                 generation: state.stream.generation(),
             });
         }
@@ -133,22 +134,27 @@ fn open_pending_permission(state: &mut AppState) {
     }
 }
 
-fn request_snapshot(state: &mut AppState, fx: &mut Vec<Effect>, force: bool) {
-    if !force && state.snapshot_pending.is_some() {
+fn request_snapshot(state: &mut AppState, fx: &mut Vec<Effect>, refresh_after_pending: bool) {
+    if state.status.connection != ConnectionState::Connected {
         return;
     }
-    state.snapshot_pending = Some(0);
+    if state.snapshot_pending {
+        state.snapshot_refresh_again |= refresh_after_pending;
+        return;
+    }
+    state.snapshot_pending = true;
     state.ticks_since_snapshot = 0;
     fx.push(Effect::LoadSnapshot);
 }
 
-/// Reload the selected agent's events after `last_seq`.
+/// Reload the selected agent's events, retrying an interrupted initial tail.
 fn catch_up_selected(state: &mut AppState, fx: &mut Vec<Effect>) {
     if let Some(agent_id) = state.stream.agent_id().cloned() {
         state.stream.begin_catch_up();
         fx.push(Effect::LoadHistory {
             agent_id,
             since_seq: state.stream.last_seq(),
+            tail: state.stream.initial_tail().then_some(STREAM_CAP as u32),
             generation: state.stream.generation(),
         });
     }
@@ -163,10 +169,11 @@ fn on_connection(state: &mut AppState, connection: ConnectionState, fx: &mut Vec
         other => other,
     };
     if connected {
-        request_snapshot(state, fx, true);
+        request_snapshot(state, fx, false);
         catch_up_selected(state, fx);
     } else {
-        state.snapshot_pending = None;
+        state.snapshot_pending = false;
+        state.snapshot_refresh_again = false;
         state.ticks_since_snapshot = 0;
         state.permission_log.clear();
     }
@@ -185,16 +192,9 @@ fn on_tick(state: &mut AppState, fx: &mut Vec<Effect>) {
             state.clear_error();
         }
     }
-    if let Some(ticks) = &mut state.snapshot_pending {
-        *ticks += 1;
-        if *ticks >= SNAPSHOT_RETRY_TICKS {
-            state.snapshot_pending = None;
-            state.permission_log.clear();
-        }
-    } else if state.status.connection == ConnectionState::Connected {
+    if !state.snapshot_pending && state.status.connection == ConnectionState::Connected {
         // Projects and workspaces added or archived elsewhere have no live
-        // event; a periodic reload also repairs a permission that
-        // overlapping snapshots erased.
+        // event, so reload the tree periodically.
         state.ticks_since_snapshot += 1;
         if state.ticks_since_snapshot >= SNAPSHOT_REFRESH_TICKS {
             request_snapshot(state, fx, false);
@@ -211,7 +211,7 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
             state.tree.set_agent_state(&event.agent_id, *agent_state);
         }
         EventKind::PermissionRequested { permission } => {
-            if state.snapshot_pending.is_some() {
+            if state.snapshot_pending {
                 state
                     .permission_log
                     .push(PermissionChange::Added(permission.clone()));
@@ -234,7 +234,7 @@ fn add_permission(state: &mut AppState, permission: PendingPermission) {
 
 /// A permission ended (resolved, cancelled or answered by us).
 fn remove_permission(state: &mut AppState, id: &PermissionId) {
-    if state.snapshot_pending.is_some() {
+    if state.snapshot_pending {
         state
             .permission_log
             .push(PermissionChange::Resolved(id.clone()));
@@ -257,13 +257,18 @@ fn on_history(
         return;
     }
     let advanced = state.stream.history_page(events);
-    // An empty page, or one that shows nothing new, ends the paging.
+    // A tail, an empty page or one that shows nothing new ends the paging.
     if done || events.is_empty() || !advanced {
-        state.stream.finish_history();
+        if state.stream.pending_needs_catch_up() {
+            catch_up_selected(state, fx);
+        } else {
+            state.stream.finish_history();
+        }
     } else {
         fx.push(Effect::LoadHistory {
             agent_id: agent_id.clone(),
             since_seq: state.stream.last_seq(),
+            tail: None,
             generation,
         });
     }
@@ -285,7 +290,7 @@ fn on_rpc_done(
 
 fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
     match request {
-        RequestTag::Send { agent_id } => {
+        RequestTag::Send { agent_id, .. } => {
             if let Some((sent_to, text)) = state.unsent.take()
                 && sent_to == agent_id
                 && state.draft_is_empty(&agent_id)
@@ -336,8 +341,11 @@ fn on_rpc_ok(
 ) {
     state.clear_error();
     match request {
-        RequestTag::Send { .. } => {
+        RequestTag::Send { behavior, .. } => {
             state.unsent = None;
+            if behavior != SendBehavior::Queue {
+                state.send_mode = SendBehavior::Queue;
+            }
             // A queued message shows in the stream only once delivered:
             // say it was accepted, or the user may send it again.
             if let Ok(outcome) = serde_json::from_value::<SendOutcome>(value["outcome"].clone()) {
@@ -708,6 +716,7 @@ fn send_message(state: &mut AppState, fx: &mut Vec<Effect>) {
     };
     let request = RequestTag::Send {
         agent_id: agent_id.clone(),
+        behavior: params.behavior,
     };
     match call(request, AGENT_SEND, serde_json::to_value(&params)) {
         Ok(effect) => {
@@ -1171,6 +1180,7 @@ mod tests {
         Effect::LoadHistory {
             agent_id: agent.id.clone(),
             since_seq,
+            tail: (since_seq == 0 && state.stream.initial_tail()).then_some(2000),
             generation: state.stream.generation(),
         }
     }
@@ -1215,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_agent_loads_history_from_zero() {
+    fn changing_agent_clears_the_stream() {
         let mut f = Fixture::new();
         assert_eq!(f.state.stream.agent_id(), None);
         assert_eq!(press_key(&mut f.state, Key::Down), vec![], "workspace row");
@@ -1233,6 +1243,73 @@ mod tests {
         );
         assert!(f.state.stream.lines().is_empty());
         assert_eq!(f.state.stream.last_seq(), 0);
+    }
+
+    #[test]
+    fn tui_selection_loads_tail_then_live() {
+        let mut f = Fixture::new();
+        let effects = f.select_a1();
+        let generation = generation_of(&effects);
+        assert_eq!(
+            effects,
+            vec![Effect::LoadHistory {
+                agent_id: f.a1.id.clone(),
+                since_seq: 0,
+                tail: Some(2000),
+                generation,
+            }]
+        );
+        let id = f.a1.id.clone();
+        for seq in [5002, 5001] {
+            update(
+                &mut f.state,
+                AppEvent::AgentEvent(text(&id, seq, &format!("t{seq}"))),
+            );
+        }
+        assert!(lines(&f.state).is_empty(), "live events stay buffered");
+        assert_eq!(
+            update(&mut f.state, page(&id, 5000..=5001, true, generation)),
+            vec![]
+        );
+        assert!(!f.state.stream.is_loading());
+        update(
+            &mut f.state,
+            AppEvent::AgentEvent(text(&id, 5002, "duplicate")),
+        );
+        update(&mut f.state, AppEvent::AgentEvent(text(&id, 5003, "t5003")));
+        assert_eq!(
+            lines(&f.state),
+            (5000..=5003)
+                .map(|seq| format!("[{seq}] assistant: t{seq}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tail_load_catches_up_if_the_live_buffer_overflows() {
+        let mut f = Fixture::new();
+        let generation = generation_of(&f.select_a1());
+        let id = f.a1.id.clone();
+        let tail_end = 10;
+        let live_end = tail_end + STREAM_CAP as u64 + 1;
+        for seq in tail_end + 1..=live_end {
+            update(
+                &mut f.state,
+                AppEvent::AgentEvent(text(&id, seq, &format!("t{seq}"))),
+            );
+        }
+        let fx = update(&mut f.state, page(&id, 8..=tail_end, true, generation));
+        assert_eq!(fx, vec![load_history(&f.state, &f.a1, tail_end)]);
+        assert!(f.state.stream.is_loading());
+        assert_ne!(f.state.stream.generation(), generation);
+        f.history(&id, tail_end + 1..=live_end, false);
+        f.finish_history(&id);
+        assert_eq!(
+            lines(&f.state),
+            (tail_end + 2..=live_end)
+                .map(|seq| format!("[{seq}] assistant: t{seq}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1393,7 +1470,8 @@ mod tests {
             fx,
             vec![Effect::Call {
                 request: RequestTag::Send {
-                    agent_id: f.a1.id.clone()
+                    agent_id: f.a1.id.clone(),
+                    behavior: SendBehavior::Steer,
                 },
                 method: "agent.send",
                 params: json!({"agent_id": f.a1.id, "text": "hi there", "behavior": "steer"}),
@@ -1418,12 +1496,47 @@ mod tests {
             AppEvent::RpcDone {
                 request: RequestTag::Send {
                     agent_id: f.a1.id.clone(),
+                    behavior: SendBehavior::Queue,
                 },
                 result: Err("daemon said no".to_owned()),
             },
         );
         assert_eq!(f.state.input.text(), "hello");
         assert_eq!(f.state.status.error.as_deref(), Some("daemon said no"));
+    }
+
+    #[test]
+    fn steer_or_interrupt_send_resets_mode_to_queue() {
+        for mode in [SendBehavior::Steer, SendBehavior::Interrupt] {
+            let mut f = Fixture::new();
+            f.select_a1();
+            press(&mut f.state, 'i');
+            f.state.send_mode = mode;
+            type_text(&mut f.state, "hello");
+            let effects = press_key(&mut f.state, Key::Enter);
+            let [Effect::Call { request, .. }] = effects.as_slice() else {
+                panic!("expected a send call")
+            };
+            update(
+                &mut f.state,
+                AppEvent::RpcDone {
+                    request: request.clone(),
+                    result: Err("daemon said no".to_owned()),
+                },
+            );
+            assert_eq!(f.state.send_mode, mode, "a failed send keeps the mode");
+            press_key(&mut f.state, Key::Enter);
+            update(
+                &mut f.state,
+                AppEvent::RpcDone {
+                    request: request.clone(),
+                    // Even a steer or interrupt send to an idle agent returns "sent".
+                    result: Ok(json!({"outcome": "sent"})),
+                },
+            );
+            assert_eq!(f.state.send_mode, SendBehavior::Queue);
+            assert_eq!(f.state.status.notice.as_deref(), Some("sent"));
+        }
     }
 
     #[test]
@@ -1858,7 +1971,7 @@ mod tests {
 
     #[test]
     fn unknown_agent_event_triggers_snapshot() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         let stranger = AgentId::generate();
         let fx = update(
             &mut f.state,
@@ -1871,21 +1984,19 @@ mod tests {
             AppEvent::AgentEvent(text(&stranger, 2, "again")),
         );
         assert_eq!(fx, vec![]);
-        // Once the snapshot is answered (or has timed out), a new one may follow.
+        // Once the snapshot is answered, a new one may follow.
         f.snapshot_with(vec![]);
         let fx = update(
             &mut f.state,
             AppEvent::AgentEvent(text(&stranger, 3, "still unknown")),
         );
         assert_eq!(fx, vec![Effect::LoadSnapshot]);
-        for _ in 0..SNAPSHOT_RETRY_TICKS {
-            update(&mut f.state, AppEvent::Tick);
-        }
+        tick(&mut f.state, 80);
         let fx = update(
             &mut f.state,
             AppEvent::AgentEvent(text(&stranger, 4, "unanswered")),
         );
-        assert_eq!(fx, vec![Effect::LoadSnapshot]);
+        assert_eq!(fx, vec![], "the slow request is still pending");
     }
 
     #[test]
@@ -2128,7 +2239,7 @@ mod tests {
 
     #[test]
     fn lagged_resubscribes_and_reloads() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         f.select_a1();
         let id = f.a1.id.clone();
         f.history(&id, 1..=3, true);
@@ -2503,7 +2614,7 @@ mod tests {
 
     #[test]
     fn snapshot_keeps_a_permission_requested_after_it_was_asked_for() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         let stranger = AgentId::generate();
         let fx = update(
             &mut f.state,
@@ -2523,7 +2634,7 @@ mod tests {
 
     #[test]
     fn snapshot_does_not_resurrect_a_permission_resolved_after_it_was_asked_for() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         let perm = permission(&f.a1.id);
         f.snapshot_with(vec![perm.clone()]);
         let stranger = AgentId::generate();
@@ -2681,7 +2792,7 @@ mod tests {
         // The first chain gets its first page and asks for the next.
         let fx = update(&mut f.state, page(&a1, 1..=3, false, g1));
         assert_eq!(generation_of(&fx), g1);
-        // The user moves A -> B -> A quickly: a new chain starts from 0.
+        // The user moves A -> B -> A quickly: A gets a fresh tail request.
         press_key(&mut f.state, Key::Down);
         let g3 = generation_of(&press_key(&mut f.state, Key::Up));
         assert_ne!(g1, g3);
@@ -2717,7 +2828,7 @@ mod tests {
 
     #[test]
     fn lagged_during_a_load_starts_a_new_chain() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         f.select_a1();
         let a1 = f.a1.id.clone();
         let g1 = f.state.stream.generation();
@@ -2979,6 +3090,7 @@ mod tests {
                 AppEvent::RpcDone {
                     request: RequestTag::Send {
                         agent_id: f.a1.id.clone(),
+                        behavior: SendBehavior::Queue,
                     },
                     result: Ok(json!({ "outcome": outcome })),
                 },
@@ -2999,6 +3111,7 @@ mod tests {
         let done = |result| AppEvent::RpcDone {
             request: RequestTag::Send {
                 agent_id: f.a1.id.clone(),
+                behavior: SendBehavior::Queue,
             },
             result,
         };
@@ -3047,6 +3160,27 @@ mod tests {
     }
 
     #[test]
+    fn periodic_snapshots_do_not_pile_up_behind_a_slow_daemon() {
+        let mut f = connected_fixture();
+        f.select_a1();
+        assert_eq!(tick_fx(&mut f.state, 20), vec![Effect::LoadSnapshot]);
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert!(
+            tick_fx(&mut f.state, 80).is_empty(),
+            "the snapshot is still pending"
+        );
+        f.snapshot_with(vec![]);
+        assert_eq!(
+            f.state.permission_count(),
+            1,
+            "reconcile the live permission"
+        );
+        assert!(tick_fx(&mut f.state, 19).is_empty());
+        assert_eq!(tick_fx(&mut f.state, 1), vec![Effect::LoadSnapshot]);
+    }
+
+    #[test]
     fn no_periodic_snapshot_while_disconnected() {
         let mut f = Fixture::new();
         assert_eq!(
@@ -3082,37 +3216,29 @@ mod tests {
     }
 
     #[test]
-    fn the_periodic_snapshot_brings_back_a_permission_an_overlapping_snapshot_erased() {
+    fn lagged_refresh_waits_for_the_pending_snapshot_and_reconciles_permissions() {
         let mut f = Fixture::new();
         f.select_a1();
-        // Two snapshots in flight: the reconnect's and the lag's.
         update(
             &mut f.state,
             AppEvent::Connection(ConnectionState::Connected),
         );
-        update(&mut f.state, AppEvent::Lagged);
-        f.snapshot_with(vec![]);
-        // A permission arrives after the first answer, but the second
-        // snapshot was read before it and erases it.
+        for _ in 0..2 {
+            let effects = update(&mut f.state, AppEvent::Lagged);
+            assert!(effects.contains(&Effect::Resubscribe));
+            assert!(!effects.contains(&Effect::LoadSnapshot), "one is pending");
+        }
+        assert_eq!(f.snapshot_with(vec![]), vec![Effect::LoadSnapshot]);
         let perm = permission(&f.a1.id);
         update(&mut f.state, requested(&f.a1.id, 1, &perm));
-        assert_eq!(f.state.permission_count(), 1);
-        f.snapshot_with(vec![]);
-        assert_eq!(f.state.permission_count(), 0, "erased");
-        assert!(f.state.dialog.is_none());
-
-        let fx = tick_fx(&mut f.state, 20);
-        assert_eq!(fx, vec![Effect::LoadSnapshot]);
-        f.snapshot_with(vec![perm.clone()]);
-        assert_eq!(f.state.permission_count(), 1, "back");
-        assert_eq!(open_permission_id(&f.state), Some(perm.id));
-        assert!(
-            !f.state
-                .dialog
-                .as_ref()
-                .is_some_and(Dialog::permission_armed),
-            "a dialog that opens again is not armed"
+        assert!(tick_fx(&mut f.state, 80).is_empty());
+        assert_eq!(f.snapshot_with(vec![]), vec![], "refresh satisfied");
+        assert_eq!(
+            f.state.permission_count(),
+            1,
+            "live permission was reconciled"
         );
+        assert_eq!(open_permission_id(&f.state), Some(perm.id));
     }
 
     #[test]

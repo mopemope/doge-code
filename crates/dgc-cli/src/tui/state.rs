@@ -335,7 +335,11 @@ pub struct StreamBuffer {
     /// Lines scrolled up from the tail; 0 follows the tail.
     scroll: usize,
     loading: bool,
+    /// The selected agent's initial tail has yet to arrive.
+    initial_tail: bool,
     pending: Vec<AgentEvent>,
+    /// Highest live sequence dropped from the pending buffer during a load.
+    dropped_pending_seq: u64,
     /// Identifies the current history load; pages of older loads are stale.
     generation: u64,
 }
@@ -365,15 +369,21 @@ impl StreamBuffer {
         self.loading
     }
 
+    pub(super) fn initial_tail(&self) -> bool {
+        self.initial_tail
+    }
+
     /// Start over for `agent_id` (empty buffer, history to be loaded).
     pub(super) fn reset(&mut self, agent_id: Option<AgentId>) {
         self.generation += 1;
         self.loading = agent_id.is_some();
+        self.initial_tail = self.loading;
         self.agent_id = agent_id;
         self.lines.clear();
         self.last_seq = 0;
         self.scroll = 0;
         self.pending.clear();
+        self.dropped_pending_seq = 0;
     }
 
     /// Keep the lines and load what is missing after `last_seq`.
@@ -408,8 +418,11 @@ impl StreamBuffer {
     pub(super) fn live(&mut self, event: &AgentEvent) {
         if self.loading {
             if self.pending.len() >= STREAM_CAP {
-                // History paging reads the log to its end and will pick
-                // these up; do not grow without bound meanwhile.
+                // Re-read discarded sequences if the current load stops
+                // before covering them.
+                if let Some(highest) = self.pending.iter().map(|event| event.seq).max() {
+                    self.dropped_pending_seq = self.dropped_pending_seq.max(highest);
+                }
                 self.pending.clear();
             }
             self.pending.push(event.clone());
@@ -420,6 +433,7 @@ impl StreamBuffer {
 
     /// Append one history page; returns whether `last_seq` advanced.
     pub(super) fn history_page(&mut self, events: &[AgentEvent]) -> bool {
+        self.initial_tail = false;
         let before = self.last_seq;
         for event in events {
             self.push(event);
@@ -427,10 +441,16 @@ impl StreamBuffer {
         self.last_seq > before
     }
 
+    pub(super) fn pending_needs_catch_up(&mut self) -> bool {
+        std::mem::take(&mut self.dropped_pending_seq) > self.last_seq
+    }
+
     /// History is complete: apply the held live events.
     pub(super) fn finish_history(&mut self) {
         self.loading = false;
-        for event in std::mem::take(&mut self.pending) {
+        let mut pending = std::mem::take(&mut self.pending);
+        pending.sort_unstable_by_key(|event| event.seq);
+        for event in pending {
             self.push(&event);
         }
     }
@@ -701,8 +721,10 @@ pub struct AppState {
     pub(super) focus_before_dialog: Focus,
     /// Permissions the user closed the dialog on; not reopened automatically.
     pub(super) dismissed: HashSet<PermissionId>,
-    /// Ticks since an unanswered snapshot request.
-    pub(super) snapshot_pending: Option<u32>,
+    /// A snapshot has been requested and has yet to arrive.
+    pub(super) snapshot_pending: bool,
+    /// A subscription lagged while a snapshot was in flight.
+    pub(super) snapshot_refresh_again: bool,
     /// Ticks connected with no snapshot pending since the last request: at
     /// [`SNAPSHOT_REFRESH_TICKS`] the tree is reloaded (changes made by
     /// other clients have no live event).
@@ -739,7 +761,8 @@ impl Default for AppState {
             size: (80, 24),
             focus_before_dialog: Focus::Tree,
             dismissed: HashSet::new(),
-            snapshot_pending: None,
+            snapshot_pending: false,
+            snapshot_refresh_again: false,
             ticks_since_snapshot: 0,
             unsent: None,
             input_target: None,
