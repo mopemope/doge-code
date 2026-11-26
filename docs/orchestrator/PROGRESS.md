@@ -4,7 +4,7 @@
 最初にここを読み「現在の作業」から再開する。
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
-- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md)
+- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2（TUI）の計画作成
+- タスク: M2 Task 1（デーモン側の前提修正）
 - 状態: 未着手
-- 済んだこと: M0 完了、M1 Task 1（プロトコル型）、Task 2（パス、設定、ロック、Store）、Task 3（イベントログ）、Task 4（子プロセス管理）、Task 5（ソケットサーバー）、Task 6（クライアントと `dgc-next daemon`）、Task 7（プロジェクトとワークスペース）、Task 8（ProviderAdapter と AgentManager）、Task 9（実プロバイダの記録）、Task 10（偽プロバイダ）、Task 11（ClaudeAdapter）、Task 12（CodexAdapter）、Task 13（エージェント操作の公開）、Task 14（M1 受け入れ）完了（ブランチ `feat/orchestrator-m1`）
-- 次の一手: M2（TUI）の計画を作成する（superpowers:writing-plans、計画は docs/superpowers/plans/）。M1 の保留指摘は末尾「M1 レビューで保留した指摘と判断」から優先度を付けて取り込む。M1 は PR #184（`feat/orchestrator-m1` → `develop`）でレビュー待ち。M0 は PR #183 でマージ済み
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）
+- 次の一手: M2 計画の Task 1 Step 1 から始める（ブランチ `feat/orchestrator-m2`）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -28,8 +28,8 @@
 | M | 内容 | 状態 | 計画 |
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
-| M1 | デーモン中核と CLI（`dgc-next`） | 完了（最終レビューと修正の再レビュー済み、2026-11-26） | m1-daemon |
-| M2 | TUI | 未着手 | 未作成 |
+| M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
+| M2 | TUI | 作業中 | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
@@ -62,9 +62,21 @@
 | 13 | エージェント操作の公開（ソケットと CLI） | 完了 | `feat(cli): expose agent and permission commands` |
 | 14 | M1 受け入れ（実 CLI 手動確認とドキュメント） | 完了 | `docs(orchestrator): complete M1 acceptance` |
 
+### M2
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 未着手 | |
+| 2 | TUI の状態と更新（純粋部分） | 未着手 | |
+| 3 | 描画 | 未着手 | |
+| 4 | ランタイムと起動コマンド | 未着手 | |
+| 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 未着手 | |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M2): TUI の画面構成はサイドバー（プロジェクト／ワークスペース／エージェントのツリー）+ 選択エージェントのストリームと入力欄（ユーザー決定）。`dgc-next tui` と引数なしの `dgc-next` で起動。
 
 - 2026-11-25: 信頼境界は UID。dgc が起動したエージェントは信頼する（ユーザー決定）。
 - 2026-11-25: 権限の自動承認系 mode は M1 から `--mode` 明示で使える（設計者判断）。
