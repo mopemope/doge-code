@@ -37,15 +37,24 @@ impl Running {
     }
 }
 
-async fn wait_for_socket(path: &Path) {
-    for _ in 0..500 {
+async fn wait_for_socket(path: &Path, task: &mut JoinHandle<Result<(), DaemonError>>) {
+    let connect = async {
         // A stale socket file may already exist, so wait for a live listener.
-        if UnixStream::connect(path).await.is_ok() {
-            return;
+        while UnixStream::connect(path).await.is_err() {
+            sleep(Duration::from_millis(10)).await;
         }
-        sleep(Duration::from_millis(10)).await;
+    };
+    tokio::select! {
+        biased;
+        result = task => match result {
+            Ok(Err(err)) => panic!("daemon failed before its socket was ready: {err}"),
+            Err(err) => panic!("daemon task failed before its socket was ready: {err}"),
+            Ok(Ok(())) => panic!("daemon stopped before its socket was ready"),
+        },
+        result = timeout(WAIT, connect) => {
+            assert!(result.is_ok(), "socket {} never appeared", path.display());
+        }
     }
-    panic!("socket {} never appeared", path.display());
 }
 
 async fn start() -> Running {
@@ -70,8 +79,8 @@ async fn start_in(dir: TempDir) -> Running {
 async fn start_with(dir: TempDir, config: DaemonConfig) -> Running {
     let paths = DaemonPaths::under(dir.path());
     let (shutdown, _rx) = watch::channel(false);
-    let task = tokio::spawn(run_daemon(paths.clone(), config, shutdown.clone()));
-    wait_for_socket(&paths.socket).await;
+    let mut task = tokio::spawn(run_daemon(paths.clone(), config, shutdown.clone()));
+    wait_for_socket(&paths.socket, &mut task).await;
     Running {
         _dir: dir,
         paths,
@@ -1052,4 +1061,14 @@ async fn restart_stops_agents_and_shutdown_stops_live_sessions() {
     let got = client.call_ok("agent.get", json!({"id": agent})).await;
     assert_eq!(got["state"], "stopped");
     daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+#[should_panic(expected = "exists and is not a socket")]
+async fn wait_for_socket_reports_a_failed_daemon_start() {
+    let dir = tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    std::fs::create_dir_all(paths.socket.parent().expect("socket parent")).expect("run dir");
+    std::fs::write(&paths.socket, "regular file").expect("create conflicting file");
+    start_in(dir).await;
 }

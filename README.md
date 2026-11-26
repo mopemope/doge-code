@@ -241,22 +241,26 @@ dgc handoff ID --to codex --follow
   provider's default mode unless you choose a mode or a profile that sets one.
   Auto-approve modes print a warning on stderr.
 - `--dry-run` prints the prompt without starting an agent. A launch prints
-  the new agent's ID and optionally follows it. With `--json`, the first
-  result contains `prompt` and `agent` (`null` for a dry run).
+  the new agent's ID and optionally follows it. A CLI launch uses the
+  current state and sends no expected preview, even after a separate dry run.
+  With `--json`, the first result contains `prompt` and `agent` (`null` for
+  a dry run).
 - `run --follow` and `logs --follow` print one handoff suggestion when they
   encounter a rate limit. In JSON mode they emit the event as usual.
 
 dgc assembles the prompt locally without calling an LLM. It uses the source
-title, first recorded instruction, up to three recent instructions, the last
-turn's assistant text (tail up to 4 KiB), `git status --short` and
-`git diff --stat` (up to 4 KiB apiece), and the absolute path to the source
-event log. It reads recent events from the retained log. Environment
-variables, configuration and credential files, account or plan metadata, and
-rate-limit details are outside the prompt's sources. Values already present in
-conversation text and filenames can appear. The prompt is capped at 32 KiB. If the
-required sections alone exceed that limit, handoff returns an error. A missing
-or rotated-out initial instruction is marked unavailable. The launch rebuilds
-the prompt using the current log and Git state.
+title, the first 16 KiB of the initial instruction, up to three recent
+instructions, the last answer from a turn without a rate limit or error
+(tail up to 4 KiB), `git status --short` and `git diff --stat` (up to
+4 KiB apiece), and the absolute path to the source event log. A truncated
+initial instruction points to the full text in the log. A missing or
+rotated-out initial instruction is marked unavailable.
+
+Environment variables, configuration and credential files, account or plan
+metadata, and rate-limit details are outside the prompt's sources. Values
+already present in conversation text and filenames can appear. The prompt is
+capped at 32 KiB. If the title and log path leave too little space for the
+required headings and preface, handoff returns an error.
 
 dgc records at most one `rate limited` event per turn. Claude Code triggers
 it on a rejected or unknown `rate_limit_event` status or an HTTP 429 in a
@@ -330,8 +334,10 @@ field. `Tab` switches the target on the target field, and `Tab`/`Shift-Tab`
 cycle profiles on the profile field. The mode field accepts text or paste
 and shows a red warning for auto-approve modes. Use `PgUp`/`PgDn` to scroll
 the escaped dry-run preview. Once the preview is ready and visible, press
-`Enter` to start or `Esc` to cancel. Pending permission dialogs wait while
-the handoff dialog is open.
+`Enter` to start or `Esc` to cancel. The daemon compares the rebuilt prompt
+with the preview. If they differ, the TUI displays a fresh preview and asks
+you to confirm again. Pending permission dialogs wait while the handoff dialog
+is open.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was
 selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).

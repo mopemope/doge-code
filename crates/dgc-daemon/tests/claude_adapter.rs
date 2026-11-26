@@ -244,6 +244,20 @@ async fn claude_429_result_emits_rate_limited() {
         "{:?}",
         turns[0]
     );
+    assert!(
+        turns[1].contains(&ProviderEvent::Event(EventKind::Error {
+            message: "Synthetic rate limit".to_owned(),
+        })),
+        "{:?}",
+        turns[1]
+    );
+    assert!(
+        !turns[1]
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Event(EventKind::AssistantText { .. }))),
+        "{:?}",
+        turns[1]
+    );
 }
 
 #[tokio::test]
@@ -555,7 +569,7 @@ async fn claude_invalid_model_reports_error_and_completes_turn() {
     );
     assert!(matches!(
         events[1],
-        ProviderEvent::Event(EventKind::AssistantText { .. })
+        ProviderEvent::Event(EventKind::Error { .. })
     ));
     let ProviderEvent::Event(EventKind::Error { message }) = &events[2] else {
         panic!("expected Error, got {:?}", events[2]);

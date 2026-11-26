@@ -15,8 +15,10 @@
 //!   every change and loaded again by `resume`.
 //! - Open log handles are bounded (see [`LogCache`]): live agents keep theirs,
 //!   at most [`MAX_IDLE_LOG_HANDLES`] other agents' handles are cached.
-//! - Lock order: `live` → `logs` → one `EventLog`. `permissions` is never held
-//!   while taking another lock, and no lock is held across an `.await`.
+//! - `live` precedes the log cache and per-agent log locks. The cache lock
+//!   is released before waiting on a log slot or doing file I/O.
+//!   `permissions` is never held while taking another lock, and no lock
+//!   is held across an `.await`.
 //!   Agents that are not live are changed only while holding `live`, so such a
 //!   change cannot race with a resume or with an actor's final transition.
 //! - Provider calls are bounded by [`ProviderTimeouts`]; a call that times
@@ -36,7 +38,7 @@ use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
     AgentCreateParams, AgentEventsParams, AgentHandoffParams, AgentHandoffResult, AgentSendParams,
-    MAX_EVENTS_LIMIT, PermissionRespondParams,
+    HANDOFF_CHANGED, MAX_EVENTS_LIMIT, PermissionRespondParams,
 };
 use dgc_protocol::model::{
     Agent, AgentState, PendingPermission, ProviderKind, SendBehavior, SendOutcome, Workspace,
@@ -103,6 +105,8 @@ pub enum AgentError {
     /// `workspace_archived`.
     #[error("operation not allowed in state {state}")]
     InvalidState { state: String },
+    #[error("{}", HANDOFF_CHANGED)]
+    HandoffChanged,
     #[error("{0}")]
     InvalidParams(String),
     #[error("provider error: {0}")]
@@ -116,7 +120,7 @@ impl AgentError {
     pub fn code(&self) -> i32 {
         match self {
             Self::NotFound(_) => NOT_FOUND,
-            Self::InvalidState { .. } => INVALID_STATE,
+            Self::InvalidState { .. } | Self::HandoffChanged => INVALID_STATE,
             Self::InvalidParams(_) => INVALID_PARAMS,
             Self::Provider(_) | Self::Storage(_) => INTERNAL,
         }
@@ -214,13 +218,16 @@ struct PendingEntry {
     provider_request_id: String,
 }
 
+type LogSlot = Arc<Mutex<Option<EventLog>>>;
+
 struct CachedLog {
-    log: Arc<Mutex<EventLog>>,
+    log: LogSlot,
     /// Value of [`LogCache::tick`] at the last use.
     last_used: u64,
 }
 
-/// Open event logs, one handle per agent, opened on first use.
+/// One slot per agent, shared by appends and reads, with an append handle
+/// opened on first use by the writer or ordinary event paging.
 ///
 /// Handles of live agents are never evicted: a live agent appends through
 /// its handle, and a second handle for the same file would hand out `seq`
@@ -246,25 +253,23 @@ struct LogCache {
 }
 
 impl LogCache {
-    fn get(&mut self, id: &AgentId) -> Option<Arc<Mutex<EventLog>>> {
+    fn get_or_insert(&mut self, id: &AgentId) -> LogSlot {
         self.tick += 1;
         let tick = self.tick;
-        self.logs.get_mut(id).map(|cached| {
+        if let Some(cached) = self.logs.get_mut(id) {
             cached.last_used = tick;
-            Arc::clone(&cached.log)
-        })
-    }
-
-    fn insert(&mut self, id: &AgentId, log: Arc<Mutex<EventLog>>) {
-        self.tick += 1;
+            return Arc::clone(&cached.log);
+        }
+        let log = Arc::new(Mutex::new(None));
         self.logs.insert(
             id.clone(),
             CachedLog {
-                log,
-                last_used: self.tick,
+                log: Arc::clone(&log),
+                last_used: tick,
             },
         );
         self.evict();
+        log
     }
 
     /// Drop least recently used handles of non-live agents beyond the bound.
@@ -331,16 +336,22 @@ impl Shared {
         self.agent_dir(id).join(QUEUE_FILE)
     }
 
-    fn log(&self, id: &AgentId) -> Result<Arc<Mutex<EventLog>>, AgentError> {
-        let mut logs = lock(&self.logs);
-        if let Some(log) = logs.get(id) {
-            return Ok(log);
+    fn log_slot(&self, id: &AgentId) -> LogSlot {
+        lock(&self.logs).get_or_insert(id)
+    }
+
+    fn open_log<'a>(
+        &self,
+        id: &AgentId,
+        slot: &'a mut Option<EventLog>,
+    ) -> Result<&'a mut EventLog, AgentError> {
+        match slot {
+            Some(log) => Ok(log),
+            None => Ok(slot.insert(
+                EventLog::open(&self.agent_dir(id), id.clone(), self.events_max_bytes)
+                    .map_err(storage)?,
+            )),
         }
-        let log = EventLog::open(&self.agent_dir(id), id.clone(), self.events_max_bytes)
-            .map_err(storage)?;
-        let log = Arc::new(Mutex::new(log));
-        logs.insert(id, Arc::clone(&log));
-        Ok(log)
     }
 
     /// Add a live agent to `live` (held by the caller) and pin its log.
@@ -356,9 +367,12 @@ impl Shared {
     /// Append `kind` to the agent's log, then broadcast it. Broadcasting under
     /// the log lock keeps the live stream in `seq` order.
     fn emit(&self, id: &AgentId, kind: EventKind) -> Result<AgentEvent, AgentError> {
-        let log = self.log(id)?;
-        let mut log = lock(&log);
-        let event = log.append(kind).map_err(storage)?;
+        let slot = self.log_slot(id);
+        let mut slot = lock(&slot);
+        let event = self
+            .open_log(id, &mut slot)?
+            .append(kind)
+            .map_err(storage)?;
         // An error only means nobody is subscribed.
         let _ = self.events.send(event.clone());
         Ok(event)
@@ -616,21 +630,19 @@ impl AgentManager {
         crate::provider::validate_mode(provider, create.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
         let dir = self.shared.agent_dir(&source.id);
-        let (first_page, tail) = {
-            let mut logs = lock(&self.shared.logs);
-            let read = || crate::events_log::handoff_history(&dir, crate::handoff::SCAN_LIMIT);
-            if let Some(log) = logs.get(&source.id) {
-                drop(logs);
-                let _guard = lock(&log);
-                read()
-            } else {
-                // Keep a resume from opening an append handle during the read.
-                read()
-            }
-        }
-        .map_err(storage)?;
         let log_path =
             std::path::absolute(dir.join(crate::events_log::CURRENT_FILE)).map_err(storage)?;
+        let slot = self.shared.log_slot(&source.id);
+        let (first_page, tail) = tokio::task::spawn_blocking(move || {
+            // Use the source's slot even before it has an append handle.
+            // A simultaneous resume must wait here before opening or rotating
+            // the log. Other agents never need this lock.
+            let _guard = lock(&slot);
+            crate::events_log::handoff_history(&dir, crate::handoff::SCAN_LIMIT)
+        })
+        .await
+        .map_err(storage)?
+        .map_err(storage)?;
         let (status, diff) = crate::handoff::git_state(&workspace.path).await;
         // The source or workspace may have been archived during the Git calls.
         self.handoff_source(&source.id)?;
@@ -638,11 +650,17 @@ impl AgentManager {
         let prompt =
             crate::handoff::build_prompt(&source, &first_page, &tail, &status, &diff, &log_path)
                 .ok_or_else(|| AgentError::InvalidState {
-                    state: "handoff required sections exceed 32 KiB".to_owned(),
+                    state: "handoff title and log path exceed the 32 KiB budget".to_owned(),
                 })?;
         let agent = if params.dry_run {
             None
         } else {
+            if params
+                .expected_prompt
+                .is_some_and(|expected| expected != prompt)
+            {
+                return Err(AgentError::HandoffChanged);
+            }
             create.initial_prompt.clone_from(&prompt);
             Some(self.create(create).await?)
         };
@@ -812,7 +830,7 @@ impl AgentManager {
         self.shared.events.subscribe()
     }
 
-    /// Number of cached event log handles. For tests.
+    /// Number of cached event log slots. For tests.
     #[doc(hidden)]
     pub fn open_log_handles(&self) -> usize {
         lock(&self.shared.logs).logs.len()
@@ -821,8 +839,9 @@ impl AgentManager {
     /// One page of stored events, from a sequence cursor or the end of the log.
     pub fn events_page(&self, params: &AgentEventsParams) -> Result<Vec<AgentEvent>, AgentError> {
         self.load(&params.agent_id)?;
-        let log = self.shared.log(&params.agent_id)?;
-        let log = lock(&log);
+        let slot = self.shared.log_slot(&params.agent_id);
+        let mut slot = lock(&slot);
+        let log = self.shared.open_log(&params.agent_id, &mut slot)?;
         match params.tail {
             Some(n) => log.read_tail(n.min(MAX_EVENTS_LIMIT)),
             None => log.read_page(params.since_seq, params.clamped_limit()),

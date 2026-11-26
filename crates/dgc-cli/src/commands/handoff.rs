@@ -40,6 +40,7 @@ pub async fn run(command: HandoffCommand, json: bool) -> CliResult<ExitCode> {
         model: command.model,
         mode: command.mode,
         dry_run: command.dry_run,
+        expected_prompt: None,
     };
     let result: AgentHandoffResult = client.call(AGENT_HANDOFF, &params).await?;
     if let Some(agent) = &result.agent {

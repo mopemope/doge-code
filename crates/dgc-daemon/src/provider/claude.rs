@@ -849,6 +849,20 @@ fn content_blocks(message: &Value) -> &[Value] {
 /// [`MAX_EVENT_TEXT_BYTES`](dgc_protocol::MAX_EVENT_TEXT_BYTES); all but the
 /// last are `final_: false`.
 fn assistant_events(message: &Value) -> Vec<ProviderEvent> {
+    if message["is_api_error_message"].as_bool() == Some(true)
+        || message["message"]["model"].as_str() == Some("<synthetic>")
+    {
+        let error = content_blocks(message)
+            .iter()
+            .filter(|block| block["type"] == "text")
+            .filter_map(|block| block["text"].as_str().map(str::trim))
+            .find(|text| !text.is_empty())
+            .or_else(|| message["error"].as_str())
+            .unwrap_or("provider assistant error");
+        return vec![ProviderEvent::Event(EventKind::Error {
+            message: truncate_summary(error),
+        })];
+    }
     content_blocks(message)
         .iter()
         .flat_map(|block| match block["type"].as_str() {

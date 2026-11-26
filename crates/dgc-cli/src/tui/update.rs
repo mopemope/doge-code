@@ -64,6 +64,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             generation,
         } => on_history(state, &agent_id, &events, done, generation, &mut fx),
         AppEvent::RpcDone { request, result } => on_rpc_done(state, request, result, &mut fx),
+        AppEvent::HandoffChanged { generation } => refresh_handoff(state, generation, &mut fx),
         AppEvent::Connection(connection) => on_connection(state, connection, &mut fx),
         AppEvent::Lagged => {
             fx.push(Effect::Resubscribe);
@@ -712,6 +713,21 @@ fn open_handoff(state: &mut AppState, fx: &mut Vec<Effect>) {
         method: PROFILE_LIST,
         params: serde_json::json!({}),
     });
+}
+
+fn refresh_handoff(state: &mut AppState, generation: u64, fx: &mut Vec<Effect>) {
+    let Some(form) = current_handoff(state, generation).filter(|form| form.submitting) else {
+        return;
+    };
+    form.submitting = false;
+    form.error = None;
+    form.preview = None;
+    form.preview_failed = false;
+    form.preview_changed = true;
+    form.scroll = 0;
+    form.rearm();
+    let preview = handoff_call(form, true);
+    push_call(state, fx, preview);
 }
 
 fn handoff_call(form: &HandoffForm, preview: bool) -> Result<Effect, String> {
@@ -3646,6 +3662,14 @@ mod tests {
         );
     }
 
+    fn sample_handoff_preview() -> String {
+        format!(
+            "preview↪\u{1b} {}\n{}END OF PREVIEW",
+            "long ".repeat(20),
+            "line\n".repeat(24)
+        )
+    }
+
     fn finish_handoff_preview(state: &mut AppState, effects: Vec<Effect>) {
         let (request, params) = effects
             .into_iter()
@@ -3663,9 +3687,7 @@ mod tests {
             state,
             AppEvent::RpcDone {
                 request,
-                result: Ok(
-                    json!({"prompt": format!("preview↪\u{1b} {}\n{}END OF PREVIEW", "long ".repeat(20), "line\n".repeat(24)), "agent": null}),
-                ),
+                result: Ok(json!({"prompt": sample_handoff_preview(), "agent": null})),
             },
         );
     }
@@ -3682,7 +3704,7 @@ mod tests {
         finish_handoff_preview(&mut f.state, effects);
         let screen = handoff_screen(&f.state);
         assert!(screen.contains("preview"), "{screen}");
-        assert!(screen.contains("\u{21aa}"), "{screen}");
+        assert!(screen.contains(r"\u{21aa}"), "{screen}");
         assert!(screen.contains("↪"), "{screen}");
         assert!(!screen.contains("END OF PREVIEW"), "{screen}");
         assert!(press_key(&mut f.state, Key::PageDown).is_empty());
@@ -3696,10 +3718,75 @@ mod tests {
                     if params["agent_id"] == f.a1.id.as_str()
                         && params["dry_run"] == false
                         && params["provider"] == "codex"
+                        && params["expected_prompt"] == sample_handoff_preview()
             )),
             "{effects:?}"
         );
         assert!(press_key(&mut f.state, Key::Enter).is_empty());
+    }
+
+    #[test]
+    fn handoff_changed_requires_review_of_a_fresh_preview() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (95, 30);
+        let effects = press(&mut f.state, 'H');
+        finish_handoff_preview(&mut f.state, effects);
+        arm(&mut f.state);
+        press_key(&mut f.state, Key::PageDown);
+        let generation = press_key(&mut f.state, Key::Enter)
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request:
+                        RequestTag::Handoff {
+                            generation,
+                            preview: false,
+                        },
+                    ..
+                } => Some(generation),
+                _ => None,
+            })
+            .expect("start attempt");
+        let retry = update(&mut f.state, AppEvent::HandoffChanged { generation });
+        let screen = handoff_screen(&f.state);
+        assert!(screen.contains("loading preview…"), "{screen}");
+        assert!(
+            screen.contains("the state changed — review the new preview"),
+            "{screen}"
+        );
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+        let request = retry
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request,
+                    method: "agent.handoff",
+                    params,
+                } if params["dry_run"] == true && params["expected_prompt"].is_null() => {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("request a new preview");
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request,
+                result: Ok(json!({"prompt": "replacement preview", "agent": null})),
+            },
+        );
+        let screen = handoff_screen(&f.state);
+        assert!(
+            screen.contains("the state changed — review the new preview"),
+            "{screen}"
+        );
+        assert!(screen.contains("replacement preview"), "{screen}");
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+        arm(&mut f.state);
+        assert!(press_key(&mut f.state, Key::Enter).iter().any(|effect| matches!(
+            effect, Effect::Call { params, .. } if params["expected_prompt"] == "replacement preview"
+        )));
     }
 
     #[test]

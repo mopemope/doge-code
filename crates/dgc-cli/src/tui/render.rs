@@ -755,6 +755,8 @@ fn handoff_body(state: &AppState, form: &HandoffForm, size: (u16, u16)) -> Dialo
         error.clone()
     } else if form.preview_failed {
         "preview unavailable".to_owned()
+    } else if form.preview_changed {
+        "the state changed — review the new preview".to_owned()
     } else if form.preview.is_none() {
         "loading preview…".to_owned()
     } else if layout.visible_rows == 0 {
@@ -772,6 +774,8 @@ fn handoff_body(state: &AppState, form: &HandoffForm, size: (u16, u16)) -> Dialo
     lines.push(Line::styled(truncate_cols(&message, width), status_style));
     if form.preview.is_some() {
         lines.extend(layout.rows[scroll..end].iter().map(summary_line));
+    } else if form.preview_changed && form.error.is_none() && !form.preview_failed {
+        lines.push(Line::styled("loading preview…", dim()));
     }
     let keys = if form.preview.is_some() && !form.submitting && layout.visible_rows != 0 {
         HANDOFF_KEYS

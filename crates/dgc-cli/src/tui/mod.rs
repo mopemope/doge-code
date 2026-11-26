@@ -110,6 +110,10 @@ pub enum AppEvent {
         request: RequestTag,
         result: Result<serde_json::Value, String>,
     },
+    /// The daemon refused to launch with a stale handoff preview.
+    HandoffChanged {
+        generation: u64,
+    },
     Connection(ConnectionState),
     /// The subscription ended because it fell behind.
     Lagged,

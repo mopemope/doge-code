@@ -18,6 +18,8 @@ pub const WORKSPACE_LIST: &str = "workspace.list";
 pub const WORKSPACE_ARCHIVE: &str = "workspace.archive";
 pub const PROFILE_LIST: &str = "profile.list";
 pub const AGENT_HANDOFF: &str = "agent.handoff";
+/// INVALID_STATE message when the current handoff differs from the preview.
+pub const HANDOFF_CHANGED: &str = "handoff_changed";
 pub const AGENT_CREATE: &str = "agent.create";
 pub const AGENT_LIST: &str = "agent.list";
 pub const AGENT_GET: &str = "agent.get";
@@ -153,6 +155,9 @@ pub struct AgentHandoffParams {
     pub model: Option<String>,
     pub mode: Option<String>,
     pub dry_run: bool,
+    /// Compare the rebuilt prompt with this preview before launching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

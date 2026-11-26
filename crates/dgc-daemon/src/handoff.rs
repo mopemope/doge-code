@@ -16,6 +16,8 @@ use crate::workspace::{GIT_TIMEOUT, local_command};
 pub(crate) const SCAN_LIMIT: u32 = 1000;
 const PROMPT_BYTES: usize = 32 * 1024;
 const SECTION_BYTES: usize = 4 * 1024;
+const FIRST_INSTRUCTION_BYTES: usize = 16 * 1024;
+const FIRST_TRUNCATED: &str = "…(truncated; the full instruction is in the log below)";
 const OMITTED: &str = "…(earlier text omitted)\n";
 
 /// Chunks from one send are consecutive with the same behavior. A size
@@ -68,10 +70,15 @@ fn instructions(events: &[AgentEvent]) -> Vec<Instruction> {
 }
 
 fn last_answer(events: &[AgentEvent]) -> String {
-    let turn = events
-        .iter()
-        .rposition(|event| matches!(event.kind, EventKind::TurnStarted))
-        .map_or(events, |start| &events[start + 1..]);
+    let Some(turn) = events
+        .rsplit(|event| matches!(event.kind, EventKind::TurnStarted))
+        .find(|turn| {
+            !turn.iter().any(|event| matches!(event.kind, EventKind::RateLimited { .. } | EventKind::Error { .. }))
+                && turn.iter().any(|event| matches!(&event.kind, EventKind::AssistantText { text, .. } if !text.is_empty()))
+        })
+    else {
+        return String::new();
+    };
     let mut answer = String::new();
     let mut finished_block = false;
     for event in turn {
@@ -131,7 +138,7 @@ pub(crate) fn build_prompt(
     let title = strip_controls(&source.title);
     let fixed = format!(
         "You are continuing work started by another coding agent ({provider}) in this repository. \
-         Review the state below, then continue the task.\n\nTitle and first instruction\n{title}\n{initial_text}"
+         Review the state below, then continue the task.\n\nTitle and first instruction\n{title}\n"
     );
     let log = format!(
         "\n\nPrevious event log\nThe full log of the previous agent is at {}.\n",
@@ -148,6 +155,21 @@ pub(crate) fn build_prompt(
         + status_heading.len()
         + diff_heading.len();
     let budget = PROMPT_BYTES.checked_sub(fixed_len)?;
+    let (initial_text, initial_marker) =
+        if initial_text.len() <= FIRST_INSTRUCTION_BYTES.min(budget) {
+            (initial_text.as_str(), "")
+        } else if budget >= FIRST_TRUNCATED.len() {
+            (
+                head(
+                    &initial_text,
+                    FIRST_INSTRUCTION_BYTES.min(budget - FIRST_TRUNCATED.len()),
+                ),
+                FIRST_TRUNCATED,
+            )
+        } else {
+            ("", "")
+        };
+    let budget = budget - initial_text.len() - initial_marker.len();
 
     let recent = instructions(tail);
     let recent = recent[recent.len().saturating_sub(3)..]
@@ -177,26 +199,30 @@ pub(crate) fn build_prompt(
     let status = head(status, budget);
     let diff = head(diff, budget - status.len());
     Some(format!(
-        "{fixed}{recent_heading}{recent}{answer_heading}{answer}{status_heading}{status}{diff_heading}{diff}{log}"
+        "{fixed}{initial_text}{initial_marker}{recent_heading}{recent}{answer_heading}{answer}{status_heading}{status}{diff_heading}{diff}{log}"
     ))
 }
 
 pub(crate) async fn git_state(cwd: &Path) -> (String, String) {
     tokio::join!(
-        git_summary(cwd, &["status", "--short"]),
-        git_summary(cwd, &["diff", "--stat", "--no-ext-diff", "--no-textconv"]),
+        git_summary(cwd, "status", &["--short"]),
+        git_summary(
+            cwd,
+            "diff",
+            &["--stat", "--no-color", "--no-ext-diff", "--no-textconv"]
+        ),
     )
 }
 
-async fn git_summary(cwd: &Path, args: &[&str]) -> String {
-    match timeout(GIT_TIMEOUT, capture_git(cwd, args)).await {
+async fn git_summary(cwd: &Path, command: &str, args: &[&str]) -> String {
+    match timeout(GIT_TIMEOUT, capture_git(cwd, command, args)).await {
         Ok(Ok(summary)) => summary,
-        Ok(Err(error)) => format!("(git status unavailable: {error})"),
-        Err(_) => "(git status unavailable: timed out after 30 s)".to_owned(),
+        Ok(Err(error)) => format!("(git {command} unavailable: {error})"),
+        Err(_) => format!("(git {command} unavailable: timed out after 30 s)"),
     }
 }
 
-async fn capture_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+async fn capture_git(cwd: &Path, command: &str, args: &[&str]) -> Result<String, String> {
     let kind = |error: io::Error| error.kind().to_string();
     let mut child = local_command("git", cwd)
         .args([
@@ -204,7 +230,13 @@ async fn capture_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
             "--no-optional-locks",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            "color.ui=false",
+            // status has no --no-color option and its own setting overrides color.ui.
+            "-c",
+            "color.status=false",
         ])
+        .arg(command)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

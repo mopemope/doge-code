@@ -671,6 +671,7 @@ pub struct HandoffForm {
     pub generation: u64,
     pub submitting: bool,
     pub preview_failed: bool,
+    pub preview_changed: bool,
     pub error: Option<String>,
 }
 
@@ -690,6 +691,7 @@ impl HandoffForm {
             generation,
             submitting: false,
             preview_failed: false,
+            preview_changed: false,
             error: None,
         }
     }
@@ -765,6 +767,7 @@ impl HandoffForm {
                 .and_then(|profile| profile.model.clone()),
             mode: self.mode_value().map(str::to_owned),
             dry_run,
+            expected_prompt: if dry_run { None } else { self.preview.clone() },
         }
     }
 }

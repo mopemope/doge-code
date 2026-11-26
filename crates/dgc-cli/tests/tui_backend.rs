@@ -1102,4 +1102,18 @@ async fn backend_rate_limit_suggests_handoff_from_history() {
         screen.contains("rate limited (http_429) — H: hand off to codex"),
         "{screen}"
     );
+
+    fx.send(Effect::Call {
+        request: RequestTag::Handoff {
+            generation: 42,
+            preview: false,
+        },
+        method: "agent.handoff",
+        params: json!({"agent_id": agent, "dry_run": false, "expected_prompt": "stale preview"}),
+    })
+    .expect("submit stale preview");
+    wait_for(&mut rx, |event| {
+        (*event == AppEvent::HandoffChanged { generation: 42 }).then_some(())
+    })
+    .await;
 }

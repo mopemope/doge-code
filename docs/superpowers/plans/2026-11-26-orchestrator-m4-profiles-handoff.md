@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - 引き継ぎは自動で起動しない。必ずユーザーの明示操作（`dgc handoff` か TUI の確認）で起動する。
-- 引き継ぎ文は機械的に組み立てる（LLM を呼ばない）: 元エージェントのタイトルと最初の指示、直近のユーザー指示（最大 3 件）、最終応答の末尾（最大 4 KiB）、ワークスペースの `git status --short` と `git diff --stat`（それぞれ最大 4 KiB、30 秒タイムアウト）、元エージェントの `events.jsonl` の絶対パス。制御文字（`\n` と `\t` 以外）は除く。全体の上限 32 KiB。
+- 引き継ぎ文は LLM を呼ばず、元エージェントのタイトルと最初の指示、直近のユーザー指示（最大 3 件）、上限到達やエラーを含まない直近の回答の末尾（最大 4 KiB）、ワークスペースの `git status --short` と `git diff --stat`（各 4 KiB、各 30 秒まで）、`events.jsonl` の絶対パスから組み立てる。制御文字（`\n` と `\t` 以外）は除く。全体の上限は 32 KiB。最初の指示は UTF-8 の文字境界で先頭 16 KiB までとし、切った場合は `…(truncated; the full instruction is in the log below)` を付ける。前置き、タイトル、ログパスを保持し、全体の上限に合わせて回答、直近の指示、Git の出力の順に削る。
+- TUI の起動要求は表示した引き継ぎ文を `expected_prompt` で渡す。デーモンがログと Git から再生成した内容に差があれば `INVALID_STATE`（`handoff_changed`）を返し、TUI が改めてプレビューと確認を行う。CLI の起動要求は `expected_prompt` を省略する。
 - 引き継ぎ先のモードは、指定がなければ引き継ぎ先プロバイダの既定（自動承認なし）。自動承認系モードは明示指定のときだけで、CLI は従来どおり警告行を出す。
 - プロファイルは `config.toml` の `[profiles.<name>]`（`provider`、`model`、`mode`、`notes` すべて文字列、provider 以外は任意）。未知のキーは起動エラー（既存の `deny_unknown_fields`）。プロファイル名は `[A-Za-z0-9_-]{1,32}`。
 - 上限検知の条件（記録データとスキーマからの推定。実際の上限到達は未観測なので README に明記）:
@@ -73,7 +74,7 @@
 
 ### Task 4: 引き継ぎ（デーモン、CLI、TUI）
 
-**Files:** `crates/dgc-protocol/src/methods.rs`（`agent.handoff`: `AgentHandoffParams { agent_id, provider: Option<ProviderKind>, profile: Option<String>, model, mode, dry_run: bool }` → `{ prompt: String, agent: Option<Agent> }`）、`crates/dgc-daemon/src/handoff.rs`（新規: 引き継ぎ文の組み立て）、`crates/dgc-daemon/src/{handlers.rs,server.rs}`、`crates/dgc-cli/src/commands/handoff.rs`、`crates/dgc-cli/src/tui/{state.rs,update.rs,render.rs}`、README。
+**Files:** `crates/dgc-protocol/src/methods.rs`（`agent.handoff`: `AgentHandoffParams { agent_id, provider: Option<ProviderKind>, profile: Option<String>, model, mode, dry_run: bool, expected_prompt: Option<String> }` → `{ prompt: String, agent: Option<Agent> }`）、`crates/dgc-daemon/src/handoff.rs`（新規: 引き継ぎ文の組み立て）、`crates/dgc-daemon/src/{handlers.rs,server.rs}`、`crates/dgc-cli/src/commands/handoff.rs`、`crates/dgc-cli/src/tui/{state.rs,update.rs,render.rs}`、README。
 
 **Interfaces（Produces）:**
 - 引き継ぎ文は Global Constraints の内容と上限。新エージェントは同じワークスペース、`title = "handoff: <元タイトル>"`、`labels = {"handoff_from": <元 id>}`、`parent_id` は使わない（M6 のサブエージェント用）。`provider` も `profile` も無ければ「元と別のプロバイダ」を既定にする。`dry_run` は文だけ返して作成しない。

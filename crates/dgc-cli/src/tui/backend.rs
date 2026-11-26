@@ -32,12 +32,13 @@ use dgc_protocol::event::AgentEvent;
 use dgc_protocol::ids::AgentId;
 use dgc_protocol::methods::{
     AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_HANDOFF, AGENT_INTERRUPT, AGENT_LIST,
-    AGENT_RESUME, AGENT_SEND, AgentEventsParams, AgentListParams, MAX_EVENTS_LIMIT, NOTIFY_EVENT,
-    NOTIFY_LAGGED, PERMISSION_LIST, PERMISSION_RESPOND, PROJECT_LIST, PermissionListParams,
-    SubscribeParams, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST, WorkspaceListParams,
+    AGENT_RESUME, AGENT_SEND, AgentEventsParams, AgentListParams, HANDOFF_CHANGED,
+    MAX_EVENTS_LIMIT, NOTIFY_EVENT, NOTIFY_LAGGED, PERMISSION_LIST, PERMISSION_RESPOND,
+    PROJECT_LIST, PermissionListParams, SubscribeParams, WORKSPACE_ARCHIVE, WORKSPACE_CREATE,
+    WORKSPACE_LIST, WorkspaceListParams,
 };
 use dgc_protocol::model::{Agent, PendingPermission, Project, Workspace};
-use dgc_protocol::rpc::Notification;
+use dgc_protocol::rpc::{INVALID_STATE, Notification};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -398,11 +399,24 @@ impl Backend {
                     .await
                 }
                 Err(err) => {
-                    self.emit(AppEvent::RpcDone {
-                        request,
-                        result: Err(err.to_string()),
-                    })
-                    .await?;
+                    let event = match (&request, &err) {
+                        (
+                            RequestTag::Handoff {
+                                generation,
+                                preview: false,
+                            },
+                            CallError::Client(ClientError::Rpc(error)),
+                        ) if error.code == INVALID_STATE && error.message == HANDOFF_CHANGED => {
+                            AppEvent::HandoffChanged {
+                                generation: *generation,
+                            }
+                        }
+                        _ => AppEvent::RpcDone {
+                            request,
+                            result: Err(err.to_string()),
+                        },
+                    };
+                    self.emit(event).await?;
                     lost(err).map_or(Ok(()), Err)
                 }
             },

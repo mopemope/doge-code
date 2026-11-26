@@ -1748,7 +1748,7 @@ async fn handoff_prompt_is_bounded_and_strips_control_chars() {
     let initial = format!(
         "FIRST\u{7}\t\n{}{}END_FIRST",
         "\u{1}".repeat(140_000),
-        "初".repeat(6500)
+        "初".repeat(4800)
     );
     let mut events: Vec<_> = dgc_protocol::chunk_text(&initial)
         .into_iter()
@@ -1765,7 +1765,7 @@ async fn handoff_prompt_is_bounded_and_strips_control_chars() {
     let prompt = handoff_preview(&h, &id).await;
     assert!(prompt.len() <= 32 * 1024, "{}", prompt.len());
     assert!(prompt.contains("FIRST\t\n"));
-    assert!(prompt.contains(&format!("FIRST\t\n{}END_FIRST", "初".repeat(6500))));
+    assert!(prompt.contains(&format!("FIRST\t\n{}END_FIRST", "初".repeat(4800))));
     assert_eq!(prompt.matches("END_FIRST").count(), 1);
     assert!(prompt.contains("…(earlier text omitted)"));
     assert!(prompt.contains("END_ANSWER"));
@@ -1935,5 +1935,264 @@ async fn handoff_requires_active_source_and_workspace() {
             .expect_err("archived source")
             .code,
         dgc_protocol::rpc::INVALID_STATE
+    );
+}
+
+#[tokio::test]
+async fn handoff_refuses_changed_preview_without_creating_an_agent() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let preview = handoff_preview(&h, &id).await;
+    std::fs::write(h.workspace.path.join("new.txt"), "").expect("change workspace");
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": id, "dry_run": false, "expected_prompt": preview
+        }),
+    )
+    .await
+    .expect_err("changed preview");
+    assert_eq!(result.code, dgc_protocol::rpc::INVALID_STATE);
+    assert_eq!(result.message, "handoff_changed");
+    assert_eq!(h.manager.list().expect("agents").len(), 1);
+}
+
+#[tokio::test]
+async fn handoff_creates_with_the_exact_matching_preview() {
+    let mut h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let preview = handoff_preview(&h, &id).await;
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": id, "dry_run": false, "expected_prompt": preview
+        }),
+    )
+    .await
+    .expect("matching preview");
+    let mut session = h.next_session().await;
+    assert_eq!(result["prompt"], preview);
+    assert_eq!(session.next_call().await, Call::SendUser(preview));
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_keeps_last_answer_before_a_failed_or_limited_turn() {
+    let h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(
+        &h,
+        ProviderKind::Claude,
+        vec![
+            instruction("initial"),
+            EventKind::TurnStarted,
+            answer("previous ", false),
+            answer("real answer", true),
+            EventKind::TurnCompleted { usage: None },
+            instruction("next"),
+            EventKind::TurnStarted,
+            answer("old adapter 429 plan text", true),
+            EventKind::RateLimited {
+                detail: serde_json::json!({"reason": "http_429"}),
+            },
+            EventKind::TurnCompleted { usage: None },
+            instruction("retry"),
+            EventKind::TurnStarted,
+            answer("partial failed answer", true),
+            EventKind::Error {
+                message: "synthetic plan error text".to_owned(),
+            },
+            EventKind::TurnCompleted { usage: None },
+            instruction("retry again"),
+            EventKind::TurnStarted,
+            EventKind::RateLimited {
+                detail: serde_json::json!({"reason": "http_429"}),
+            },
+        ],
+    );
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(
+        prompt.contains("Last assistant answer\nprevious real answer"),
+        "{prompt}"
+    );
+    for excluded in [
+        "old adapter 429 plan text",
+        "partial failed answer",
+        "synthetic plan error text",
+    ] {
+        assert!(!prompt.contains(excluded), "{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn handoff_truncates_a_100_kib_first_instruction() {
+    let h = Harness::new(DEFAULT);
+    // Two ASCII characters before the multibyte text make the 16 KiB cutoff
+    // fall inside a character.
+    let initial = format!("ss{} unrepeated suffix", "界".repeat(100 * 1024 / 3));
+    let id = stored_handoff_source(
+        &h,
+        ProviderKind::Claude,
+        vec![
+            instruction(initial),
+            EventKind::TurnStarted,
+            answer("answer", true),
+        ],
+    );
+    let prompt = handoff_preview(&h, &id).await;
+    let prefix = format!(
+        "ss{}…(truncated; the full instruction is in the log below)",
+        "界".repeat((16 * 1024 - 2) / 3)
+    );
+    assert!(
+        prompt.contains(&prefix),
+        "first instruction was not clipped at 16 KiB"
+    );
+    assert!(!prompt.contains("unrepeated suffix"));
+    assert!(prompt.contains("Last assistant answer\nanswer"));
+    assert!(prompt.len() <= 32 * 1024);
+}
+
+#[tokio::test]
+async fn handoff_git_output_ignores_forced_color() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    for key in ["color.ui", "color.status", "color.diff"] {
+        git_in_workspace(&h, &["config", key, "always"]);
+    }
+    std::fs::write(h.workspace.path.join("a.txt"), "before\n").expect("tracked file");
+    git_in_workspace(&h, &["add", "a.txt"]);
+    std::fs::write(h.workspace.path.join("a.txt"), "after\n").expect("changed file");
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("initial")]);
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(prompt.contains("AM a.txt"), "{prompt}");
+    assert!(prompt.contains("a.txt | 2 +-"), "{prompt}");
+    assert!(
+        !prompt.contains("[31m") && !prompt.contains("[32m") && !prompt.contains("[m"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn handoff_git_failures_name_the_command() {
+    let h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("initial")]);
+    std::fs::remove_dir(&h.workspace.path).expect("remove workspace directory");
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(
+        prompt.contains("git status --short\n(git status unavailable:"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("git diff --stat\n(git diff unavailable:"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn handoff_reading_a_cold_log_does_not_block_unrelated_appends() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    let h = Harness::new(DEFAULT);
+    let workspace_id = h.workspace.id.clone();
+    let source = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("initial")]);
+    let fifo = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(source.as_str())
+        .join("events.1.jsonl");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+
+    let manager = Arc::new(h.manager);
+    let handoff_manager = Arc::clone(&manager);
+    let (opened_signal, opened) = tokio::sync::oneshot::channel();
+    let (ready, reader_is_waiting) = channel();
+    let (release, released) = channel();
+    let (heartbeat, tick) = channel();
+    let writer = std::thread::spawn(move || {
+        let deadline = Instant::now() + WAIT;
+        let _writer = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo)
+            {
+                Ok(writer) => break writer,
+                Err(err)
+                    if err.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("open FIFO for handoff: {err}"),
+            }
+        };
+        std::fs::remove_file(&fifo).expect("unlink FIFO after reader opened it");
+        opened_signal.send(()).expect("notify handoff runtime");
+        ready.send(()).expect("notify test");
+        released
+            .recv_timeout(WAIT)
+            .expect("release the cold reader");
+    });
+    let preview = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                tokio::spawn(async move {
+                    opened.await.expect("reader is blocked in file I/O");
+                    heartbeat.send(()).expect("notify test");
+                });
+                dgc_daemon::handlers::agent_handoff(
+                    &handoff_manager,
+                    serde_json::json!({
+                        "agent_id": source, "dry_run": true
+                    }),
+                )
+                .await
+            })
+    });
+    reader_is_waiting
+        .recv_timeout(WAIT)
+        .expect("cold reader opened the FIFO");
+    let other_manager = Arc::clone(&manager);
+    let (appended, mut append_result) = tokio::sync::oneshot::channel();
+    let other_writer = tokio::task::spawn_blocking(move || {
+        let result =
+            tokio::runtime::Handle::current().block_on(other_manager.create(AgentCreateParams {
+                workspace_id,
+                title: "other agent".to_owned(),
+                provider: Some(ProviderKind::Codex),
+                profile: None,
+                mode: None,
+                model: None,
+                initial_prompt: "unrelated append".to_owned(),
+                labels: BTreeMap::new(),
+                parent_id: None,
+            }));
+        appended.send(result).expect("report creation");
+    });
+    let did_append = timeout(Duration::from_millis(500), &mut append_result).await;
+    let runtime_responsive = tick.recv_timeout(Duration::from_millis(500)).is_ok();
+    release.send(()).expect("release writer");
+    writer.join().expect("writer thread");
+    preview.join().expect("preview thread").expect("preview");
+    other_writer.await.expect("other writer");
+    manager.shutdown_all(WAIT).await;
+    let appended = matches!(did_append, Ok(Ok(Ok(_))));
+    assert!(
+        runtime_responsive && appended,
+        "cold read blocked runtime: {}, blocked another append: {}",
+        !runtime_responsive,
+        !appended
     );
 }
