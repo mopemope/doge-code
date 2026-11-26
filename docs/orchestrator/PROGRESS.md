@@ -464,6 +464,16 @@
   (7) テスト構成: dgc-cli はライブラリを持たないので `tests/tui_backend.rs` は `#[path]` で `src/output.rs` と `src/tui/mod.rs` を取り込む
   （そのため tui/output の単体テストがこのテストバイナリでも走る）。偽プロバイダのラッパー生成（`fake_provider`/`scenario`/`write_wrapper`）は
   `tests/common` に移した。テストの `exe` は `DGC_STATE_ROOT` を固定する `dgc-next` のラッパーで、spawn されたデーモンも一時ディレクトリに置く。
+- 2026-11-26 (M2 Task 4 レビュー修正、コントローラ裁定): (a) Snapshot が読めない（エラー応答、結果がデコードできない。例: 版の違う古いデーモンが
+  `permission.list` を知らない）ときは接続断として扱う: `Disconnected{reason: "cannot load the snapshot: …"}`（update がエスケープ）を出して
+  1 秒ごとに再接続・再読込する。`RequestTag::LoadSnapshot` を足してステータスのエラーに出す案は採らなかった（エラー表示は 10 Tick で消え、
+  空のツリーが「Connected」のまま残るため）。直後の再接続で `Connected` が一瞬出るが、同じイベントのまとまりで処理されるので表示は理由付きの切断のまま。
+  (b) 端末サイズが変わる `Resize`（同じサイズなら何もしない）で権限ダイアログを再び 3 Tick 無効にする（`AppState::rearm_permission`）。
+  大きくなった直後は、まだ描画していない配置で `seen_end` が真になり得て、リサイズ前に打った `a` が通ってしまうため。
+  (c) RPC 呼び出し（`subscribe` を含む）は 1 回ごとに 15 s（`backend::CALL_TIMEOUT`）で打ち切る。超えたら待っていた要求は `RpcDone Err`
+  （`the daemon did not answer within 15 s`）になり、接続断（同じ理由の `Disconnected`）→ 再接続。遅れた応答が次の要求の応答と取り違えられないよう、
+  接続は使い続けない。テスト用に `Backend::start_with_timeout(paths, exe, timeout)`。dgc-cli の dev-dependencies に tokio の `net`/`io-util`
+  feature を追加（テストの偽デーモン用。新 crate なし、Cargo.lock 変化なし）。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -702,12 +712,24 @@
     | コマンド | 結果 |
     |---|---|
     | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（104 passed） |
-    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（117 passed = 新規 7 + 取り込んだ単体テスト。4 回連続 PASS、デーモン・偽プロバイダの残存なし） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（117 passed = 新規 7 + 取り込んだ単体テスト。5 回連続 PASS、デーモン・偽プロバイダの残存なし） |
     | `cargo test --locked -p dgc-cli -p dgc-client` | PASS（dgc-next 110、agent_cli 12、daemon_cli 7、tui_backend 117、version 1、workspace_cli 3、dgc-client 13） |
     | `cargo fmt --all --check` | 差分なし |
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
     | `bash scripts/verify.sh msrv` | PASS（dgc-client の Cargo.toml を変更したため） |
     | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+- 2026-11-26 M2 Task 4 レビュー修正（固定ツールチェーン 1.99.0）。新規テストを先に書き RED を確認: `growing_the_terminal_rearms_the_permission_dialog`
+  が FAIL（リサイズ前に打った `a` が `permission.respond` を送る）。`backend_reports_a_snapshot_it_cannot_load` と
+  `backend_gives_up_on_a_daemon_that_does_not_answer` は `start_with_timeout` 未実装でコンパイルエラー、タイムアウトを無視するスタブでは
+  どちらも 30 s 待ってもイベントが来ず FAIL。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（105 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（120 passed、6 回連続、残存プロセスなし） |
+    | `cargo test --locked -p dgc-cli` / `-p dgc-client` | PASS |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（dgc-cli の Cargo.toml を変更したため） |
 ## 保留中の小さな改善
 
 - M1 Task 14 受け入れ由来（すべて小さく、受け入れは通った。M2 前か M2 の最初に直す）:

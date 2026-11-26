@@ -8,8 +8,17 @@
 //! `Connection(Disconnected)` once, retries every second and reports
 //! `Connection(Connected)` when both are back; `update` reloads then.
 //!
+//! Every RPC call (and `subscribe`) is bounded by a timeout (15 s): a
+//! daemon that stops answering counts as a lost connection, and the request
+//! waiting on it fails. A snapshot that cannot be loaded (an error answer or
+//! a result that does not decode, e.g. a daemon of another version) also
+//! counts as lost, so the status line shows why and the backend retries.
+//!
 //! Only the first connection may start the daemon: after a `daemon stop`
 //! the TUI waits for someone to start it again instead of undoing the stop.
+
+use std::fmt;
+use std::future::Future;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,7 +37,7 @@ use dgc_protocol::rpc::Notification;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 
@@ -37,6 +46,8 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Events waiting for the UI; a full channel holds the subscription back
 /// until the daemon reports it lagged.
 const EVENT_CAPACITY: usize = 256;
+/// Longest wait for the answer to one RPC call.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Answer to requests made while nothing is connected.
 const NOT_CONNECTED: &str = "not connected to the daemon";
 
@@ -47,6 +58,39 @@ pub struct Backend {
     events: mpsc::Sender<AppEvent>,
     /// The next connection attempt may start the daemon (the first only).
     may_spawn: bool,
+    call_timeout: Duration,
+}
+
+/// A failed RPC call.
+enum CallError {
+    Client(ClientError),
+    /// No answer within the call timeout.
+    Timeout(Duration),
+}
+
+impl fmt::Display for CallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Client(err) => write!(f, "{err}"),
+            Self::Timeout(limit) => write!(
+                f,
+                "the daemon did not answer within {} s",
+                limit.as_secs_f64()
+            ),
+        }
+    }
+}
+
+impl From<ClientError> for CallError {
+    fn from(err: ClientError) -> Self {
+        Self::Client(err)
+    }
+}
+
+impl From<serde_json::Error> for CallError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Client(ClientError::Json(err))
+    }
 }
 
 /// Why the backend stops serving a connection.
@@ -90,6 +134,16 @@ impl Backend {
         paths: DaemonPaths,
         exe: PathBuf,
     ) -> (mpsc::UnboundedSender<Effect>, mpsc::Receiver<AppEvent>) {
+        Self::start_with_timeout(paths, exe, CALL_TIMEOUT)
+    }
+
+    /// [`Backend::start`] with another limit than [`CALL_TIMEOUT`] for each
+    /// RPC call.
+    pub fn start_with_timeout(
+        paths: DaemonPaths,
+        exe: PathBuf,
+        call_timeout: Duration,
+    ) -> (mpsc::UnboundedSender<Effect>, mpsc::Receiver<AppEvent>) {
         let (effects_tx, effects) = mpsc::unbounded_channel();
         let (events, events_rx) = mpsc::channel(EVENT_CAPACITY);
         let backend = Self {
@@ -98,6 +152,7 @@ impl Backend {
             effects,
             events,
             may_spawn: true,
+            call_timeout,
         };
         tokio::spawn(backend.run());
         (effects_tx, events_rx)
@@ -140,7 +195,7 @@ impl Backend {
         }
     }
 
-    async fn try_connect(&mut self) -> Result<Connection, ClientError> {
+    async fn try_connect(&mut self) -> Result<Connection, CallError> {
         let rpc = if std::mem::take(&mut self.may_spawn) {
             Client::connect_or_spawn(&self.paths, &self.exe).await?
         } else {
@@ -153,10 +208,24 @@ impl Backend {
     }
 
     /// A new connection subscribed to every agent, forwarded by a task.
-    async fn subscribe(&self) -> Result<JoinHandle<SubscriptionEnd>, ClientError> {
+    async fn subscribe(&self) -> Result<JoinHandle<SubscriptionEnd>, CallError> {
         let client = Client::connect(&self.paths).await?;
-        let notifications = client.subscribe(SubscribeParams::default()).await?;
+        let notifications = self
+            .bounded(client.subscribe(SubscribeParams::default()))
+            .await?;
         Ok(tokio::spawn(forward(notifications, self.events.clone())))
+    }
+
+    /// `call`, failed with [`CallError::Timeout`] when the daemon takes
+    /// longer than the call timeout.
+    async fn bounded<T>(
+        &self,
+        call: impl Future<Output = Result<T, ClientError>>,
+    ) -> Result<T, CallError> {
+        match timeout(self.call_timeout, call).await {
+            Ok(result) => Ok(result?),
+            Err(_) => Err(CallError::Timeout(self.call_timeout)),
+        }
     }
 
     /// Wait `duration` without a connection, failing requests at once.
@@ -220,9 +289,10 @@ impl Backend {
 
     async fn execute(&self, connection: &mut Connection, effect: Effect) -> Result<(), Stop> {
         match effect {
-            Effect::LoadSnapshot => match snapshot(&mut connection.rpc).await {
+            // Without a snapshot the tree would be empty without a word.
+            Effect::LoadSnapshot => match self.snapshot(&mut connection.rpc).await {
                 Ok(snapshot) => self.emit(snapshot).await,
-                Err(err) => lost(err).map_or(Ok(()), Err),
+                Err(err) => Err(Stop::Lost(format!("cannot load the snapshot: {err}"))),
             },
             Effect::LoadHistory {
                 agent_id,
@@ -234,7 +304,7 @@ impl Backend {
                     since_seq,
                     limit: MAX_EVENTS_LIMIT,
                 };
-                match events_page(&mut connection.rpc, &params).await {
+                match self.events_page(&mut connection.rpc, &params).await {
                     // Pages are cut by size too: only an empty one is the end.
                     Ok(events) => {
                         self.emit(AppEvent::History {
@@ -256,7 +326,10 @@ impl Backend {
                 request,
                 method,
                 params,
-            } => match connection.rpc.call::<_, Value>(method, &params).await {
+            } => match self
+                .bounded(connection.rpc.call::<_, Value>(method, &params))
+                .await
+            {
                 Ok(value) => {
                     self.emit(AppEvent::RpcDone {
                         request,
@@ -326,10 +399,11 @@ fn disconnected(cause: &str) -> AppEvent {
 }
 
 /// `Some` when `err` means the connection is unusable; an error answer
-/// or an undecodable result leaves it working.
-fn lost(err: ClientError) -> Option<Stop> {
+/// or an undecodable result leaves it working. A timeout does not: a late
+/// answer would be taken for the next request's.
+fn lost(err: CallError) -> Option<Stop> {
     match err {
-        ClientError::Rpc(_) | ClientError::Json(_) => None,
+        CallError::Client(ClientError::Rpc(_) | ClientError::Json(_)) => None,
         err => Some(Stop::Lost(err.to_string())),
     }
 }
@@ -371,40 +445,39 @@ async fn forward(
     SubscriptionEnd::Closed
 }
 
-/// Everything the tree shows, from four list calls.
-async fn snapshot(client: &mut Client) -> Result<AppEvent, ClientError> {
-    let mut projects: Value = client.call(PROJECT_LIST, &json!({})).await?;
-    let mut workspaces: Value = client
-        .call(WORKSPACE_LIST, &WorkspaceListParams::default())
-        .await?;
-    let mut agents: Value = client
-        .call(
-            AGENT_LIST,
-            &AgentListParams {
-                include_archived: false,
-            },
-        )
-        .await?;
-    let mut permissions: Value = client
-        .call(PERMISSION_LIST, &PermissionListParams::default())
-        .await?;
-    let projects: Vec<Project> = serde_json::from_value(projects["projects"].take())?;
-    let workspaces: Vec<Workspace> = serde_json::from_value(workspaces["workspaces"].take())?;
-    let agents: Vec<Agent> = serde_json::from_value(agents["agents"].take())?;
-    let permissions: Vec<PendingPermission> =
-        serde_json::from_value(permissions["permissions"].take())?;
-    Ok(AppEvent::Snapshot {
-        projects,
-        workspaces,
-        agents,
-        permissions,
-    })
-}
+impl Backend {
+    /// Everything the tree shows, from four list calls.
+    async fn snapshot(&self, client: &mut Client) -> Result<AppEvent, CallError> {
+        let mut projects: Value = self.bounded(client.call(PROJECT_LIST, &json!({}))).await?;
+        let mut workspaces: Value = self
+            .bounded(client.call(WORKSPACE_LIST, &WorkspaceListParams::default()))
+            .await?;
+        let list = AgentListParams {
+            include_archived: false,
+        };
+        let mut agents: Value = self.bounded(client.call(AGENT_LIST, &list)).await?;
+        let mut permissions: Value = self
+            .bounded(client.call(PERMISSION_LIST, &PermissionListParams::default()))
+            .await?;
+        let projects: Vec<Project> = serde_json::from_value(projects["projects"].take())?;
+        let workspaces: Vec<Workspace> = serde_json::from_value(workspaces["workspaces"].take())?;
+        let agents: Vec<Agent> = serde_json::from_value(agents["agents"].take())?;
+        let permissions: Vec<PendingPermission> =
+            serde_json::from_value(permissions["permissions"].take())?;
+        Ok(AppEvent::Snapshot {
+            projects,
+            workspaces,
+            agents,
+            permissions,
+        })
+    }
 
-async fn events_page(
-    client: &mut Client,
-    params: &AgentEventsParams,
-) -> Result<Vec<AgentEvent>, ClientError> {
-    let mut result: Value = client.call(AGENT_EVENTS, params).await?;
-    Ok(serde_json::from_value(result["events"].take())?)
+    async fn events_page(
+        &self,
+        client: &mut Client,
+        params: &AgentEventsParams,
+    ) -> Result<Vec<AgentEvent>, CallError> {
+        let mut result: Value = self.bounded(client.call(AGENT_EVENTS, params)).await?;
+        Ok(serde_json::from_value(result["events"].take())?)
+    }
 }

@@ -1414,7 +1414,52 @@ mod tests {
         resize(&mut f.state, 120, 60);
         let right = squash_from(&draw(&f.state, 120, 60), 36);
         assert!(right.contains("row29"), "everything fits: {right}");
+        assert!(
+            !responds(&press(&mut f.state, 'a')),
+            "a resize re-arms the dialog"
+        );
+        for _ in 0..PERMISSION_ARM_TICKS {
+            update(&mut f.state, AppEvent::Tick);
+        }
         assert!(responds(&press(&mut f.state, 'a')));
+    }
+
+    #[test]
+    fn growing_the_terminal_rearms_the_permission_dialog() {
+        // Read or not, rows shown only at a size not yet drawn must not let
+        // a key typed before the resize answer.
+        for read in [false, true] {
+            let mut f = Fx::new();
+            open_permission(&mut f, 120, 20, &numbered_rows(30));
+            if read {
+                read_to_the_end(&mut f.state);
+            }
+            let (effects, mut sent) = tokio::sync::mpsc::unbounded_channel();
+            let terminal = ratatui::Terminal::new(TestBackend::new(120, 20)).expect("terminal");
+            let mut runtime = crate::tui::Runtime::new(terminal, effects, update);
+            *runtime.state_mut() = std::mem::take(&mut f.state);
+            runtime.terminal_mut().backend_mut().resize(120, 60);
+            runtime
+                .handle(AppEvent::Key(KeyInput::char('a')))
+                .expect("handle");
+            let mut answered = Vec::new();
+            while let Ok(effect) = sent.try_recv() {
+                answered.push(effect);
+            }
+            assert!(!responds(&answered), "read={read}: {answered:?}");
+            assert_eq!(runtime.state().size, (120, 60));
+            for _ in 0..PERMISSION_ARM_TICKS {
+                runtime.handle(AppEvent::Tick).expect("tick");
+            }
+            runtime
+                .handle(AppEvent::Key(KeyInput::char('a')))
+                .expect("handle");
+            let mut answered = Vec::new();
+            while let Ok(effect) = sent.try_recv() {
+                answered.push(effect);
+            }
+            assert!(responds(&answered), "read={read}: armed again {answered:?}");
+        }
     }
 
     #[test]

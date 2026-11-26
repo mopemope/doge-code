@@ -24,3 +24,4 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 [dev-dependencies]
 libc.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }

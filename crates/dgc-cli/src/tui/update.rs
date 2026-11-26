@@ -63,9 +63,14 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             catch_up_selected(state, &mut fx);
         }
         AppEvent::Resize { width, height } => {
-            state.size = (width, height);
-            // The summary wraps differently now: read it again.
-            state.sync_permission_view(true);
+            if state.size != (width, height) {
+                state.size = (width, height);
+                // The summary wraps differently now: read it again. Rows
+                // can now count as seen before this size was ever drawn,
+                // so a key typed before the resize must not answer.
+                state.sync_permission_view(true);
+                state.rearm_permission();
+            }
         }
         AppEvent::Tick => on_tick(state),
     }

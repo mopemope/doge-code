@@ -863,6 +863,16 @@ impl AppState {
         *seen_end = layout.visible_rows > 0 && *seen_rows >= layout.rows.len();
     }
 
+    /// Ignore a/s/d again for [`PERMISSION_ARM_TICKS`] ticks.
+    pub(super) fn rearm_permission(&mut self) {
+        if let Some(Dialog::Permission {
+            ticks_until_armed, ..
+        }) = &mut self.dialog
+        {
+            *ticks_until_armed = PERMISSION_ARM_TICKS;
+        }
+    }
+
     /// Scroll the permission dialog's summary.
     pub(super) fn scroll_permission(&mut self, motion: ScrollMotion) {
         let size = self.size;

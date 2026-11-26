@@ -234,6 +234,11 @@ where
     }
 
     #[cfg(test)]
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.state
+    }
+
+    #[cfg(test)]
     pub fn terminal(&self) -> &Terminal<B> {
         &self.terminal
     }

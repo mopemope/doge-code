@@ -23,13 +23,22 @@ use std::time::{Duration, Instant};
 
 use common::{CLAUDE_VERSION, TestEnv, assert_success, scenario, stdout, write_wrapper};
 use dgc_client::Client;
+use dgc_daemon::paths::DaemonPaths;
+use dgc_protocol::PROTOCOL_VERSION;
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::AgentId;
-use dgc_protocol::methods::{AGENT_SEND, MAX_EVENTS_LIMIT};
+use dgc_protocol::ids::PermissionId;
+use dgc_protocol::methods::{
+    AGENT_LIST, AGENT_SEND, HELLO, MAX_EVENTS_LIMIT, PERMISSION_LIST, PERMISSION_RESPOND,
+    PROJECT_LIST, SUBSCRIBE, WORKSPACE_LIST,
+};
 use dgc_protocol::model::AgentState;
+use dgc_protocol::rpc::{METHOD_NOT_FOUND, Request, Response, RpcError};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 use tui::backend::Backend;
@@ -644,4 +653,131 @@ fn tui_needs_a_terminal_and_has_no_json_mode() {
     }
     assert!(env.lock_pid().is_none(), "no daemon was started");
     assert!(!env.paths.socket.exists());
+}
+
+// ---- misbehaving daemons ----
+
+/// What a stand-in daemon answers to a method: `None` never answers.
+type Answer = fn(&str) -> Option<Result<Value, RpcError>>;
+
+/// A daemon stand-in on `paths.socket` that completes `hello` and
+/// `subscribe` on every connection and answers the rest with `answer`.
+fn fake_daemon(paths: &DaemonPaths, answer: Answer) -> tokio::task::JoinHandle<()> {
+    fs::create_dir_all(paths.socket.parent().expect("socket dir")).expect("mkdir");
+    let listener = UnixListener::bind(&paths.socket).expect("bind");
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let request: Request = serde_json::from_str(&line).expect("request");
+                    let reply = match request.method.as_str() {
+                        HELLO => Some(Ok(
+                            json!({"protocol_version": PROTOCOL_VERSION, "daemon_pid": 1}),
+                        )),
+                        SUBSCRIBE => Some(Ok(json!({}))),
+                        method => answer(method),
+                    };
+                    let response = match reply {
+                        Some(Ok(value)) => Response::ok(request.id, value),
+                        Some(Err(error)) => Response::err(request.id, error),
+                        None => continue,
+                    };
+                    let mut text = serde_json::to_string(&response).expect("encode");
+                    text.push('\n');
+                    if write.write_all(text.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    })
+}
+
+/// Never used: the stand-in daemon is already listening.
+fn no_exe() -> PathBuf {
+    PathBuf::from("/nonexistent/dgc-next")
+}
+
+#[tokio::test]
+async fn backend_reports_a_snapshot_it_cannot_load() {
+    // An older daemon that does not know `permission.list`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    let server = fake_daemon(&paths, |method| match method {
+        PROJECT_LIST => Some(Ok(json!({"projects": []}))),
+        WORKSPACE_LIST => Some(Ok(json!({"workspaces": []}))),
+        AGENT_LIST => Some(Ok(json!({"agents": []}))),
+        PERMISSION_LIST => Some(Err(RpcError::new(
+            METHOD_NOT_FOUND,
+            "unknown method permission.list",
+        ))),
+        _ => Some(Ok(json!({}))),
+    });
+    let (fx, mut rx) = Backend::start(paths, no_exe());
+    let mut state = AppState::default();
+    let connected = next_event(&mut rx).await;
+    assert_eq!(connected, AppEvent::Connection(ConnectionState::Connected));
+    for effect in tui::update::update(&mut state, connected) {
+        fx.send(effect).expect("backend alive");
+    }
+    let event = next_event(&mut rx).await;
+    let AppEvent::Connection(ConnectionState::Disconnected { reason }) = &event else {
+        panic!("the failure must reach the UI, got {event:?}");
+    };
+    assert!(reason.contains("cannot load the snapshot"), "{reason}");
+    assert!(reason.contains("permission.list"), "{reason}");
+    tui::update::update(&mut state, event.clone());
+    assert!(
+        matches!(
+            &state.status.connection,
+            ConnectionState::Disconnected { reason } if reason.contains("cannot load the snapshot")
+        ),
+        "{:?}",
+        state.status.connection
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn backend_gives_up_on_a_daemon_that_does_not_answer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    let server = fake_daemon(&paths, |_| None);
+    let (fx, mut rx) = Backend::start_with_timeout(paths, no_exe(), Duration::from_millis(300));
+    assert_eq!(
+        next_event(&mut rx).await,
+        AppEvent::Connection(ConnectionState::Connected)
+    );
+    let request = RequestTag::Respond {
+        permission_id: PermissionId::generate(),
+    };
+    fx.send(Effect::Call {
+        request: request.clone(),
+        method: PERMISSION_RESPOND,
+        params: json!({}),
+    })
+    .expect("backend alive");
+    let started = Instant::now();
+    let answer = next_event(&mut rx).await;
+    let AppEvent::RpcDone {
+        request: answered,
+        result: Err(message),
+    } = &answer
+    else {
+        panic!("the call must fail, got {answer:?}");
+    };
+    assert_eq!(*answered, request);
+    assert!(message.contains("did not answer"), "{message}");
+    let event = next_event(&mut rx).await;
+    let AppEvent::Connection(ConnectionState::Disconnected { reason }) = &event else {
+        panic!("expected Disconnected, got {event:?}");
+    };
+    assert!(reason.contains("did not answer"), "{reason}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    server.abort();
 }
