@@ -1,0 +1,284 @@
+dgc TUI screen record (M4 acceptance, 2026-11-26)
+These captures use synthetic scenarios and fake providers in a throwaway repository.
+Captured with `tmux capture-pane -p` at 136x36, with scratch paths under /tmp/dgcm4.
+The plain-text capture omits terminal colors and highlights.
+
+====================================================================================================
+1. New agent form with the normal profile and its inherited settings
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ stream ──────────────────────────────────────────────────────────────────────────────────────┐
+│▾ synthetic-project                   ││select an agent (↑↓, Enter) to see its stream                                                 │
+│  ▾ ws local                          ││                                                                                              │
+│    ○ claude CLI normal profile       ││                                                                                              │
+│    ○ claude CLI auto profile [auto]  ││                                                                                              │
+│    ○ claude Claude synthetic limit   ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││           ┌ New agent ───────────────────────────────────────────────────────────┐           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │  profile  normal  (Tab/Shift-Tab)                                    │           │
+│                                      ││           │  provider claude  (Tab to switch)                                    │           │
+│                                      ││           │  model    haiku                                                      │           │
+│                                      ││           │  mode     plan                                                       │           │
+│                                      ││           │  title    TUI normal profile                                         │           │
+│                                      ││           │> prompt   Check the normal profile                                   │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │Enter create  Esc cancel  ↑↓ field                                    │           │
+│                                      ││           └──────────────────────────────────────────────────────────────────────┘           │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      │└──────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                      │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────────────────┐
+│                                      ││> press i to type to the selected agent                                                       │
+└──────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 3 agents · 0 waiting permission
+
+====================================================================================================
+2. New agent form with the auto-approve profile and its warning
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ agt_…d170ab claude idle TUI normal profile ──────────────────────────────────────────────────┐
+│▾ synthetic-project                   ││[1] state: starting                                                                           │
+│  ▾ ws local                          ││[2] user (queue): Check the normal profile                                                    │
+│    ○ claude CLI normal profile       ││[3] turn started                                                                              │
+│    ○ claude CLI auto profile [auto]  ││[4] state: running                                                                            │
+│    ○ claude Claude synthetic limit   ││[5] assistant: pong                                                                           │
+│    ○ claude TUI normal profile       ││[6] turn completed                                                                            │
+│                                      ││[7] state: idle                                                                               │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││           ┌ New agent ───────────────────────────────────────────────────────────┐           │
+│                                      ││           │WARNING: auto-approve lets the agent run commands and edit files      │           │
+│                                      ││           │without asking you.                                                   │           │
+│                                      ││           │  profile  quick-edit  (Tab/Shift-Tab)                                │           │
+│                                      ││           │  provider claude  (Tab to switch)                                    │           │
+│                                      ││           │  model    haiku                                                      │           │
+│                                      ││           │  mode     bypassPermissions                                          │           │
+│                                      ││           │  title    TUI auto profile                                           │           │
+│                                      ││           │> prompt   Check the automatic approval profile                       │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │Enter create  Esc cancel  ↑↓ field                                    │           │
+│                                      ││           └──────────────────────────────────────────────────────────────────────┘           │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      │└──────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                      │┌ send: queue│steer│interrupt → agt_…d170ab TUI normal profile ────────────────────────────────┐
+│                                      ││> press i to type to the selected agent                                                       │
+└──────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 4 agents · 0 waiting permission
+
+====================================================================================================
+3. Agents from both CLI profiles and both TUI profiles, with [auto] on the auto-approve rows
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ agt_…0d1456 claude idle TUI auto profile ────────────────────────────────────────────────────┐
+│▾ synthetic-project                   ││[1] state: starting                                                                           │
+│  ▾ ws local                          ││[2] user (queue): Check the automatic approval profile                                        │
+│    ○ claude CLI normal profile       ││[3] turn started                                                                              │
+│    ○ claude CLI auto profile [auto]  ││[4] state: running                                                                            │
+│    ○ claude Claude synthetic limit   ││[5] assistant: pong                                                                           │
+│    ○ claude TUI normal profile       ││[6] turn completed                                                                            │
+│    ○ claude TUI auto profile [auto]  ││[7] state: idle                                                                               │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      │└──────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                      │┌ send: queue│steer│interrupt → agt_…0d1456 TUI auto profile ──────────────────────────────────┐
+│                                      ││> press i to type to the selected agent                                                       │
+└──────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 5 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H handoff  x stop  r re
+
+====================================================================================================
+4. Claude rate-limit marker and handoff hint after selecting the agent and loading its history
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ agt_…e5a1d6 claude idle Claude synthetic limit ──────────────────────────────────────────────┐
+│▾ synthetic-project                   ││rate limited (rejected) — H: hand off to codex                                                │
+│  ▾ ws local                          ││[1] state: starting                                                                           │
+│    ○ claude CLI normal profile       ││[2] user (queue): Reply with exactly the word: pong                                           │
+│    ○ claude CLI auto profile [auto]  ││[3] turn started                                                                              │
+│    ○ ⇄ claude Claude synthetic limit ││[4] state: running                                                                            │
+│    ○ claude TUI normal profile       ││[5] rate limited: {"provider":"claude","reason":"rejected","resets_at":1700000000}            │
+│    ○ claude TUI auto profile [auto]  ││[6] error: Synthetic rate limit                                                               │
+│                                      ││[7] turn completed                                                                            │
+│                                      ││[8] state: idle                                                                               │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      │└──────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                      │┌ send: queue│steer│interrupt → agt_…e5a1d6 Claude synthetic limit ────────────────────────────┐
+│                                      ││> press i to type to the selected agent                                                       │
+└──────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 5 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H handoff  x stop  r re
+
+====================================================================================================
+5. Handoff preview opened with H, with Codex preselected
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ agt_…e5a1d┌ Handoff ─────────────────────────────────────────────────────────────┐───────────┐
+│▾ synthetic-project                   ││rate limite│  source   agt_…e5a1d6 Claude synthetic limit                         │           │
+│  ▾ ws local                          ││[1] state: │> target   codex  (Tab)                                               │           │
+│    ○ claude CLI normal profile       ││[2] user (q│  profile  (none)  (Tab/Shift-Tab)                                    │           │
+│    ○ claude CLI auto profile [auto]  ││[3] turn st│  mode     (provider default)                                         │           │
+│    ○ ⇄ claude Claude synthetic limit ││[4] state: │keys enabled shortly                                                  │           │
+│    ○ claude TUI normal profile       ││[5] rate li│ You are continuing work started by another coding agent (claude) in  │           │
+│    ○ claude TUI auto profile [auto]  ││[6] error: │↪this repository. Review the state below, then continue the task.     │           │
+│                                      ││[7] turn co│                                                                      │           │
+│                                      ││[8] state: │ Title and first instruction                                          │           │
+│                                      ││           │ Claude synthetic limit                                               │           │
+│                                      ││           │ Reply with exactly the word: pong                                    │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Recent user instructions                                             │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Last assistant answer                                                │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Workspace changes                                                    │           │
+│                                      ││           │ git status --short                                                   │           │
+│                                      ││           │  M README.md                                                         │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ git diff --stat                                                      │           │
+│                                      ││           │  README.md | 1 +                                                     │           │
+│                                      ││           │  1 file changed, 1 insertion(+)                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Previous event log                                                   │           │
+│                                      ││           │ The full log of the previous agent is at                             │           │
+│                                      ││           │↪/tmp/dgcm4/fake/state/agents/agt_01a217bfbd377738a8ffdc7d63e5a1d6/eve│           │
+│                                      │└───────────│↪nts.jsonl.                                                           │───────────┘
+│                                      │┌ send: queu│                                                                      │───────────┐
+│                                      ││> press i t│Enter create  Esc cancel  ↑↓ field  PgUp/PgDn preview                 │           │
+└──────────────────────────────────────┘└───────────└──────────────────────────────────────────────────────────────────────┘───────────┘
+daemon ok · 5 agents · 0 waiting permission
+
+====================================================================================================
+6. Refreshed preview after adding a scratch file and pressing Enter against the earlier preview
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ agt_…e5a1d┌ Handoff ─────────────────────────────────────────────────────────────┐───────────┐
+│▾ synthetic-project                   ││rate limite│  source   agt_…e5a1d6 Claude synthetic limit                         │           │
+│  ▾ ws local                          ││[1] state: │> target   codex  (Tab)                                               │           │
+│    ○ claude CLI normal profile       ││[2] user (q│  profile  (none)  (Tab/Shift-Tab)                                    │           │
+│    ○ claude CLI auto profile [auto]  ││[3] turn st│  mode     (provider default)                                         │           │
+│    ○ ⇄ claude Claude synthetic limit ││[4] state: │the state changed — review the new preview                            │           │
+│    ○ claude TUI normal profile       ││[5] rate li│ You are continuing work started by another coding agent (claude) in  │           │
+│    ○ claude TUI auto profile [auto]  ││[6] error: │↪this repository. Review the state below, then continue the task.     │           │
+│                                      ││[7] turn co│                                                                      │           │
+│                                      ││[8] state: │ Title and first instruction                                          │           │
+│                                      ││           │ Claude synthetic limit                                               │           │
+│                                      ││           │ Reply with exactly the word: pong                                    │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Recent user instructions                                             │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Last assistant answer                                                │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Workspace changes                                                    │           │
+│                                      ││           │ git status --short                                                   │           │
+│                                      ││           │  M README.md                                                         │           │
+│                                      ││           │ ?? changed-during-preview.txt                                        │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ git diff --stat                                                      │           │
+│                                      ││           │  README.md | 1 +                                                     │           │
+│                                      ││           │  1 file changed, 1 insertion(+)                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │                                                                      │           │
+│                                      ││           │ Previous event log                                                   │           │
+│                                      ││           │ The full log of the previous agent is at                             │           │
+│                                      │└───────────│↪/tmp/dgcm4/fake/state/agents/agt_01a217bfbd377738a8ffdc7d63e5a1d6/eve│───────────┘
+│                                      │┌ send: queu│↪nts.jsonl.                                                           │───────────┐
+│                                      ││> press i t│Enter create  Esc cancel  ↑↓ field  PgUp/PgDn preview                 │           │
+└──────────────────────────────────────┘└───────────└──────────────────────────────────────────────────────────────────────┘───────────┘
+daemon ok · 5 agents · 0 waiting permission
+
+====================================================================================================
+7. Codex in the original workspace after reconfirming, with a completed synthetic turn
+====================================================================================================
+┌ dgc ─────────────────────────────────┐┌ agt_…758963 codex idle handoff: Claude synthetic limit ──────────────────────────────────────┐
+│▾ synthetic-project                   ││                                                                                              │
+│  ▾ ws local                          ││    Title and first instruction                                                               │
+│    ○ claude CLI normal profile       ││    Claude synthetic limit                                                                    │
+│    ○ claude CLI auto profile [auto]  ││    Reply with exactly the word: pong                                                         │
+│    ○ ⇄ claude Claude synthetic limit ││                                                                                              │
+│    ○ claude TUI normal profile       ││    Recent user instructions                                                                  │
+│    ○ claude TUI auto profile [auto]  ││                                                                                              │
+│    ○ codex handoff: Claude synthetic…││                                                                                              │
+│                                      ││    Last assistant answer                                                                     │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││    Workspace changes                                                                         │
+│                                      ││    git status --short                                                                        │
+│                                      ││     M README.md                                                                              │
+│                                      ││    ?? changed-during-preview.txt                                                             │
+│                                      ││                                                                                              │
+│                                      ││    git diff --stat                                                                           │
+│                                      ││     README.md | 1 +                                                                          │
+│                                      ││     1 file changed, 1 insertion(+)                                                           │
+│                                      ││                                                                                              │
+│                                      ││                                                                                              │
+│                                      ││    Previous event log                                                                        │
+│                                      ││    The full log of the previous agent is at                                                  │
+│                                      ││/tmp/dgcm4/fake/state/agents/agt_01a217bfbd377738a8ffdc7d63e5a1d6/events.jsonl.               │
+│                                      ││                                                                                              │
+│                                      ││[3] turn started                                                                              │
+│                                      ││[4] state: running                                                                            │
+│                                      ││[5] assistant: pong                                                                           │
+│                                      ││[6] turn completed                                                                            │
+│                                      ││[7] state: idle                                                                               │
+│                                      │└──────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                      │┌ send: queue│steer│interrupt → agt_…758963 handoff: Claude synthet… ──────────────────────────┐
+│                                      ││> press i to type to the selected agent                                                       │
+└──────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 6 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H handoff  x stop  r re

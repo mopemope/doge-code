@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 Task 5（受け入れ）
+- タスク: M5 の計画作成
 - 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1〜4 を実装・検証し、合成した Claude の上限イベントから TUI で Codex に引き継いだ。
-- 次の一手: M4 計画の Task 5 で、偽プロバイダでの受け入れ、通常モードでの実プロバイダ間の引き継ぎ、全検証を行う（ブランチ `feat/orchestrator-m4`）。
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 の実装と受け入れが完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
+- 次の一手: M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -31,7 +31,7 @@
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
-| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 作業中 | m4-profiles-handoff |
+| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了 | m4-profiles-handoff |
 | M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 未着手 | 未作成 |
 | M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
@@ -89,7 +89,7 @@
 | 2 | 上限検知（アダプタ） | 完了 | `feat(daemon): detect provider usage limits` |
 | 3 | プロファイル | 完了 | `feat: launch agents from named profiles` |
 | 4 | 引き継ぎ（デーモン、CLI、TUI） | 完了 | `feat: suggest and run a handoff to another provider` |
-| 5 | M4 受け入れ | 未着手 | |
+| 5 | M4 受け入れ | 完了 | `docs(orchestrator): complete M4 acceptance` |
 
 ## 決定事項
 
@@ -619,6 +619,16 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-26 M4 Task 5 受け入れ（Linux、Rust 1.99.0）:
+  - 合成シナリオ PASS。`profile ls`、CLI と TUI の通常・自動承認プロファイル起動、警告、上限時の提案と読み取り専用プレビューを確認。
+    `H` のプレビュー後にファイルを追加すると作成が止まり、再確認後に偽 Codex が同じワークスペースで 1 ターンを完了した。
+    TUI 起動前の上限イベントは、対象の履歴を読むまでツリーに `⇄` が出ない。[画面記録](m4-tui-screen.txt)の 3・4 を参照。
+  - 実機 Claude Code 2.1.332 / Haiku（`manual`）PASS。短い計算を 1 ターンで完了し、idle に戻った。
+  - 実機 Codex CLI 0.172.0 / GPT-6 Luna（既定モード）PASS。`dgc handoff ID --to codex --model gpt-6-luna --follow` で、
+    同じワークスペースで前回答を使って 1 ターンを完了した。両ターンで権限要求は発生しなかった。上限到達の検知は合成シナリオで確認した。
+  - `cargo fmt --all --check`、`bash scripts/verify.sh rust`（Clippy、Rust 641 件）、`guidance`（Python 40 件）、
+    `msrv`（Rust 1.94.0）、`tui-deps` PASS。macOS は未検証。
 
 - 2026-11-26 M4 Task 4 レビュー修正（Linux、Rust 1.99.0）:
   - RED で古いプレビューによる新規作成、回答の欠落、100 KiB の最初の指示の拒否、Git の色と失敗名、未オープンのログの読み取りの待機、起動失敗の報告遅延を再現。

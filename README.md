@@ -225,9 +225,10 @@ terminal escape cannot hide or rewrite what is displayed.
 
 ### Handoff between providers
 
-When Claude Code hits its usage limit, you can continue in the same workspace
-with Codex, and vice versa. The source agent keeps running. Both agents can
-work in the same checkout concurrently.
+You can hand off an unarchived agent to the other provider before or after
+it reaches a usage limit. The new agent starts in the same workspace and the
+source agent remains available. Both agents can work in the same checkout
+concurrently.
 
 ```sh
 dgc handoff ID --to codex --dry-run
@@ -263,15 +264,16 @@ capped at 32 KiB. If the title and log path leave too little space for the
 required headings and preface, handoff returns an error.
 
 dgc records at most one `rate limited` event per turn. Claude Code triggers
-it on a rejected or unknown `rate_limit_event` status or an HTTP 429 in a
+it on a rejected or unknown `rate_limit_event` status string or an HTTP 429 in a
 result or assistant error. It ignores `allowed` and `allowed_warning`.
 Codex triggers it when `account/rateLimits/updated` reports a non-null
 `rateLimitReachedType`, or when an error reports `usageLimitExceeded` or
 `rateLimitExceeded` with `willRetry` false or absent. The event carries the
 provider, a reason of up to 48 characters, and a Unix reset time when
-available. Real usage-limit exhaustion has never been observed for these
-checks. The detection conditions come from recorded provider traffic and
-schemas and are tested with synthetic scenarios.
+available. The detection conditions come from recorded provider traffic and
+schemas and are tested with synthetic scenarios. The real-provider handoff
+was tested with Claude Haiku and Codex GPT-6 Luna. Real usage-limit exhaustion
+remains unobserved.
 
 ## Terminal UI
 
@@ -279,8 +281,9 @@ schemas and are tested with synthetic scenarios.
 projects, workspaces and agents. It needs a terminal on stdout (and no
 `--json`), starts the daemon if it is not running, and works against the same
 state as the other commands. Quitting leaves the daemon and every agent
-running; the next `dgc tui` shows them again. A recorded session is in
-[m2-tui-screen.txt](docs/orchestrator/m2-tui-screen.txt).
+running; the next `dgc tui` shows them again. Recorded sessions cover the
+[general TUI](docs/orchestrator/m2-tui-screen.txt) and
+[profiles and handoff](docs/orchestrator/m4-tui-screen.txt).
 
 Layout: on the left the tree (project, workspace, agent) with a state symbol per
 agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
@@ -326,18 +329,19 @@ workspace needs a branch. Failures stay in the form. A created agent or
 workspace is selected only if its form is still open when the daemon answers;
 after `Esc` it is still created, but the cursor stays where you left it.
 
-Agents that hit a usage limit show `⇄` in the tree and a handoff hint above
-the stream. The hint clears after the agent completes a later turn without a
-limit, or is archived. Select any agent in the tree and press `H` for a
+When the TUI receives a usage-limit event live or loads it from the selected
+agent's history, it marks that agent with `⇄` in the tree and shows a handoff
+hint above its stream. The hint clears after the agent completes a later turn
+without a limit, or is archived. Select any agent in the tree and press `H` for a
 handoff. In the dialog, use `↑`/`↓` to select the target, profile or mode
 field. `Tab` switches the target on the target field, and `Tab`/`Shift-Tab`
 cycle profiles on the profile field. The mode field accepts text or paste
 and shows a red warning for auto-approve modes. Use `PgUp`/`PgDn` to scroll
-the escaped dry-run preview. Once the preview is ready and visible, press
-`Enter` to start or `Esc` to cancel. The daemon compares the rebuilt prompt
-with the preview. If they differ, the TUI displays a fresh preview and asks
-you to confirm again. Pending permission dialogs wait while the handoff dialog
-is open.
+the escaped dry-run preview. Once the preview is visible and the brief
+confirmation delay has passed, press `Enter` to start or `Esc` to cancel.
+The daemon compares the rebuilt prompt with the preview. If they differ,
+the TUI displays a fresh preview and asks you to confirm again. Pending
+permission dialogs wait while the handoff dialog is open.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was
 selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).
@@ -527,10 +531,11 @@ replaying recorded or hand-written scenarios
 
 ## Roadmap
 
-- **M4:** profiles, schedules (start agents on a cron schedule), heartbeats
-  (periodic follow-ups to an agent), supervised workspace scripts, and a
-  suggested handoff to the other provider when an agent hits a rate limit.
-- **M5:** an MCP server for agents, so an agent can start and drive sub-agents
+- **M4:** launch profiles and a suggested handoff to the other provider when
+  an agent hits a usage limit.
+- **M5:** schedules (start agents on a cron schedule), heartbeats (periodic
+  follow-ups to an agent), and supervised workspace scripts.
+- **M6:** an MCP server for agents, so an agent can start and drive sub-agents
   through dgc.
 - **Phase B:** remote use (another machine or a phone) over the same socket
   protocol, under a separate design. Until then dgc stays local only.
