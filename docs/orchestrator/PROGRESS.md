@@ -17,13 +17,12 @@
 
 ## 現在の作業
 
-- タスク: M3 Task 3（M3 受け入れ）
+- タスク: M4 の計画作成
 - 状態: 未着手
-- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3 計画作成（Emacs 連携と旧評価ツールの削除はユーザー決定、2026-11-26）。
-  M3 Task 1（旧ランタイム削除、仮想ワークスペース化、`dgc` に改名、検証スクリプトと CI の切替）。
-  M3 Task 2（README・AGENTS.md・docs/ai/workflow.md・docs/ai/architecture.md をオーケストレーター向けに書き直し、旧文書と skills を削除）
-- 次の一手: M3 計画の Task 3 Step 1 から始める（ブランチ `feat/orchestrator-m3`）。スクラッチの `DGC_STATE_ROOT` で `dgc` を通しで確認し、
-  全検証を記録する
+- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3（旧ランタイム削除、`dgc` に改名、文書の書き直し、受け入れ）は
+  ブランチ `feat/orchestrator-m3` で完了（PR は未作成）。
+- 次の一手: M4（プロファイル、スケジュール、heartbeat、ワークスペーススクリプト、レート制限時の引き継ぎ提案）の計画を作成する。
+  M1/M2 の保留指摘から M4 の前提になるもの（例: 一覧の読み直しの積み上がり、送信モードの持ち越し、履歴の末尾読み込み）を選ぶ
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -33,7 +32,7 @@
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
-| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 作業中 | m3-cutover |
+| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了 | m3-cutover |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
@@ -81,7 +80,7 @@
 |---|---|---|---|
 | 1 | ビルドと検証の切替（旧ランタイム削除、`dgc` に改名、スクリプト・CI） | 完了 | `refactor!: replace the legacy runtime with the orchestrator as dgc` |
 | 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 完了 | `docs: describe dgc as the orchestrator and drop legacy guidance` |
-| 3 | M3 受け入れ | 未着手 | |
+| 3 | M3 受け入れ | 完了 | `docs(orchestrator): complete M3 cutover acceptance` |
 
 ## 決定事項
 
@@ -917,6 +916,34 @@
     PASS（37 tests）、`git status --ignored` は `!! .claude/`。確認後に `.claude/` を削除。
   - `rg -n "dgc-next|src/llm|src/features|FsTools|MutationReceipt|JobManager|RepoMap|dgc exec|mcp-server" README.md AGENTS.md docs/ai`
     （未追跡の audit を除く）→ 0 件。`m2-tui-screen.txt` の `dgc-next` はキャプチャ 16 の画面行 1 件だけ。
+- 2026-11-26 M3 Task 3 受け入れ（Linux、固定ツールチェーン 1.99.0、実プロバイダなし）:
+  - インストール: `cargo install --locked --path crates/dgc-cli --root <scratch>/inst` → `inst/bin/dgc` のみ、`dgc --version` は `dgc 0.1.0`。
+    `cargo build --locked -p dgc-daemon` で `dgc-fake-provider` を用意。`config.toml` の `claude_path` / `codex_path` を、`--version` に
+    テスト済みバージョンを返し、それ以外は偽プロバイダ（`claude_turn.jsonl` / `codex_untrusted.jsonl`）を exec するラッパーに向けた。
+    `DGC_STATE_ROOT` はソケット長の上限のため短いシンボリックリンク `/tmp/dgcm3`（スクラッチ配下を指す）。
+  - README のクイックスタート順に、インストールした `dgc` で確認（使い捨ての git リポジトリ。初回コミットは `-c user.name=dgc -c user.email=dgc@example.invalid`）:
+    | 手順 | 結果 |
+    |---|---|
+    | `dgc daemon status`（自動起動） | PASS: pid、protocol_version 1、claude 2.1.332 (tested)、codex 0.172.0 (tested)、終了コード 0 |
+    | `dgc project add <repo>` | PASS: `prj_…  repo  <path>` を表示 |
+    | `dgc workspace create --project … --worktree --branch dgc-m3` | PASS: `<worktrees>/repo-<id>/dgc-m3` に worktree、`ls` に active で出る |
+    | `dgc run --follow "ping the fake"` | PASS: starting → user → turn started → running → assistant: pong → turn completed → idle、終了コード 0 |
+    | `dgc ls` / `dgc logs ID` / `dgc show ID` | PASS: `idle` の 1 行、7 件のイベントが `--follow` の出力と一致、provider_session が出る |
+    | `dgc workspace archive`（クリーン） | PASS: archived、worktree ディレクトリとブランチ dgc-m3 が消え、エージェントも archived |
+    | `dgc workspace archive`（未追跡ファイルあり、2 つ目の worktree） | PASS（拒否）: 終了コード 1、`has uncommitted changes; archiving would delete them`（-32009）。ファイルとブランチ、エージェントは idle のまま |
+    | `dgc workspace archive --force` | PASS: archived、worktree とブランチが消え、`git worktree list` はメインだけ |
+    | `dgc tui`（tmux 専用ソケット、120x30） | PASS: 左ペインに `▾ repo` / `▾ ws local` / `○ claude tui check`（archived の worktree は出ない）、右に stream、下に入力欄、フッター `daemon ok · 1 agents · 0 waiting permission`。`q` で終了コード 0 |
+    | `dgc daemon stop` | PASS: `daemon stopped`、終了コード 0 |
+    終了後 `tmux kill-server`、`pgrep -af 'dgc daemon|dgc-fake|dgcm3|tmux'` は 0 件（残存プロセスなし、tmux ソケットファイルも削除）。dgc のバグは見つからなかった。
+  - 全検証（固定ツールチェーン 1.99.0）:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all --check` | PASS |
+    | `bash scripts/verify.sh rust`（標準設定） | PASS（fmt、clippy `-D warnings`、test 576 executed） |
+    | `bash scripts/verify.sh guidance` | PASS（ガイダンス検査、sensitive-logging、37 tests） |
+    | `bash scripts/verify.sh msrv` | PASS（rustup 1.94.0、`cargo check --locked --workspace --all-targets --all-features`） |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+    | `bash scripts/verify.sh macos` | 環境で実行不可（Linux。Task 1 で 6 フィルタを Linux で確認済み） |
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 
