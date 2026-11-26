@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 完了（Task 5 受け入れ済み、最終レビュー指摘 6 件修正済み）。次は修正の再レビューと PR
-- 状態: 完了
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）。M2 Task 4 完了（ランタイム、デーモン I/O、`dgc-next tui`）。M2 Task 5 完了（偽プロバイダと実 Claude で受け入れ、画面記録、README の TUI 節、全体検証）。M2 最終レビュー修正 1〜6（再接続の待ち、bracketed paste、送信結果の表示、定期 snapshot と `R`、変更系 RPC の 90 s、Esc 後の作成で選択を動かさない）
-- 次の一手: 最終レビュー修正 1〜6（決定事項の「M2 最終レビュー修正」）の再レビュー、PR 作成。その後 M3（旧 `src/` 削除、`dgc` に改名）の計画を作る
+- タスク: M3（切替: 新バイナリを `dgc` に改名、旧 `src/` と旧専用依存・ドキュメント・skills を削除）の計画作成
+- 状態: 未着手
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2（TUI）完了、最終レビューと修正の再レビュー済み（2026-11-26、ブランチ `feat/orchestrator-m2`）
+- 次の一手: M3 の計画を作成する（superpowers:writing-plans）。M1/M2 の保留指摘（本ファイル末尾）から、切替前に直すものを選んで計画に含める
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -29,7 +29,7 @@
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
-| M2 | TUI | 完了（最終レビューと PR 待ち） | m2-tui |
+| M2 | TUI | 完了（最終レビュー済み、2026-11-26） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
@@ -918,3 +918,49 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Final: Ruling: steer fallback (interrupt_and_send) also clears the queue — consistent with "interrupt clears the queue" — cost if wrong: a queued message is dropped when a steer falls back
 - Final: Ruling: item 1 residual is load-bearing (directly violates the user's archive decision) — resumed the fixer for this one-line fix + test, verified by the controller running the named test rather than a second review round — cost if wrong: an unreviewed small diff in the archive path
 - 2026-11-26 M1 最終: 修正の再レビュー後、残り 1 件（未追跡ファイル検出が git 設定に左右される）を 02ae35c で修正し、コントローラが該当テスト 2 件を実行して確認。ワークスペース全体を直列・TMPDIR=/var/tmp で 2742 passed / 0 failed、guidance PASS、msrv PASS（固定ツールチェーン 1.99.0）。
+
+## M2 レビューで保留した指摘と判断（2026-11-26、実行台帳から移記）
+
+M2 はタスクごとのレビューと全体の最終レビュー（修正の再レビューまで）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): steer-fallback TurnStarted untested; adjacency asserted only for initial prompt; LogCache eviction tests thin (held handle skip, >64 live, mark_not_live, stored-archive forget); EventLog::open (full scan) under global logs mutex on cold reopen stalls emits; evict/mark_not_live O(n) per call
+- Task 2: minor (deferred): pending-live overflow at 2000 drops all (restart load instead); single `unsent` slot can restore a possibly-sent message (double send); create-dialog success after Esc still jumps selection; Enter toggles collapse (brief says expand) — align README; selection fallback tests only next sibling; Tree::rows / agents_in_order duplicate filters
+- Task 2: minor (deferred, re-grade at final): failed-send text restores into another agent's input (condition should be input_target == agent_id) — wrong-destination class; overlapping snapshot requests can still erase a fresh permission (count outstanding requests); permission id uniqueness assumption undocumented
+- Task 3: minor (deferred): create-dialog WARNING pushed off in tiny terminals (Enter still works) — move it next to mode field; status bar error can push permission hint off-screen; no test for tree vertical overflow
+- Task 3: minor (deferred): a single grapheme wider than 69 cols makes the dialog too_small at any size with an un-actionable "enlarge" message (fails safe); look-alike arrows (↳ ⤷ ⮡) not escaped; halfwidth render test doesn't guard N1 (layout test does)
+- Task 4: minor (deferred): subtask panic treated as connection close (terminal restored by hook but loop keeps drawing on main screen) — treat JoinError::is_panic as fatal; input thread I/O error detail lost; draw stops after MAX_REDRAWS without final redraw; fixed sleeps in tests (1.5 s quit, 500 ms resubscribe); no backend-level test that Resubscribe closes old connection; effects queued just before quit dropped silently
+- Task 4: minor (deferred): incompatible daemon → reconnect/snapshot-fail loop ~4 calls/s; 15 s timeout also hits slow healthy calls
+- Task 5: minor (deferred, re-grade at final): input draft shared across agents → text typed for A can be sent to B (wrong-destination class); new-agent form labels prompt "(optional)" but requires it; queue send to running agent gives no feedback
+- Task 5: minor (deferred): queue send to running agent gives no feedback (documented); failed send text dropped if user already typed new text; screen capture 1 caption mentions a message not captured; disconnected status bar truncates key hints
+- Task 5: minor (deferred): drafts map never pruned (archived/removed agents' drafts stay); no tests for failed-send restore after selection change / draft kept when target archived
+- Final: minor (deferred): reconnect race can skip part of the stream until reselect (display only); send mode global & sticky (interrupt persists across agents); history loaded from seq 0 each selection (O(n²) read_page, plan tail paging in protocol work); empty summary still allows a/s; auto-approve list duplicated vs daemon; single unsent slot; stream lines bounded by count not bytes
+- Final: minor (deferred): periodic snapshots can pile up behind a slow daemon (pending expires at 5 s; merge queued LoadSnapshot); empty-tree hint shows before first snapshot / while disconnected; two creates in flight share RequestTag (first success can close the second form; error resets submitting → duplicate create); terminals without bracketed paste still replay keys (document); >1 MiB paste exceeds message limit (unchecked)
+
+### コントローラの判断（Ruling）
+
+- Ruling: none needed at pre-flight
+- Task 1: Ruling: steer that falls back to interrupt_and_send records UserMessage{Steer} + TurnStarted — it really starts a new turn — cost if wrong: one extra marker in logs
+- Task 2: dispatched implementer aead8da436e1389b1 (sonnet), BASE 10d07ff; Ruling: tui/mod.rs carries #![allow(dead_code)] until Task 4 wires it — keeps clippy -D warnings clean for an unwired module — cost if wrong: Task 4 must remove it
+- Task 2: Ruling: accept post-hoc RED instead of discarding the code — the tests were shown to fail against a stub and the reviewer judges their strength; redoing costs a full re-implementation — cost if wrong: some tests may encode the implementation rather than the requirement
+- Task 2: Ruling: permission dialog never auto-opens in Input focus (indicator instead) or over another dialog; opens via `p` or auto only in Tree focus with empty editor; decision keys ignored for 2 Ticks (≥500 ms) after any open/replacement — prevents typed text from approving unread commands — cost if wrong: half-second delay before answering
+- Task 2: Ruling: when the selected agent disappears, Input focus stays with a "no target" state, text kept, no auto dialogs — cost if wrong: user must re-select before sending
+- Task 2: Ruling: history loads carry a generation in Effect::LoadHistory / AppEvent::History; failed LoadHistory reported as History{events:[],done:true,generation} + status error — interface change carried to Task 4 — cost if wrong: none
+- Task 3: Ruling: shared pure permission_layout used by render+update; Dialog::Permission gets scroll + seen_end; a/s only when armed && seen_end (d/Esc always); header 1 line, footer reserved first; "window too small" → a/s disabled; soft-wrap rows marked ↪ — the user must be able to read every line before allowing — cost if wrong: extra scrolling for long requests
+- Task 3: Ruling: grapheme-width measurement folded into the fix (dropped graphemes alter the approved text) though reviewer graded Minor
+- Task 3: Ruling: protocol 4 KiB summary cap is a known limitation — dialog shows a red "shortened by dgc — full command not shown" line; a/s still allowed after seen_end — cost if wrong: a >4 KiB request can be approved without full text (future: raise cap / show raw)
+- Task 3: Ruling: accept stricter seen_end = every summary row has been on screen (End/Home only peek) — literal "last line visible" would let End enable a/s with the middle unread — cost if wrong: more scrolling
+- Task 3: Ruling: fold N3 (escape U+21AA in summaries) into round 2 — same spoofing class as finding 3 — cost if wrong: none
+- Task 4: dispatched implementer a596bdfa18caecc0c (opus), BASE 6f52669; Ruling: reconnects use plain connect (no respawn after user's daemon stop); first connect uses connect_or_spawn — cost if wrong: TUI won't auto-restart a stopped daemon
+- Task 4: Ruling: fold Minor 1 (size change re-arms permission dialog) — same "approve unseen rows" class as Task 2/3 rulings — cost if wrong: extra 0.75 s after resize
+- Task 4: Ruling: fold Minor 3 (15 s RPC timeout → Stop::Lost + RpcDone Err) — a wedged daemon otherwise freezes permission answers silently — cost if wrong: slow daemon ops (>15 s) reported as disconnect
+- Task 5: Ruling: fix finding 3 in code (per-agent drafts + target shown in input title) rather than only disclose — wrong-destination sends can interrupt another agent — cost if wrong: small state-model change late in M2
+- Task 5: Ruling: fold one-word "(optional)"→"(required)" label and README wording fixes into the round
+- Final: Ruling: paste inserts into the focused editor only, newlines/tabs → spaces, ignored outside text fields — cost if wrong: multi-line messages flattened
+- Final: Ruling: periodic snapshot every 5 s + R refresh + empty-tree hint — cost if wrong: small periodic load
+- Final: Ruling: per-call timeouts (reads 15 s, mutating 90 s) folded in — prevents duplicate sends on slow healthy calls
+- Final: Ruling: create success after Esc does not move selection (folded, wrong-target class)
+- Final: fix wave done 8b24f22..b8795d7 (7 commits); Ruling: item 6 applied to workspace.create too (same class) — accepted
+
+- 2026-11-26 M2 最終検証（固定ツールチェーン 1.99.0）: fmt / clippy -D warnings / ワークスペース全体のテスト（直列、TMPDIR=/var/tmp）3021 passed / 0 failed / guidance / tui-deps / msrv すべて PASS。
