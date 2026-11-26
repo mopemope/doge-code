@@ -114,10 +114,20 @@
   architecture、workflow、設計書、fixtures README を指す）。削除: 計画の一覧どおりの旧 `docs/ai/` 文書、`docs/tool-output-contract.md`、
   `docs/mcp-3x-migration.md`、`docs/ai/skills/`（5 skills）と `.agents/skills`・`.claude/skills`・`.opencode/skill` のリンク
   （ホスト側のディレクトリも残らない）。`docs/ai/fixtures/` には無視対象の `__pycache__` だけが残ったので消した。
-  `.gitignore` の skills 用の un-ignore 行と `check-agent-guidance.py` の skills 検査（0 件で合格）は Task 2 の範囲外として残した。
-- 2026-11-26 (M3 Task 2): `docs/orchestrator/m2-tui-screen.txt` は説明文の `dgc-next` を `dgc` にし、画面中で唯一バイナリ名が出る
-  キャプチャ 16 のステータス行も `dgc` にした（計画の `rg` が 0 件であることが条件のため）。ファイル先頭に、キャプチャは改名前のもので
-  その行は書き換えたこと（実際の `dgc` では 120 桁で切れる位置が 5 文字後ろになる）を注記した。
+  （修正 1 で、`.gitignore` の skills 用の un-ignore 行と `check-agent-guidance.py` の skills 検査も削除。下記。）
+- 2026-11-26 (M3 Task 2 修正 1、コントローラ裁定): `docs/orchestrator/m2-tui-screen.txt` は説明文（見出し・キャプチャの説明行）だけ
+  `dgc-next` を `dgc` にし、キャプチャした画面は一切書き換えない（キャプチャ 16 のステータス行は `dgc-next daemon start` のまま）。
+  ファイル先頭に、キャプチャは改名前のもので画面はそのままであることを注記した。改名漏れの `rg` 検査はこのファイルのキャプチャを除外する。
+- 2026-11-26 (M3 Task 2 修正 1): ガイダンスの不変条件の記述を実装に合わせた。(a) プロンプト・エージェント本文の保存先は
+  `events.jsonl` だけではなく、エージェントの 0600 の状態ファイル（`events.jsonl`、キューの `queue.json`、既定でプロンプト 1 行目になる
+  title を持つエージェントレコード）。tracing と `daemon.log` には出ない。(b) 権限: dgc は利用者の代わりに承認しない。プロバイダが出した
+  要求は利用者を待ち、interrupt / shutdown のときだけ deny / cancel で取り消す。要求なしで何が動くかはプロバイダの mode と利用者の
+  プロバイダ設定が決める（Codex `workspace-write`、Claude の allow ルール）。(c) オンデマンド起動のデーモンは起動したコマンドの環境を
+  引き継ぎ、クライアントの環境はソケットで送らない。
+- 2026-11-26 (M3 Task 2 修正 1): skills の残骸を削除。`.gitignore` の `.claude/skills/`・`.opencode/skill/`・`.agents/skills/` の
+  un-ignore をやめ、`.claude/`・`.opencode/`・`.agents/` を丸ごと無視する（個人の skills や設定が追跡対象にならないように。`!CLAUDE.md` は残す）。
+  `check-agent-guidance.py` から skills 検査（HOSTS、`valid_description`、`check_skills`）と `docs/tool-output-contract.md` の任意検査を
+  削除し、リンク検査と CLAUDE.md 検査は `check_guidance` に改名して残した。CI・ラッパー一致と workflow.md のコマンド検査はそのまま。
 
 - 2026-11-26 (M3 Task 1): ルート `Cargo.toml` は仮想ワークスペース。`[workspace.dependencies]` の既存エントリは全て新 crate が使っており
   削除なし。`[profile.*]` はもともと無い。`.gitignore` は追跡していた `.doge/config.toml` の例外を外し、開発機に残る旧状態のために
@@ -899,6 +909,14 @@
   - `rg -n "dgc-next|src/llm|src/features|FsTools|MutationReceipt|JobManager|RepoMap|dgc exec|mcp-server" README.md AGENTS.md docs/ai
     docs/orchestrator/m2-tui-screen.txt`（未追跡の `docs/ai/audit-2026-10-29.md` を除く）→ 0 件。
   - `bash scripts/verify.sh guidance` → PASS（ガイダンス検査、sensitive-logging、40 tests）。Rust のコードとビルド入力は変更していない。
+- 2026-11-26 M3 Task 2 修正 1（Linux）:
+  - RED: 作業ツリーに未追跡の `.claude/skills/foo/SKILL.md` を置くと `bash scripts/verify.sh guidance` が
+    `.claude/skills/foo: stale or noncanonical skill entry` で FAIL（`git status` では `?? .claude/`、追跡され得る状態）。
+    先に追加したテスト `test_local_agent_host_skills_are_not_guidance` は `check_guidance` 未定義で ERROR。
+  - GREEN: unittest 37 tests OK（skills のテスト 4 件を削除、新テスト 1 件）。同じ `.claude/skills/foo` を置いて `verify.sh guidance`
+    PASS（37 tests）、`git status --ignored` は `!! .claude/`。確認後に `.claude/` を削除。
+  - `rg -n "dgc-next|src/llm|src/features|FsTools|MutationReceipt|JobManager|RepoMap|dgc exec|mcp-server" README.md AGENTS.md docs/ai`
+    （未追跡の audit を除く）→ 0 件。`m2-tui-screen.txt` の `dgc-next` はキャプチャ 16 の画面行 1 件だけ。
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 

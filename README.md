@@ -19,7 +19,9 @@ closed by default:
 - **Local only.** The daemon listens on a Unix socket that only your UID can
   connect to. It opens no TCP or UDP port and has no remote access.
 - **No credential handling.** dgc never reads, stores or forwards API keys or
-  login tokens. Claude Code and Codex keep their own logins.
+  login tokens. Claude Code and Codex keep their own logins; they inherit the
+  daemon's environment, including any keys in it (see
+  [Security properties and limits](#security-properties-and-limits)).
 - **No network activity of its own.** No telemetry, no self-update, no
   downloading of code.
 - **Permissions go to you.** Unless you choose an auto-approve mode for an

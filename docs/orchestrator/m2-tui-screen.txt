@@ -2,9 +2,8 @@ dgc tui screen record (M2 acceptance, 2026-11-26)
 Captured with `tmux capture-pane -p` at 120x32 (except capture 19), real dgc binary in a real pty,
 fake provider (dgc-fake-provider replaying a hand-written SYNTHETIC scenario, not a Claude recording),
 throwaway git repository, scratch DGC_STATE_ROOT. Colors and highlights are not part of the text capture.
-The captures predate the M3 rename of the binary to `dgc`. The binary name in these notes and in the
-status line of capture 16 was updated to `dgc` afterwards (that line is now 5 columns shorter than captured;
-the renamed binary shows 5 more characters before the 120-column cut). The screens are otherwise unchanged.
+The captures predate the M3 rename of the binary to `dgc`. These notes use the new name; the captured
+screens are left exactly as captured, so the status line of capture 16 still shows the old binary name.
 
 ====================================================================================================
 1. Start with no projects: empty tree, daemon ok. (`w` here only says `select a project first` in the status bar.)
@@ -580,7 +579,7 @@ daemon ok · 2 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/P
 │                                  │┌ send: queue│steer│interrupt ─────────────────────────────────────────────────────┐
 │                                  ││> press i to type to the selected agent                                           │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
-daemon disconnected: the daemon closed the connection — retrying every second (`dgc daemon start` starts it) · 2 ag
+daemon disconnected: the daemon closed the connection — retrying every second (`dgc-next daemon start` starts it) · 2 ag
 
 ====================================================================================================
 17. `dgc daemon start`: the TUI reconnected by itself; both agents now show as stopped (the daemon restart ended their provider processes).

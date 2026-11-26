@@ -45,18 +45,9 @@ backlog
 # Development-script import caches.
 __pycache__/
 
-# Agent skills are shared repo files; un-ignore them even when a global
-# gitignore excludes .claude/ or CLAUDE.md. Local settings stay ignored.
+# CLAUDE.md is shared guidance; keep it even when a global gitignore excludes it.
 !CLAUDE.md
-!.claude
-.claude/*
-!.claude/skills/
-
-# Same for opencode: track skills only; local config/state stays untracked.
-.opencode/*
-!.opencode/skill/
-
-# Codex shares the canonical skill bodies; local agent configuration stays private.
-!.agents/
-.agents/*
-!.agents/skills/
+# Agent host directories hold local settings and personal skills; never track them.
+.claude/
+.opencode/
+.agents/

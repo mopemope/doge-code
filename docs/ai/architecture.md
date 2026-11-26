@@ -46,8 +46,10 @@ lock.
   agent; atomic writes, 0600, no symlink following. Unknown versions are
   rejected; `list_*` skips broken entries with a warning.
 - **Event log** (`events_log.rs`): per agent `events.jsonl` with one rotated
-  generation; `seq` is monotonic per agent and survives restarts. Prompts and
-  agent output are stored only here.
+  generation; `seq` is monotonic per agent and survives restarts. It holds
+  prompts and agent output; besides it only the agent's `queue.json` (queued
+  messages) and its record (title, by default the prompt's first line) contain
+  prompt text.
 - **Workspaces** (`workspace.rs`): projects, local and worktree workspaces.
   git runs as a bounded child with a sanitized environment. Removal of a
   worktree is gated by ownership, `is_managed_path`, and the archive safety
@@ -134,8 +136,12 @@ The trust boundary is the user's UID (design §9). Inside it every connection is
 equal, including agents started by dgc. Outside it the daemon refuses: no
 network listener, a 0700 socket directory and 0600 socket, and a peer UID check
 on every connection. dgc never reads provider credentials; providers inherit the
-daemon's environment. `tracing` carries ids and states only; prompt and agent
-text is stored only in the 0600 event logs, and `scripts/check-sensitive-logging.py`
-guards the modules that handle it. Permission requests reach the user unless an
-auto-approve mode was chosen explicitly, and every human-readable surface
-escapes daemon-supplied text before display.
+daemon's environment. `tracing` (and so `daemon.log`) carries ids and states only;
+prompt and agent text is stored only in each agent's 0600 state files
+(`events.jsonl`, `queue.json`, the agent record's title), and
+`scripts/check-sensitive-logging.py` guards the modules that handle it. dgc never
+approves on the user's behalf: requests the provider raises wait for the user,
+and only an interrupt or shutdown cancels them (answered deny or cancel). What
+runs without a request is decided by the provider's mode and the user's provider
+settings; auto-approve modes are used only when chosen explicitly and are always
+shown. Every human-readable surface escapes daemon-supplied text before display.

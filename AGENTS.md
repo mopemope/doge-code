@@ -63,17 +63,24 @@ Do not weaken these.
   peer UID checked on every connection. State files 0600, never written
   through symlinks.
 - dgc never reads, stores or forwards provider credentials. Providers inherit
-  the daemon's environment; client environments are never sent.
-- `tracing` never logs prompt, agent or permission text (IDs, states, error
-  kinds only). Text lives only in `events.jsonl`. `check-sensitive-logging.py`
+  the daemon's environment (an on-demand daemon inherits the environment of the
+  command that started it); client environments are never sent over the socket.
+- `tracing` (and so `daemon.log`) never carries prompt, agent or permission
+  text: IDs, states, error kinds only. That text is stored only in the agent's
+  0600 state files (`events.jsonl`, `queue.json`, and the agent record, whose
+  title defaults to the prompt's first line). `check-sensitive-logging.py`
   enforces this for the provider, agent and TUI modules.
 - Worktree deletion only for dgc-owned workspaces whose path is inside the
   managed worktree directory, with the archive safety check (no uncommitted or
   untracked work, no commits outside the base) unless `--force`; destructive
   git flags stay in the force-only path. Branches are deleted only when the
   worktree entry still checks out the recorded branch.
-- Permission requests go to the user unless they chose an auto-approve mode,
-  which is always shown (`warning:` line, `auto-approve`, `[auto]`).
+- dgc never approves on the user's behalf. Requests the provider raises wait
+  for the user; only an interrupt or shutdown cancels them (answered deny or
+  cancel). What runs without a request is decided by the provider's mode and
+  the user's provider settings (Codex `workspace-write` runs sandboxed commands,
+  Claude applies the user's allow rules). Auto-approve modes are used only when
+  chosen explicitly and are always shown (`warning:` line, `auto-approve`, `[auto]`).
 - Human output escapes control and bidi characters (`output::escape_text`/`escape_line`).
 
 ## TUI permission safety

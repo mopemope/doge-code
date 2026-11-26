@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check shared skill discovery, local links, CLAUDE.md, and CI/wrapper/guide agreement."""
+"""Check guidance links, CLAUDE.md, and CI/wrapper/guide agreement."""
 
 import argparse
 import importlib.util
@@ -13,24 +13,6 @@ import tomllib
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = (".agents/skills", ".claude/skills", ".opencode/skill")
-
-
-def valid_description(value):
-    """Accept the documented safe subset of single-line YAML string scalars."""
-    value = value.strip()
-    if value.startswith('"'):
-        try:
-            parsed = json.loads(value)
-            return isinstance(parsed, str) and bool(parsed.strip())
-        except ValueError:
-            return False
-    # Reject YAML collections, aliases/tags, implicit booleans/numbers, mapping
-    # separators, and comments. Quoting such descriptions avoids host ambiguity.
-    return bool(value) and value[0] not in "-?:,[]{}#&*!|>'%@`" and \
-        not re.search(r":(?:\s|$)|(?:^|\s)#", value) and \
-        value.lower() not in {"null", "true", "false", "yes", "no", "on", "off", "~"} and \
-        not re.match(r"[-+]?\d|\.\d|[+-]?\.(?:inf|nan)$", value, re.I)
 
 
 def check_links(path, root):
@@ -70,45 +52,16 @@ def guidance_documents(root):
     developer's never-committed local notes are not repository guidance.
     """
     required = [root / "AGENTS.md", root / "README.md"]
-    optional = [root / "docs/tool-output-contract.md"]
-    optional.extend(sorted((root / "docs/ai").rglob("*.md")))
-    optional = [path for path in optional if path.is_file()]
+    optional = [path for path in sorted((root / "docs/ai").rglob("*.md")) if path.is_file()]
     tracked = tracked_files(root)
     if tracked is not None:
         optional = [path for path in optional if path.relative_to(root).as_posix() in tracked]
     return required + optional
 
 
-def check_skills(root):
-    """Check canonical skills (zero is fine), their host links, guidance links, and CLAUDE.md."""
+def check_guidance(root):
+    """Check local links in the guidance documents and that CLAUDE.md imports AGENTS.md."""
     errors = []
-    base = root / "docs/ai/skills"
-    skills = sorted(base.glob("*/SKILL.md"))
-    names = []
-    for path in skills:
-        text = path.read_text()
-        # Repo skills intentionally use two single-line scalar metadata fields.
-        header = re.match(r"\A---\nname: ([a-z0-9]+(?:-[a-z0-9]+)*)\n"
-                          r"description: ([^\n]+)\n---\n", text)
-        if not header:
-            errors.append(f"{path.relative_to(root)}: expected name and description scalar frontmatter")
-            continue
-        name, description = header.groups()
-        names.append(name)
-        if name != path.parent.name or len(name) > 64 or not valid_description(description):
-            errors.append(f"{path.relative_to(root)}: invalid name/description")
-        for host in HOSTS:
-            link = root / host / name
-            if not link.is_symlink() or link.resolve() != path.parent.resolve():
-                errors.append(f"{host}/{name}: must link to docs/ai/skills/{name}")
-    for host in HOSTS:
-        directory = root / host
-        if directory.is_dir():
-            for entry in directory.iterdir():
-                if entry.name not in names:
-                    errors.append(f"{host}/{entry.name}: stale or noncanonical skill entry")
-    if len(set(names)) != len(names):
-        errors.append("Duplicate canonical skill names")
     for path in guidance_documents(root):
         errors.extend(check_links(path, root))
     if (root / "CLAUDE.md").read_text().strip() != "@AGENTS.md":
@@ -178,7 +131,7 @@ def main():
     parser.add_argument("--root", type=Path, default=ROOT)
     args = parser.parse_args()
     try:
-        errors = check_skills(args.root)
+        errors = check_guidance(args.root)
         errors.extend(check_ci(args.root))
         errors.extend(check_workflow_doc(args.root))
     except (OSError, ValueError, IndexError, KeyError, tomllib.TOMLDecodeError) as error:
@@ -187,8 +140,7 @@ def main():
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    skills = len(list((args.root / "docs/ai/skills").glob("*/SKILL.md")))
-    print(f"PASS {skills} shared Skills, local links, CLAUDE.md, and CI/wrapper/guide command agreement")
+    print("PASS local links, CLAUDE.md, and CI/wrapper/guide command agreement")
     return 0
 
 

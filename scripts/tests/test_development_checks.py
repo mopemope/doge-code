@@ -219,25 +219,24 @@ class GuidanceTests(unittest.TestCase):
         self.write("docs/guide.md", "[missing](gone.md)\n[outside](../../elsewhere.md)\n")
         self.assertEqual(len(guidance.check_links(self.root / "docs/guide.md", self.root)), 2)
 
-    def test_zero_skills_pass(self):
+    def test_local_agent_host_skills_are_not_guidance(self):
         self.write("AGENTS.md", "[Workflow](docs/ai/workflow.md)\n")
         self.write("CLAUDE.md", "@AGENTS.md\n")
         self.write("README.md", "dgc\n")
         self.write("docs/ai/workflow.md", "Workflow\n")
-        self.assertEqual(guidance.check_skills(self.root), [])
-        # An empty host directory is fine; a leftover entry is still stale.
-        (self.root / ".claude/skills").mkdir(parents=True)
-        self.assertEqual(guidance.check_skills(self.root), [])
-        (self.root / ".claude/skills/dgc-old").symlink_to(
-            "../../docs/ai/skills/dgc-old", target_is_directory=True)
-        errors = guidance.check_skills(self.root)
-        self.assertTrue(any("dgc-old" in error for error in errors), errors)
+        self.assertEqual(guidance.check_guidance(self.root), [])
+        # Personal skills under an agent host directory are local state, not
+        # repository guidance: they must not fail the check.
+        for host in (".claude/skills", ".opencode/skill", ".agents/skills"):
+            self.write(f"{host}/foo/SKILL.md", "personal\n")
+        self.write(".claude/skills/bar/SKILL.md", "---\nname: other\n---\n")
+        self.assertEqual(guidance.check_guidance(self.root), [])
 
     def test_claude_md_must_import_agents_md(self):
         self.write("AGENTS.md", "Guidance\n")
         self.write("README.md", "dgc\n")
         self.write("CLAUDE.md", "Separate guidance\n")
-        errors = guidance.check_skills(self.root)
+        errors = guidance.check_guidance(self.root)
         self.assertTrue(any("CLAUDE.md" in error for error in errors), errors)
 
     def test_broken_links_in_guidance_documents_are_detected(self):
@@ -245,7 +244,7 @@ class GuidanceTests(unittest.TestCase):
         self.write("CLAUDE.md", "@AGENTS.md\n")
         self.write("README.md", "[Gone](elisp/emacs-integration.md)\n")
         self.write("docs/ai/architecture.md", "[Gone](../../src/lib.rs)\n")
-        errors = guidance.check_skills(self.root)
+        errors = guidance.check_guidance(self.root)
         for name in ("AGENTS.md", "README.md", "docs/ai/architecture.md"):
             self.assertTrue(any(error.startswith(name) for error in errors), (name, errors))
 
@@ -260,25 +259,9 @@ class GuidanceTests(unittest.TestCase):
                        check=True)
         # A local, never-committed note: CI cannot see it, so it is not guidance.
         self.write("docs/ai/local-note.md", "[Gone](../../src/tools/edit.rs)\n")
-        errors = guidance.check_skills(self.root)
+        errors = guidance.check_guidance(self.root)
         self.assertTrue(any("docs/ai/tracked.md" in error for error in errors), errors)
         self.assertFalse(any("local-note.md" in error for error in errors), errors)
-
-    def test_host_links_must_target_same_canonical_skill(self):
-        self.write("AGENTS.md", "[Skill](docs/ai/skills/dgc-test/SKILL.md)\n")
-        self.write("CLAUDE.md", "@AGENTS.md\n")
-        self.write("README.md", "dgc\n")
-        self.write("docs/ai/skills/dgc-test/SKILL.md", "---\nname: dgc-test\n"
-                   "description: Verify a scoped dgc fixture.\n---\n")
-        for host in guidance.HOSTS:
-            directory = self.root / host
-            directory.mkdir(parents=True)
-            (directory / "dgc-test").symlink_to("../../docs/ai/skills/dgc-test", target_is_directory=True)
-        self.assertEqual(guidance.check_skills(self.root), [])
-        link = self.root / ".agents/skills/dgc-test"
-        link.unlink()
-        link.symlink_to("../../docs/ai/skills/missing", target_is_directory=True)
-        self.assertTrue(guidance.check_skills(self.root))
 
     def test_ci_msrv_and_command_drift_are_detected(self):
         manifest = tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())
@@ -340,28 +323,6 @@ class GuidanceTests(unittest.TestCase):
         self.write("docs/ai/workflow.md", source.replace(" --workspace", ""))
         errors = guidance.check_workflow_doc(self.root)
         self.assertTrue(any("cargo test --locked --workspace" in error for error in errors), errors)
-
-    def test_skill_description_rejects_invalid_yaml_scalar(self):
-        self.write("AGENTS.md", "Guidance\n")
-        self.write("CLAUDE.md", "@AGENTS.md\n")
-        self.write("README.md", "dgc\n")
-        for description in ("dgc: invalid mapping", "[dgc, a list]", "*dgc-alias",
-                            " [dgc, a list]", "0xAB", ".5", "true"):
-            with self.subTest(description=description):
-                self.write("docs/ai/skills/dgc-test/SKILL.md", "---\nname: dgc-test\n"
-                           f"description: {description}\n---\n")
-                for host in guidance.HOSTS:
-                    directory = self.root / host
-                    directory.mkdir(parents=True, exist_ok=True)
-                    link = directory / "dgc-test"
-                    if not link.is_symlink():
-                        link.symlink_to("../../docs/ai/skills/dgc-test", target_is_directory=True)
-                self.assertTrue(guidance.check_skills(self.root))
-
-    def test_quoted_skill_description_accepts_yaml_punctuation(self):
-        self.assertTrue(guidance.valid_description('"dgc: scoped #description"'))
-        self.assertTrue(guidance.valid_description("A scoped dgc workflow."))
-        self.assertFalse(guidance.valid_description('"unterminated'))
 
 
 if __name__ == "__main__":
