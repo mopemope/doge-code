@@ -4,7 +4,7 @@
 最初にここを読み「現在の作業」から再開する。
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
-- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md)
+- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M3（切替: 新バイナリを `dgc` に改名、旧 `src/` と旧専用依存・ドキュメント・skills を削除）の計画作成
+- タスク: M3 Task 1（ビルドと検証の切替）
 - 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2（TUI）完了、最終レビューと修正の再レビュー済み（2026-11-26）、PR #185（`feat/orchestrator-m2` → `develop`）でレビュー待ち
-- 次の一手: M3 の計画を作成する（superpowers:writing-plans）。M1/M2 の保留指摘（本ファイル末尾）から、切替前に直すものを選んで計画に含める
+- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3 計画作成（Emacs 連携と旧評価ツールの削除はユーザー決定、2026-11-26）
+- 次の一手: M3 計画の Task 1 Step 1 から始める（ブランチ `feat/orchestrator-m3`）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -29,8 +29,8 @@
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
-| M2 | TUI | 完了（最終レビュー済み、2026-11-26） | m2-tui |
-| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
+| M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
+| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 作業中 | m3-cutover |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
@@ -72,9 +72,19 @@
 | 4 | ランタイムと起動コマンド | 完了 | `feat(cli): run the TUI against the daemon` |
 | 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 完了 | `docs(orchestrator): complete M2 acceptance` |
 
+### M3
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | ビルドと検証の切替（旧ランタイム削除、`dgc` に改名、スクリプト・CI） | 未着手 | |
+| 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 未着手 | |
+| 3 | M3 受け入れ | 未着手 | |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M3): Emacs 連携（`elisp/`、旧 `dgc exec` に依存）は削除する（ユーザー決定）。旧エージェント評価・修復受け入れツールと関連文書は削除し、AGENTS.md の Product priority をオーケストレーター向けに書き直す（ユーザー決定）。
 
 - 2026-11-26 (M2): TUI の画面構成はサイドバー（プロジェクト／ワークスペース／エージェントのツリー）+ 選択エージェントのストリームと入力欄（ユーザー決定）。`dgc-next tui` と引数なしの `dgc-next` で起動。
 
