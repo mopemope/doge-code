@@ -1,4 +1,4 @@
-//! Terminal UI for `dgc-next`.
+//! Terminal UI for `dgc`.
 //!
 //! The model is pure: [`AppState`](state::AppState) changes only in
 //! [`update::update`], which turns an [`AppEvent`] into state changes and

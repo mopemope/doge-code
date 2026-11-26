@@ -1,6 +1,6 @@
 # Offline repair acceptance foundation
 
-The small [runner](../../scripts/repair_acceptance.py) prepares fixed tasks, checks
+The small runner (`scripts/repair_acceptance.py`) prepares fixed tasks, checks
 an externally produced candidate, records an independent operator decision, and
 summarizes all planned trials and inspects a checked candidate for review. It never starts a model or agent, calls a provider,
 configures credentials, fetches dependencies or adapts Codex event streams.

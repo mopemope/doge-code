@@ -1,4 +1,4 @@
-//! End-to-end tests for the agent and permission commands of `dgc-next`.
+//! End-to-end tests for the agent and permission commands of `dgc`.
 //!
 //! The daemon runs real `ClaudeAdapter`/`CodexAdapter`s whose configured
 //! executables are small wrapper scripts: they answer `--version` themselves
@@ -100,7 +100,7 @@ impl AgentEnv {
         if let Some(path_env) = path_env {
             add.env("PATH", path_env);
         }
-        let project = json(&add.output().expect("dgc-next should start"));
+        let project = json(&add.output().expect("dgc should start"));
         let workspace = json(&self.run(&[
             "--json",
             "workspace",
@@ -141,7 +141,7 @@ impl AgentEnv {
         self.env.run(args)
     }
 
-    /// `dgc-next run --workspace W --provider P <extra..>`.
+    /// `dgc run --workspace W --provider P <extra..>`.
     fn run_agent(&self, provider: &str, extra: &[&str]) -> Output {
         let mut args = vec![
             "run",
@@ -575,7 +575,7 @@ fn daemon_log_excludes_prompt_text() {
             ])
             .env("DGC_LOG", "debug")
             .output()
-            .expect("dgc-next should start"),
+            .expect("dgc should start"),
     );
     let workspace = json(&a.run(&[
         "--json",
@@ -645,7 +645,7 @@ fn slow_provider_probe_does_not_break_autostart() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("dgc-next should start");
+        .expect("dgc should start");
     // The socket is bound before the probes run, well within the 5 s bound.
     while !env.paths.socket.exists() {
         assert!(
@@ -654,7 +654,7 @@ fn slow_provider_probe_does_not_break_autostart() {
         );
         sleep(Duration::from_millis(20));
     }
-    let output = child.wait_with_output().expect("dgc-next should finish");
+    let output = child.wait_with_output().expect("dgc should finish");
     let elapsed = started.elapsed();
     let status = json(&output);
     assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");

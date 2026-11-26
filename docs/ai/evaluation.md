@@ -87,7 +87,7 @@ remain part of saved provenance and are never rewritten by read-only handoff.
 
 ## Matched runs
 
-The [runtime harness](../../scripts/run-agent-evals.py) automates matched
+The runtime harness (`scripts/run-agent-evals.py`) automates matched
 execution:
 
 1. Write an eval manifest (see [example](eval-run.example.json)): fixed

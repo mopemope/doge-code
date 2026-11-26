@@ -43,8 +43,8 @@ GitHub の `refs/heads/develop` とローカル HEAD の一致を
 
 ### 1. TSX の文法選択（再現済み）
 
-[language_config.rs](../../src/analysis/language_config.rs) は `ts` と `tsx` の両方に
-`LANGUAGE_TYPESCRIPT` を割り当てる。[parser.rs](../../src/analysis/parser.rs) は
+language_config.rs (`src/analysis/language_config.rs`) は `ts` と `tsx` の両方に
+`LANGUAGE_TYPESCRIPT` を割り当てる。parser.rs (`src/analysis/parser.rs`) は
 この登録からパーサを選ぶ。
 
 現在のロック済み依存をリンクした一時 Rust プローブで次を解析した。
@@ -90,9 +90,9 @@ README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml
 
 ### 3. RepoMap の解析器更新に伴うキャッシュ無効化（設計上の不足）
 
-[analyzer.rs](../../src/analysis/analyzer.rs) の本番経路 `build_with_cache` は
+analyzer.rs (`src/analysis/analyzer.rs`) の本番経路 `build_with_cache` は
 保存済みと現在のファイルハッシュが同じならキャッシュをそのまま返す。
-[cache.rs](../../src/analysis/cache.rs) の `is_cache_valid` にもバージョン比較の TODO が残る。
+cache.rs (`src/analysis/cache.rs`) の `is_cache_valid` にもバージョン比較の TODO が残る。
 この判定には grammar / collector / 解析スキーマの版が含まれない。
 解析器だけ更新しソースが変わらない場合に、古い解析結果を再利用する経路が残る。
 
@@ -116,9 +116,9 @@ README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml
 ### 1. 検証ワークフロー
 
 現状: `impact_analyze` は提案専用で、検証を実行しない。
-構造化した永続テスト結果の [ResultFormat](../../src/features/structured_test_results/mod.rs) は
+構造化した永続テスト結果の ResultFormat (`src/features/structured_test_results/mod.rs`) は
 調査時点では GoTestJson のみ（現在は `PytestJunit` も追加済み）。`/test` に Rust/Python 等の解析があっても、これは永続証跡の共通形式とは別。
-[obligations.rs](../../src/provenance/obligations.rs) の observed_passing は、
+obligations.rs (`src/provenance/obligations.rs`) の observed_passing は、
 リンクした変更を観測したコマンドの成功で決まる。
 現行仕様も「正しさの証明」とはしておらず、それ自体を実装バグとは扱わない。
 
@@ -139,8 +139,8 @@ README は Java と tree-sitter-java を対応一覧に載せるが、Cargo.toml
 
 ### 2. 永続変更履歴と再開後の undo
 
-現状: [undo.rs](../../src/tools/undo.rs) は最大20件のメモリ内 VecDeque。
-[common.rs](../../src/tools/common.rs) の FsTools 初期化時に空で作られる。
+現状: undo.rs (`src/tools/undo.rs`) は最大20件のメモリ内 VecDeque。
+common.rs (`src/tools/common.rs`) の FsTools 初期化時に空で作られる。
 会話や変更の証跡を復元できても、そのまま再起動前の UndoStack を復元する設計ではない。
 
 提案はセッション配下の変更ジャーナルと内容アドレス付き preimage 保存。
@@ -155,10 +155,10 @@ provenance のハッシュ・diff を万能なバックアップと扱わず、�
 
 ### 3. プロジェクト信頼設定と実行隔離
 
-現状: [execution config](../../src/config/execution.rs) の既定値は unrestricted / shell 有効。
+現状: execution config (`src/config/execution.rs`) の既定値は unrestricted / shell 有効。
 プロジェクト設定がユーザー設定をフィールド単位で上書きする。
-[policy](../../src/execution/policy.rs) はプログラム、cwd、環境変数の上書きを確認するが、
-通常の [runner](../../src/execution/runner.rs) は親環境を継承してプロセスを起動する。
+policy (`src/execution/policy.rs`) はプログラム、cwd、環境変数の上書きを確認するが、
+通常の runner (`src/execution/runner.rs`) は親環境を継承してプロセスを起動する。
 許可した cargo や git から起動される任意コードのファイル・ネットワークアクセスを
 OS レベルで隔離するものではない。今回、攻撃や情報流出の実証はしていない。
 
@@ -177,7 +177,7 @@ MCP の annotation を権限の証明として使わないという境界は現�
 
 ### 4. パス別の指示・スキル解決
 
-現状: [prompt.rs](../../src/features/agent_prompt.rs) は指定ファイル、またはルートの
+現状: prompt.rs (`src/features/agent_prompt.rs`) は指定ファイル、またはルートの
 AGENTS.md / QWEN.md / GEMINI.md を選択する。
 ネストした指示とスキルは自動探索・適用されず、必要に応じて読む運用。
 これは [instruction-policy](instruction-policy.md) に明記された仕様である。
@@ -192,7 +192,7 @@ Skills は metadata → 選択した本文 → 必要な参照の順に読み込
 
 ### 5. セッションの運用改善
 
-現状の [SessionStore](../../src/session/store.rs) は一覧のために各 session.json を全文読み、
+現状の SessionStore (`src/session/store.rs`) は一覧のために各 session.json を全文読み、
 合計128 MiBまたは10,000エントリを超えると明示的に失敗する。
 モデル選択付きの新しい保存経路には古い100件自動削除を適用しない。
 保持件数だけを一律に「100件」と考えると運用を誤る。
@@ -212,7 +212,7 @@ Skills は metadata → 選択した本文 → 必要な参照の順に読み込
 
 ### 6. monorepo と意味解析
 
-[verification.rs](../../src/features/change_impact/verification.rs) の Rust 提案は `cargo test` の
+verification.rs (`src/features/change_impact/verification.rs`) の Rust 提案は `cargo test` の
 プロジェクト単位。TypeScript はルート package.json の scripts を見て npm run を提案する。
 Cargo workspace の package、packageManager/lockfile、子 package の cwd を解決すると
 既存 impact_analyze の実用性を上げられる。

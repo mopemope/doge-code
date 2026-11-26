@@ -17,10 +17,12 @@
 
 ## 現在の作業
 
-- タスク: M3 Task 1（ビルドと検証の切替）
+- タスク: M3 Task 2（ドキュメントとガイダンスの切替）
 - 状態: 未着手
-- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3 計画作成（Emacs 連携と旧評価ツールの削除はユーザー決定、2026-11-26）
-- 次の一手: M3 計画の Task 1 Step 1 から始める（ブランチ `feat/orchestrator-m3`）
+- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3 計画作成（Emacs 連携と旧評価ツールの削除はユーザー決定、2026-11-26）。
+  M3 Task 1（旧ランタイム削除、仮想ワークスペース化、`dgc` に改名、検証スクリプトと CI の切替）
+- 次の一手: M3 計画の Task 2 Step 1 から始める（ブランチ `feat/orchestrator-m3`）。README・AGENTS.md・docs/ai はまだ
+  `dgc-next` と旧ランタイムを説明している（Task 1 はリンク切れになった箇所のリンク記法だけ外した）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -76,7 +78,7 @@
 
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
-| 1 | ビルドと検証の切替（旧ランタイム削除、`dgc` に改名、スクリプト・CI） | 未着手 | |
+| 1 | ビルドと検証の切替（旧ランタイム削除、`dgc` に改名、スクリプト・CI） | 完了 | `refactor!: replace the legacy runtime with the orchestrator as dgc` |
 | 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 未着手 | |
 | 3 | M3 受け入れ | 未着手 | |
 
@@ -85,6 +87,25 @@
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
 
 - 2026-11-26 (M3): Emacs 連携（`elisp/`、旧 `dgc exec` に依存）は削除する（ユーザー決定）。旧エージェント評価・修復受け入れツールと関連文書は削除し、AGENTS.md の Product priority をオーケストレーター向けに書き直す（ユーザー決定）。
+- 2026-11-26 (M3 Task 1, 実装者判断): `scripts/check-test-integrity.py` とそのテストは削除した。検査 3 種（`DOGE_SKIP_HTTPTEST`、
+  `Skipping httptest-based test` の文言、`src/llm/...` の HTTP 回帰テストへの `#[ignore]`）はすべて旧ランタイム固有で、新 crate に流用できる
+  汎用検査が無かったため（計画の「汎用検査が無ければ checker ごと削除」）。
+- 2026-11-26 (M3 Task 1, 実装者判断): `scripts/check-sensitive-logging.py` は削除せず付け替えた。対象は `crates/dgc-daemon/src/provider/`、
+  `crates/dgc-daemon/src/agent.rs`、`crates/dgc-daemon/src/agent/`、`crates/dgc-cli/src/tui/`（プロンプト・エージェント出力・権限要求を扱う範囲）。
+  禁止識別子と抽出規則は従来のまま。付け替え時点で 13 ファイル・tracing 呼び出し 76 件に誤検出なし。対象が 0 ファイルになった場合は
+  合格ではなく失敗にした（モジュール移動で無言の no-op にならないように）。
+- 2026-11-26 (M3 Task 1, 実装者判断): `check-agent-guidance.py` のリンク検査は、ルートが git のトップレベルなら追跡済みの Markdown だけを
+  対象にする（CI が見るのは追跡済みファイルだけ。ユーザーの未追跡メモ `docs/ai/audit-2026-10-29.md` は削除した `src/` へリンクしており、
+  触らない約束なので検査対象から外す必要があった）。git でない場合（テストの一時ディレクトリ）は従来どおり全ファイル。
+  skills は 0 件でも合格、`docs/tool-output-contract.md` は存在すれば検査。旧ツールカタログ検査は削除。
+- 2026-11-26 (M3 Task 1): 削除したファイルへのリンクが残る文書（README の Emacs 節、`docs/ai/evaluation.md`、`docs/ai/repair-acceptance.md`、
+  `docs/ai/develop-investigation-2026-10-11.md`）は、リンク記法だけをコード表記に変えた。文書の書き直し・削除は Task 2。
+- 2026-11-26 (M3 Task 1): macOS の集中テスト（`verify.sh macos`）のフィルタは `process_group`、`terminate_`（プロセスグループと
+  SIGTERM→SIGKILL）、`socket`（unix ソケットのモード・残骸・パス長）、`hello`（全接続が通る peer credential 検査を経る RPC）、
+  `autostart`（デーモンの自動起動）、`tui::`。各フィルタが 1 件以上に一致することを Linux で確認済み（下の検証記録）。
+- 2026-11-26 (M3 Task 1): ルート `Cargo.toml` は仮想ワークスペース。`[workspace.dependencies]` の既存エントリは全て新 crate が使っており
+  削除なし。`[profile.*]` はもともと無い。`.gitignore` は追跡していた `.doge/config.toml` の例外を外し、開発機に残る旧状態のために
+  `.doge/` の無視は残した。CI の ripgrep 導入ステップ（旧 search ツールのテスト用）は削除。
 
 - 2026-11-26 (M2): TUI の画面構成はサイドバー（プロジェクト／ワークスペース／エージェントのツリー）+ 選択エージェントのストリームと入力欄（ユーザー決定）。`dgc-next tui` と引数なしの `dgc-next` で起動。
 
@@ -836,6 +857,23 @@
   使い捨て `DGC_STATE_ROOT`）: 空のツリーに `no projects — add one with:` / `dgc-next project add <path>` が出る。`tmux paste-buffer -p`（bracketed）で
   `q\nx\tA y\n` を貼り付けても TUI は終了せず何も起きない（打鍵の `q` では終了）。TUI を開いたまま別のシェルで `project add` すると、キーを押さずに
   約 6 s 後のツリーに出た。入力欄・フォームへの貼り付けは単体テストのみ（実エージェントでは未確認）。デーモンは `daemon stop` で停止、残存プロセスなし。
+- 2026-11-26 M3 Task 1（Linux、固定ツールチェーン 1.99.0）:
+  - RED（スクリプトのテストを先に更新、`python3 -m unittest discover -s scripts/tests -p 'test_*.py'`）: 177 tests、15 failures / 14 errors
+    （msrv・check_ci・check-tui-deps が `manifest["package"]` を読む、macOS フィルタが旧名、ガイダンスが test-integrity を実行、
+    skills 0 件・未追跡メモの扱い、CI の ripgrep、sensitive-logging の対象が旧 `src/`）。
+  - GREEN: 同コマンドで 40 tests OK（旧評価ツールのテストは削除）。
+  - `cargo build --workspace --offline` で Cargo.lock を更新（510 パッケージ削除、追加・版変更なし）。`cargo build --locked --workspace` PASS。
+  - `cargo tree --workspace | rg -c "sea-orm|reqwest|tree-sitter|rmcp|axum"` → 0 件。`rg -n "dgc-next" crates scripts .github` → 0 件。
+    `rg -n 'CARGO_BIN_EXE_dgc\b|CARGO_BIN_EXE_dgc"' crates` → dgc-cli のテスト 4 箇所。`target/debug/dgc --version` → `dgc 0.1.0`。
+  - 各 crate 単独の `cargo check --locked -p <crate> --all-targets`: 4 crate とも PASS（ルートパッケージの feature 統合が無くなっても成立）。
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all` → `bash scripts/verify.sh rust` | PASS（fmt、clippy `-D warnings`、test 576 executed。旧 `/tmp/.git` 由来・並列 flake の失敗は消えた） |
+    | `bash scripts/verify.sh guidance` | PASS（40 tests） |
+    | `bash scripts/verify.sh msrv` | PASS（rustup 1.94.0） |
+    | `bash scripts/verify.sh tui-deps` | PASS（`dgc-cli` の crossterm 0.29 のみ） |
+    | `bash scripts/verify.sh macos` | 環境で実行不可（Linux。wrapper が拒否） |
+    | macOS の 6 フィルタを Linux で wrapper の `run_check` に通す | 全 PASS（process_group 1、terminate_ 4、socket 8、hello 5、autostart 3、tui:: 256 executed） |
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 

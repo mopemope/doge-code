@@ -28,13 +28,11 @@ target
 # Local credentials/environment files
 .env
 
-# Project-local agent state (sessions, memory, workflows) is ignored,
-# but the committed dogfood config is tracked.
-.doge/*
-!.doge/config.toml
+# Project-local state of the removed legacy runtime (sessions, RepoMap,
+# logs). Developer checkouts may still hold it; never commit it.
+.doge/
 # Legacy diagnostic log location. Older versions wrote prompt/source/tool
 # content to the repository root; never commit it if one remains.
-# New logs live under .doge/logs/ (already ignored above).
 /debug.log
 .serena
 .amazonq

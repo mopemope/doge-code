@@ -48,7 +48,7 @@ use tui::{AppEvent, ConnectionState, Effect, RequestTag, Runtime, TermEvent};
 
 const WAIT: Duration = Duration::from_secs(30);
 
-/// A state root whose Claude replays `scenario`, plus a `dgc-next` wrapper
+/// A state root whose Claude replays `scenario`, plus a `dgc` wrapper
 /// that pins `DGC_STATE_ROOT`: a daemon the backend spawns lives there too,
 /// never in the user's directories.
 struct Harness {
@@ -81,16 +81,16 @@ impl Harness {
             format!("claude_path = \"{}\"\n", claude.display()),
         )
         .expect("write config");
-        let exe = bin.join("dgc-next");
+        let exe = bin.join("dgc");
         fs::write(
             &exe,
             format!(
                 "#!/bin/sh\nunset DGC_LOG\nDGC_STATE_ROOT='{}' exec '{}' \"$@\"\n",
                 env.dir.path().display(),
-                env!("CARGO_BIN_EXE_dgc-next")
+                env!("CARGO_BIN_EXE_dgc")
             ),
         )
-        .expect("write dgc-next wrapper");
+        .expect("write dgc wrapper");
         fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).expect("chmod");
         Self { env, exe }
     }
@@ -127,7 +127,7 @@ impl Harness {
         workspace["id"].as_str().expect("workspace id").to_owned()
     }
 
-    /// `dgc-next run` a Claude agent; returns its id.
+    /// `dgc run` a Claude agent; returns its id.
     fn run_agent(&self, workspace: &str, prompt: &str) -> AgentId {
         let output = self.run(&[
             "run",
@@ -712,7 +712,7 @@ fn slow_fake_daemon(
 
 /// Never used: the stand-in daemon is already listening.
 fn no_exe() -> PathBuf {
-    PathBuf::from("/nonexistent/dgc-next")
+    PathBuf::from("/nonexistent/dgc")
 }
 
 #[tokio::test]

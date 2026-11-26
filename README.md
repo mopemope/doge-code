@@ -1804,7 +1804,7 @@ This enables:
 - **Analyze/Explain**: `C-c d a` (Analyze region), `C-c d e` (Explain region), `C-c d b` (Analyze buffer)
 - **Refactor**: `C-c d R` (Global refactor via `exec`)
 
-See [elisp/emacs-integration.md](elisp/emacs-integration.md) for detailed configuration options.
+See `elisp/emacs-integration.md` for detailed configuration options.
 
 ## 📝 TUI Slash Commands
 

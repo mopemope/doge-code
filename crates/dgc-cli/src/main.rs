@@ -1,6 +1,4 @@
-//! `dgc-next`: command-line client for the dgc orchestrator daemon.
-//!
-//! Renamed to `dgc` when the legacy runtime is removed (milestone M3).
+//! `dgc`: command-line client for the dgc orchestrator daemon.
 
 mod commands;
 mod output;
@@ -11,7 +9,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "dgc-next", version, about = "dgc orchestrator client")]
+#[command(name = "dgc", version, about = "dgc orchestrator client")]
 struct Cli {
     /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
@@ -69,7 +67,7 @@ async fn main() -> ExitCode {
     }
 }
 
-/// `dgc-next tui`: the terminal is restored before an error is printed.
+/// `dgc tui`: the terminal is restored before an error is printed.
 async fn run_tui(json: bool) -> commands::CliResult<ExitCode> {
     if json {
         return Err("the TUI has no JSON mode".into());

@@ -1,4 +1,4 @@
-//! `dgc-next project {add|ls|rm}`.
+//! `dgc project {add|ls|rm}`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

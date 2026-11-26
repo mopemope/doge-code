@@ -36,7 +36,7 @@ const WARN: Color = Color::Yellow;
 const DANGER: Color = Color::Red;
 
 /// Shown in the tree pane while there is no project.
-const EMPTY_TREE_HINT: &str = "no projects \u{2014} add one with: dgc-next project add <path>";
+const EMPTY_TREE_HINT: &str = "no projects \u{2014} add one with: dgc project add <path>";
 
 /// Draw the whole screen.
 pub fn render(state: &AppState, frame: &mut Frame) {
@@ -1822,7 +1822,7 @@ mod tests {
 
     #[test]
     fn an_empty_tree_says_how_to_add_a_project() {
-        let hint: String = "no projects \u{2014} add one with: dgc-next project add <path>"
+        let hint: String = "no projects \u{2014} add one with: dgc project add <path>"
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();

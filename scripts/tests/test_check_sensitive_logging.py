@@ -35,21 +35,21 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
     def test_reject_raw_identifiers(self):
         write_scope(
             self.root,
-            "src/llm/fixture.rs",
+            "crates/dgc-daemon/src/provider/fixture.rs",
             'fn f() {\n'
             '  debug!(payload = %payload, "request");\n'
             '}\n',
         )
         write_scope(
             self.root,
-            "src/llm/other.rs",
+            "crates/dgc-daemon/src/agent/actor.rs",
             'fn f() {\n'
             '  warn!(response_content = ?content, "bad");\n'
             '}\n',
         )
         write_scope(
             self.root,
-            "src/tui/llm_response_handler.rs",
+            "crates/dgc-cli/src/tui/update.rs",
             'fn f() {\n'
             '  debug!(arguments = %arguments, "tool");\n'
             '}\n',
@@ -62,7 +62,7 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
     def test_accept_safe_metadata(self):
         write_scope(
             self.root,
-            "src/llm/fixture.rs",
+            "crates/dgc-daemon/src/provider/claude.rs",
             'fn f() {\n'
             '  debug!(\n'
             '    message_count = 4,\n'
@@ -74,7 +74,7 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
         )
         write_scope(
             self.root,
-            "src/features/openai_subscription/fixture.rs",
+            "crates/dgc-daemon/src/agent.rs",
             'fn f() {\n'
             '  debug!(tool_result_count = 2, body_bytes = 10, "ok");\n'
             '}\n',
@@ -84,7 +84,7 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
     def test_multiline_macro_is_detected(self):
         write_scope(
             self.root,
-            "src/llm/fixture.rs",
+            "crates/dgc-daemon/src/provider/claude.rs",
             'fn f() {\n'
             '  debug!(\n'
             '    response_chunk = %chunk,\n'
@@ -98,7 +98,7 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
     def test_string_literal_does_not_trigger(self):
         write_scope(
             self.root,
-            "src/llm/fixture.rs",
+            "crates/dgc-daemon/src/provider/claude.rs",
             'fn f() {\n'
             '  debug!(message_count = 1, "payload response_content");\n'
             '}\n',
@@ -106,14 +106,49 @@ class SensitiveLoggingCheckerTests(unittest.TestCase):
         self.assertEqual(CHECKER.check_root(self.root), [])
 
     def test_outside_scope_is_ignored(self):
+        for rel in ("crates/dgc-daemon/src/store.rs", "crates/dgc-daemon/src/agentless.rs",
+                    "src/llm/fixture.rs"):
+            write_scope(
+                self.root,
+                rel,
+                'fn f() {\n'
+                '  debug!(payload = %payload, "request");\n'
+                '}\n',
+            )
+        # One clean in-scope file: an empty scope is itself an error.
+        write_scope(self.root, "crates/dgc-daemon/src/agent.rs", "fn f() {}\n")
+        self.assertEqual(CHECKER.check_root(self.root), [])
+
+    def test_path_qualified_macro_in_agent_module_is_detected(self):
         write_scope(
             self.root,
-            "src/tools/fixture.rs",
+            "crates/dgc-daemon/src/agent/actor.rs",
             'fn f() {\n'
-            '  debug!(payload = %payload, "request");\n'
+            '  tracing::warn!(agent_id = %id, text = %text, "bad");\n'
             '}\n',
         )
-        self.assertEqual(CHECKER.check_root(self.root), [])
+        errors = CHECKER.check_root(self.root)
+        self.assertTrue(any("text" in e and "agent/actor.rs" in e for e in errors), errors)
+
+    def test_scope_covers_the_orchestrator_prompt_and_output_paths(self):
+        for rel in ("crates/dgc-daemon/src/provider/codex.rs", "crates/dgc-daemon/src/agent.rs",
+                    "crates/dgc-daemon/src/agent/actor.rs", "crates/dgc-cli/src/tui/render.rs"):
+            write_scope(self.root, rel, "fn f() {}\n")
+        files = {path.relative_to(self.root).as_posix()
+                 for path in CHECKER.collect_scope_files(self.root)}
+        self.assertEqual(files, {
+            "crates/dgc-daemon/src/provider/codex.rs", "crates/dgc-daemon/src/agent.rs",
+            "crates/dgc-daemon/src/agent/actor.rs", "crates/dgc-cli/src/tui/render.rs",
+        })
+
+    def test_repository_scope_is_not_empty(self):
+        # A moved module must not silently turn the check into a no-op.
+        self.assertTrue(CHECKER.collect_scope_files(SCRIPTS.parent))
+        self.assertEqual(CHECKER.check_root(SCRIPTS.parent), [])
+
+    def test_empty_scope_fails_instead_of_passing(self):
+        errors = CHECKER.check_root(self.root)
+        self.assertTrue(any("no files" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

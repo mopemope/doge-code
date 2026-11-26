@@ -16,6 +16,17 @@ ROOT = Path(__file__).resolve().parents[1]
 TEST_RESULT = re.compile(r"test result: \w+\. (\d+) passed; (\d+) failed;")
 UNITTEST_RESULT = re.compile(r"^Ran (\d+) tests? in ", re.M)
 UNITTEST_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
+# Test-name filters for the code whose behavior depends on the Unix platform:
+# process groups and their termination, the unix socket server (file modes and
+# the peer-credential check every connection passes through `hello`), daemon
+# autostart, and the terminal UI.
+MACOS_FILTERS = ("process_group", "terminate_", "socket", "hello", "autostart", "tui::")
+
+
+def workspace_rust_version(root):
+    """Return the MSRV of the virtual workspace (`[workspace.package] rust-version`)."""
+    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    return manifest["workspace"]["package"]["rust-version"]
 
 
 def executed_tests(output):
@@ -60,7 +71,6 @@ def commands(mode, test_filter, root):
     if mode == "guidance":
         return [([sys.executable, "scripts/check-agent-guidance.py"], False),
                 ([sys.executable, "scripts/check-sensitive-logging.py"], False),
-                ([sys.executable, "scripts/check-test-integrity.py"], False),
                 ([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests",
                   "-p", "test_*.py"], "unittest")]
     if mode == "test":
@@ -71,8 +81,7 @@ def commands(mode, test_filter, root):
                   "--", "-D", "warnings"], False),
                 (["cargo", "test", "--locked", "--workspace"], True)]
     if mode == "msrv":
-        manifest = tomllib.loads((root / "Cargo.toml").read_text())
-        version = manifest["package"]["rust-version"]
+        version = workspace_rust_version(root)
         if re.fullmatch(r"\d+\.\d+", version):
             version += ".0"
         return [(["rustup", "run", version, "cargo", "check", "--locked", "--workspace",
@@ -80,8 +89,7 @@ def commands(mode, test_filter, root):
     if mode == "macos":
         if sys.platform != "darwin":
             raise ValueError("macos checks require macOS; this platform cannot supply macOS evidence")
-        return [(["cargo", "test", "--locked", name], True)
-                for name in ("tui::", "execution::", "jobs::")]
+        return [(["cargo", "test", "--locked", "--workspace", name], True) for name in MACOS_FILTERS]
     if mode == "tui-deps":
         return [([sys.executable, "scripts/check-tui-deps.py"], False)]
     raise ValueError(f"Unknown mode: {mode}")

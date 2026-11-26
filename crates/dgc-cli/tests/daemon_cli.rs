@@ -1,4 +1,4 @@
-//! End-to-end tests for `dgc-next daemon ...`. The harness in `common` gives each
+//! End-to-end tests for `dgc daemon ...`. The harness in `common` gives each
 //! test its own `DGC_STATE_ROOT` and stops the daemon it started.
 
 mod common;
@@ -52,7 +52,7 @@ fn concurrent_autostart_yields_single_daemon() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("dgc-next should start")
+            .expect("dgc should start")
     };
     let first = spawn();
     let second = spawn();

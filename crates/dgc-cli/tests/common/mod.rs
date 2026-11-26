@@ -1,4 +1,4 @@
-//! Shared harness for the `dgc-next` end-to-end tests. Every test runs against
+//! Shared harness for the `dgc` end-to-end tests. Every test runs against
 //! its own `DGC_STATE_ROOT` and stops the daemon it started, even when it panics.
 #![allow(dead_code)]
 
@@ -16,9 +16,9 @@ use tempfile::{TempDir, tempdir};
 pub const CLAUDE_VERSION: &str = "2.1.332 (Claude Code)";
 pub const CODEX_VERSION: &str = "codex-cli 0.172.0";
 
-/// The fake provider is built next to `dgc-next` by a workspace build.
+/// The fake provider is built next to `dgc` by a workspace build.
 pub fn fake_provider() -> PathBuf {
-    let fake = Path::new(env!("CARGO_BIN_EXE_dgc-next")).with_file_name("dgc-fake-provider");
+    let fake = Path::new(env!("CARGO_BIN_EXE_dgc")).with_file_name("dgc-fake-provider");
     assert!(
         fake.is_file(),
         "{} is missing: run the tests with --workspace (scripts/verify.sh does) so dgc-daemon's \
@@ -64,7 +64,7 @@ impl TestEnv {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_dgc-next"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dgc"));
         command
             .args(args)
             .env("DGC_STATE_ROOT", self.dir.path())
@@ -74,7 +74,7 @@ impl TestEnv {
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
-        self.command(args).output().expect("dgc-next should start")
+        self.command(args).output().expect("dgc should start")
     }
 
     pub fn lock_pid(&self) -> Option<i32> {

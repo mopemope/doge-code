@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Reject raw-content identifiers in LLM diagnostic logging.
+"""Reject raw-content identifiers in diagnostic logging of prompt and agent text.
 
-Scope:
-  src/llm/**
-  src/features/openai_subscription/**
-  src/tui/llm_response_handler.rs
+Scope (the code that carries prompts, agent output, and permission requests):
+  crates/dgc-daemon/src/provider/**
+  crates/dgc-daemon/src/agent.rs and crates/dgc-daemon/src/agent/**
+  crates/dgc-cli/src/tui/**
 
 Macros:
   trace!, debug!, info!, warn!, error!
@@ -25,10 +25,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Paths relative to the repository root; each is a file or a directory.
 SENSITIVE_SCOPE = [
-    ROOT / "src/llm",
-    ROOT / "src/features/openai_subscription",
-    ROOT / "src/tui/llm_response_handler.rs",
+    Path("crates/dgc-daemon/src/provider"),
+    Path("crates/dgc-daemon/src/agent.rs"),
+    Path("crates/dgc-daemon/src/agent"),
+    Path("crates/dgc-cli/src/tui"),
 ]
 
 MACROS = ("trace", "debug", "info", "warn", "error")
@@ -205,12 +207,7 @@ def collect_scope_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for scope in SENSITIVE_SCOPE:
         # Resolve against the provided root (tests use a fixture root).
-        if scope == ROOT / "src/tui/llm_response_handler.rs":
-            candidate = root / "src/tui/llm_response_handler.rs"
-        elif scope == ROOT / "src/llm":
-            candidate = root / "src/llm"
-        else:
-            candidate = root / "src/features/openai_subscription"
+        candidate = root / scope
         if candidate.is_file():
             files.append(candidate)
         elif candidate.is_dir():
@@ -220,7 +217,11 @@ def collect_scope_files(root: Path) -> list[Path]:
 
 def check_root(root: Path) -> list[str]:
     errors: list[str] = []
-    for path in collect_scope_files(root):
+    files = collect_scope_files(root)
+    if not files:
+        # A moved module must not turn the check into a silent pass.
+        return ["sensitive logging scope matched no files; update SENSITIVE_SCOPE"]
+    for path in files:
         try:
             source = path.read_text()
         except OSError as exc:
