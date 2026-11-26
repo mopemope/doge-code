@@ -163,7 +163,9 @@ Keys in the tree:
 In forms `↑` `↓` move between fields, `Tab` switches the provider (or the
 workspace isolation), `Enter` creates, `Esc` cancels. The new-agent form needs a
 prompt, and a worktree workspace needs a branch; failures stay in the form. The
-form warns in red when the mode is an auto-approve one.
+form warns in red when the mode is an auto-approve one. A created agent or
+workspace is selected only if its form is still open when the daemon answers;
+after `Esc` it is still created, but the cursor stays where you left it.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was
 selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).

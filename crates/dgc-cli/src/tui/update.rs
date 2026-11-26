@@ -346,7 +346,11 @@ fn on_rpc_ok(
         }
         RequestTag::Respond { permission_id } => remove_permission(state, &permission_id),
         RequestTag::CreateAgent => {
-            if matches!(state.dialog, Some(Dialog::NewAgent(_))) {
+            // Only the form that submitted (still open) is closed, and only
+            // then does the new agent take the cursor: after Esc the user
+            // has moved on, and x/r/A must keep acting on their selection.
+            let waiting = matches!(&state.dialog, Some(Dialog::NewAgent(form)) if form.submitting);
+            if waiting {
                 state.close_dialog();
             }
             match serde_json::from_value::<Agent>(value) {
@@ -354,7 +358,7 @@ fn on_rpc_ok(
                     let node = NodeId::Agent(agent.id.clone());
                     state.tree.insert_agent(agent);
                     // Watch the new agent, unless the user is typing at another.
-                    if state.focus != Focus::Input {
+                    if waiting && state.focus != Focus::Input {
                         state.tree.reveal(&node);
                     }
                 }
@@ -362,14 +366,16 @@ fn on_rpc_ok(
             }
         }
         RequestTag::CreateWorkspace => {
-            if matches!(state.dialog, Some(Dialog::NewWorkspace(_))) {
+            let waiting =
+                matches!(&state.dialog, Some(Dialog::NewWorkspace(form)) if form.submitting);
+            if waiting {
                 state.close_dialog();
             }
             match serde_json::from_value::<Workspace>(value) {
                 Ok(workspace) => {
                     let node = NodeId::Workspace(workspace.id.clone());
                     state.tree.insert_workspace(workspace);
-                    if state.focus != Focus::Input {
+                    if waiting && state.focus != Focus::Input {
                         state.tree.reveal(&node);
                     }
                 }
@@ -3152,5 +3158,76 @@ mod tests {
         f.snapshot_with(vec![perm]);
         assert_eq!(view(&f.state), before);
         assert_eq!(f.state.focus, Focus::Dialog);
+    }
+
+    // ---- create after the form was closed ----
+
+    #[test]
+    fn a_created_agent_is_selected_only_while_its_form_is_open() {
+        let mut f = Fixture::new();
+        press_key(&mut f.state, Key::Down); // workspace row
+        press(&mut f.state, 'n');
+        type_text(&mut f.state, "go");
+        assert_eq!(press_key(&mut f.state, Key::Enter).len(), 1);
+        // The user gives up waiting and moves on to a1.
+        press_key(&mut f.state, Key::Esc);
+        press_key(&mut f.state, Key::Down);
+        assert_eq!(f.state.selected_agent_id(), Some(f.a1.id.clone()));
+        let created = agent(
+            &f.workspace.id,
+            "go",
+            ProviderKind::Claude,
+            "2026-06-01T00:00:00Z",
+        );
+        let done = AppEvent::RpcDone {
+            request: RequestTag::CreateAgent,
+            result: Ok(serde_json::to_value(&created).expect("agent json")),
+        };
+        let fx = update(&mut f.state, done.clone());
+        assert!(f.state.tree.agent(&created.id).is_some(), "in the tree");
+        assert_eq!(
+            f.state.selected_agent_id(),
+            Some(f.a1.id.clone()),
+            "x, r and A must still act on a1"
+        );
+        assert_eq!(fx, vec![]);
+
+        // A new form the user opened meanwhile is not the one that
+        // submitted: it stays open and keeps the cursor where it is.
+        let mut f = Fixture::new();
+        press_key(&mut f.state, Key::Down);
+        press(&mut f.state, 'n');
+        type_text(&mut f.state, "go");
+        press_key(&mut f.state, Key::Enter);
+        press_key(&mut f.state, Key::Esc);
+        press(&mut f.state, 'n');
+        type_text(&mut f.state, "draft");
+        let cursor = f.state.tree.cursor().cloned();
+        update(&mut f.state, done);
+        let Some(Dialog::NewAgent(form)) = &f.state.dialog else {
+            panic!("the new form closed");
+        };
+        assert_eq!(form.prompt.text(), "draft");
+        assert_eq!(f.state.tree.cursor().cloned(), cursor);
+    }
+
+    #[test]
+    fn a_created_workspace_is_selected_only_while_its_form_is_open() {
+        let mut f = Fixture::new();
+        press(&mut f.state, 'w');
+        assert_eq!(press_key(&mut f.state, Key::Enter).len(), 1);
+        press_key(&mut f.state, Key::Esc);
+        f.select_a1();
+        let created = workspace(&f.project.id, "2026-06-01T00:00:00Z");
+        let fx = update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request: RequestTag::CreateWorkspace,
+                result: Ok(serde_json::to_value(&created).expect("workspace json")),
+            },
+        );
+        assert!(f.state.tree.workspace(&created.id).is_some(), "in the tree");
+        assert_eq!(f.state.selected_agent_id(), Some(f.a1.id.clone()));
+        assert_eq!(fx, vec![]);
     }
 }
