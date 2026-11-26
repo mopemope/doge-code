@@ -133,9 +133,10 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
 
 ## Agents
 
-- `dgc run --workspace ID --provider claude|codex [--model M] [--mode MODE]
+- `dgc run --workspace ID [--provider claude|codex] [--profile NAME] [--model M] [--mode MODE]
   [--title T] [--follow] PROMPT` starts an agent and prints its id (`--json`:
-  the agent record). The title defaults to the prompt's first line (60 chars).
+  the agent record). Supply a provider or a profile. The title defaults to the
+  prompt's first line (60 chars).
   `--follow` then prints its events until it is idle, stopped, failed or
   archived; the exit status is 0 only when it ended idle.
 - `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
@@ -156,6 +157,37 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   interrupt (`dgc interrupt`, `send --behavior interrupt`, or a steer that
   falls back to one) discards the queued messages instead of sending them
   later; each shows in `logs` as `queued message discarded: TEXT`.
+
+### Launch profiles
+
+Define named launch settings in the daemon's `config.toml` and restart the
+daemon after editing the file.
+
+```toml
+[profiles.review]
+provider = "claude"
+model = "haiku"
+mode = "plan"
+notes = "Review changes before editing"
+
+[profiles.quick-edit]
+provider = "codex"
+mode = "full-access"
+notes = "Runs commands and edits files without asking"
+```
+
+Names contain 1–32 ASCII letters, digits, underscores, or hyphens. `provider`
+must be `claude` or `codex`. `model`, `mode`, and `notes` are optional
+strings. The daemon checks profile names, fields, and provider modes at startup,
+even when a provider CLI is unavailable.
+
+- `dgc profile ls [--json]` lists profiles by name, including their notes.
+- `dgc run --workspace ID --profile review "Review the latest changes"` uses
+  the profile's settings. `--model` and `--mode` override those settings.
+  If you also supply `--provider`, it must match the profile's provider.
+- Choosing a profile with an auto-approve mode enables that mode when you
+  launch the agent. `profile ls` marks such profiles `auto-approve`, and
+  `run` prints the usual warning if the effective mode auto-approves.
 
 ### Permissions
 
@@ -227,7 +259,7 @@ Keys in the tree:
 | `↑` `↓` / `k` `j` | move; `←` collapse or go to the parent; `→` expand or enter |
 | `Enter` | expand/collapse a project or workspace; on an agent, start typing |
 | `i` | type to the selected agent |
-| `n` | new agent in the selected workspace (form: provider, model, mode, title, prompt) |
+| `n` | new agent in the selected workspace (form: profile, provider, model, mode, title, prompt) |
 | `w` | new workspace in the selected project (local, or worktree with branch and optional base) |
 | `x` | interrupt the selected agent (discards its queued messages) |
 | `r` | resume a stopped or failed agent |
@@ -239,9 +271,14 @@ Keys in the tree:
 | `q`, `Ctrl-C` | quit (`Ctrl-C` works everywhere) |
 
 In forms `↑` `↓` move between fields, `Tab` switches the provider (or the
-workspace isolation), `Enter` creates, `Esc` cancels. The new-agent form needs a
-prompt, and a worktree workspace needs a branch; failures stay in the form. The
-form warns in red when the mode is an auto-approve one. A created agent or
+workspace isolation), `Enter` creates, and `Esc` cancels. The new-agent form
+loads profiles when it opens. On the profile field, `Tab` and `Shift-Tab` cycle
+through `(none)` and the profiles by name. Choosing a profile fills provider,
+model and mode. You can edit these fields before creating the agent. Choosing
+`(none)` resets these three fields to their initial values. Clearing model
+or mode uses the provider default, and the form warns in red whenever the
+effective mode auto-approves. The new-agent form needs a prompt, and a worktree
+workspace needs a branch. Failures stay in the form. A created agent or
 workspace is selected only if its form is still open when the daemon answers;
 after `Esc` it is still created, but the cursor stays where you left it.
 
@@ -324,7 +361,7 @@ experiments).
 |---|---|
 | Socket | `$XDG_RUNTIME_DIR/dgc/daemon.sock`, else `~/.local/state/dgc/run/daemon.sock` |
 | Projects, workspaces, agents, events, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
-| Config (`claude_path`, `codex_path`, `events_max_bytes`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
+| Config (`claude_path`, `codex_path`, `events_max_bytes`, `profiles`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
 | Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
 
 Each agent's events are in `agents/<id>/events.jsonl` under the state

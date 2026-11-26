@@ -60,8 +60,11 @@ pub enum AgentCommand {
         /// Workspace the agent works in.
         #[arg(long)]
         workspace: WorkspaceId,
-        #[arg(long, value_enum)]
-        provider: Provider,
+        #[arg(long, value_enum, required_unless_present = "profile")]
+        provider: Option<Provider>,
+        /// Named launch profile from the daemon's config.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
         /// Provider model name.
         #[arg(long)]
         model: Option<String>,
@@ -120,6 +123,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
         AgentCommand::Run {
             workspace,
             provider,
+            profile,
             model,
             mode,
             title,
@@ -130,7 +134,8 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
             let params = AgentCreateParams {
                 workspace_id: workspace,
                 title,
-                provider: provider.into(),
+                provider: provider.map(Into::into),
+                profile,
                 model,
                 mode,
                 initial_prompt: prompt,

@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 Task 3（プロファイル）
+- タスク: M4 Task 4（引き継ぎ）
 - 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1 の前提修正と Task 2 の Claude・Codex の使用量上限検知を実装・検証。
-- 次の一手: M4 計画の Task 3 Step 1 で、プロファイルの読み込み、一覧、エージェント作成への反映のテストを追加する（ブランチ `feat/orchestrator-m4`）。
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1 の前提修正、Task 2 の使用量上限検知、Task 3 の名前付き起動プロファイルを実装・検証。
+- 次の一手: M4 計画の Task 4 Step 1 で、引き継ぎ文、同じワークスペースでの起動、CLI と TUI の確認操作のテストを追加する（ブランチ `feat/orchestrator-m4`）。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -87,13 +87,18 @@
 |---|---|---|---|
 | 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 完了 | `fix: tail history reads and other prerequisites for handoff` |
 | 2 | 上限検知（アダプタ） | 完了 | `feat(daemon): detect provider usage limits` |
-| 3 | プロファイル | 未着手 | |
+| 3 | プロファイル | 完了 | `feat: launch agents from named profiles` |
 | 4 | 引き継ぎ（デーモン、CLI、TUI） | 未着手 | |
 | 5 | M4 受け入れ | 未着手 | |
 
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M4 Task 3): 起動プロファイルを明示的に選ぶと、その自動承認モードが適用される。
+  設定検証と一覧の判定にはアダプタと同じモード表を使う。TUI は新規エージェントフォームを開くたびに取得し、
+  プロファイルを選んだ時点で欄に展開する。作成 RPC には画面上の値を送るため、
+  モード欄を空にしてプロバイダ既定へ戻した場合も、選択済みプロファイルから再継承されない。
 
 - 2026-11-26 (M4 Task 2、レビュー決定): Claude の `allowed` と `allowed_warning` は通知を抑止し、`rejected`、未知の文字列ステータス、HTTP 429 を検知する。
   Codex の再試行するエラーは通知を抑止する。リセット時刻は `primary` / `secondary` の 100% 以上のウィンドウから最小値を選び、該当がなければ両方を対象にする。
@@ -605,6 +610,16 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-26 M4 Task 3（Linux、Rust 1.99.0）:
+  - RED: 新規の 7 テストが、設定の `profiles` キー、CLI の `--profile`、フォームを開いたときの一覧要求が未実装のため失敗。
+  - GREEN: `cargo test --locked -p dgc-daemon --test store --test server --test agent_manager` で計 80 件、
+    `cargo test --locked -p dgc-cli --bin dgc tui::` で 133 件、偽プロバイダのビルド後の
+    `cargo test --locked -p dgc-cli --test agent_cli` で 14 件 PASS。
+  - `cargo fmt --all`、4 crate の全ターゲット・全機能の Clippy、`bash scripts/verify.sh rust`（612 件）、
+    `guidance`、`tui-deps` PASS。
+  - tmux でプロファイルを選んだ直後の赤い警告、通常プロファイルへの切り替え、偽プロバイダによる応答を確認。
+    端末記録とテスト出力は Task 3 の作業レポートを参照。実プロバイダと macOS での確認は未実施。
 
 - 2026-11-26 M4 Task 2 レビュー修正（Linux、Rust 1.99.0）:
   - RED: Claude の警告、両プロバイダの未正規化の理由、Codex の再試行エラーとリセット時刻の選択を再現。

@@ -448,6 +448,58 @@ fn config_reads_values() {
 }
 
 #[test]
+fn profiles_load_and_validate() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[profiles.Claude_1-review]
+provider = "claude"
+model = "haiku"
+mode = "manual"
+notes = "Quick review"
+
+[profiles.codex]
+provider = "codex"
+"#,
+    )
+    .expect("write profiles");
+    let config = DaemonConfig::load(&path).expect("load valid profiles");
+    let claude = &config.profiles["Claude_1-review"];
+    assert_eq!(claude.provider, dgc_protocol::model::ProviderKind::Claude);
+    assert_eq!(claude.model.as_deref(), Some("haiku"));
+    assert_eq!(claude.mode.as_deref(), Some("manual"));
+    assert_eq!(claude.notes.as_deref(), Some("Quick review"));
+    let codex = &config.profiles["codex"];
+    assert_eq!(codex.provider, dgc_protocol::model::ProviderKind::Codex);
+    assert!(codex.model.is_none() && codex.mode.is_none() && codex.notes.is_none());
+
+    for (name, body, problem) in [
+        ("bad name", "provider = 'claude'", "profile name"),
+        ("日本語", "provider = 'claude'", "profile name"),
+        (
+            "abcdefghijklmnopqrstuvwxyz1234567",
+            "provider = 'claude'",
+            "profile name",
+        ),
+        (
+            "typo",
+            "provider = 'claude'\nmodle = 'haiku'",
+            "unknown field",
+        ),
+        ("other", "provider = 'other'", "provider"),
+        ("missing", "model = 'haiku'", "provider"),
+    ] {
+        fs::write(&path, format!("[profiles.\"{name}\"]\n{body}\n")).expect("write profile");
+        let error = DaemonConfig::load(&path)
+            .expect_err("invalid profile")
+            .to_string();
+        assert!(error.contains(name) && error.contains(problem), "{error}");
+    }
+}
+
+#[test]
 fn config_unknown_key_is_error() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");

@@ -6,8 +6,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use dgc_daemon::provider::validate_mode;
 use dgc_protocol::event::AgentEvent;
 use dgc_protocol::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
+use dgc_protocol::methods::ProfileInfo;
 use dgc_protocol::model::{
     Agent, AgentState, Isolation, PendingPermission, Project, ProviderKind, SendBehavior,
     Workspace, WorkspaceState,
@@ -466,6 +468,7 @@ impl StreamBuffer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentField {
+    Profile,
     Provider,
     Model,
     Mode,
@@ -473,7 +476,8 @@ pub enum AgentField {
     Prompt,
 }
 
-const AGENT_FIELDS: [AgentField; 5] = [
+const AGENT_FIELDS: [AgentField; 6] = [
+    AgentField::Profile,
     AgentField::Provider,
     AgentField::Model,
     AgentField::Mode,
@@ -484,6 +488,9 @@ const AGENT_FIELDS: [AgentField; 5] = [
 #[derive(Debug, Clone)]
 pub struct NewAgentForm {
     pub workspace_id: WorkspaceId,
+    pub(super) profiles: Vec<ProfileInfo>,
+    /// Zero selects "(none)"; the rest are one-based profile indices.
+    profile_index: usize,
     pub provider: ProviderKind,
     pub model: LineEditor,
     pub mode: LineEditor,
@@ -500,6 +507,8 @@ impl NewAgentForm {
     pub fn new(workspace_id: WorkspaceId) -> Self {
         Self {
             workspace_id,
+            profiles: Vec::new(),
+            profile_index: 0,
             provider: ProviderKind::Claude,
             model: LineEditor::default(),
             mode: LineEditor::default(),
@@ -515,10 +524,38 @@ impl NewAgentForm {
     /// shows a red warning).
     pub fn auto_approve_mode(&self) -> bool {
         let mode = self.mode.text().trim();
-        match self.provider {
-            ProviderKind::Claude => matches!(mode, "bypassPermissions" | "auto" | "acceptEdits"),
-            ProviderKind::Codex => mode == "full-access",
+        let mode = (!mode.is_empty()).then_some(mode);
+        matches!(validate_mode(self.provider, mode), Ok(true))
+    }
+
+    pub fn selected_profile(&self) -> Option<&ProfileInfo> {
+        self.profile_index
+            .checked_sub(1)
+            .and_then(|i| self.profiles.get(i))
+    }
+
+    pub fn cycle_profile(&mut self, forward: bool) {
+        if self.profiles.is_empty() {
+            return;
         }
+        let count = self.profiles.len() + 1;
+        self.profile_index = if forward {
+            (self.profile_index + 1) % count
+        } else {
+            (self.profile_index + count - 1) % count
+        };
+        let (provider, model, mode) =
+            self.selected_profile()
+                .map_or((ProviderKind::Claude, None, None), |profile| {
+                    (
+                        profile.provider,
+                        profile.model.clone(),
+                        profile.mode.clone(),
+                    )
+                });
+        self.provider = provider;
+        self.model.set_text(model.as_deref().unwrap_or_default());
+        self.mode.set_text(mode.as_deref().unwrap_or_default());
     }
 
     pub fn toggle_provider(&mut self) {
@@ -542,10 +579,10 @@ impl NewAgentForm {
         self.field = AGENT_FIELDS[next];
     }
 
-    /// The editor of the focused field (`None` for the provider choice).
+    /// The editor of the focused field (`None` for selectors).
     pub fn editor_mut(&mut self) -> Option<&mut LineEditor> {
         match self.field {
-            AgentField::Provider => None,
+            AgentField::Profile | AgentField::Provider => None,
             AgentField::Model => Some(&mut self.model),
             AgentField::Mode => Some(&mut self.mode),
             AgentField::Title => Some(&mut self.title),
@@ -725,6 +762,8 @@ pub struct AppState {
     pub(super) snapshot_pending: bool,
     /// A subscription lagged while a snapshot was in flight.
     pub(super) snapshot_refresh_again: bool,
+    /// Correlates a profile list reply with the form that requested it.
+    pub(super) profile_generation: u64,
     /// Ticks connected with no snapshot pending since the last request: at
     /// [`SNAPSHOT_REFRESH_TICKS`] the tree is reloaded (changes made by
     /// other clients have no live event).
@@ -763,6 +802,7 @@ impl Default for AppState {
             dismissed: HashSet::new(),
             snapshot_pending: false,
             snapshot_refresh_again: false,
+            profile_generation: 0,
             ticks_since_snapshot: 0,
             unsent: None,
             input_target: None,

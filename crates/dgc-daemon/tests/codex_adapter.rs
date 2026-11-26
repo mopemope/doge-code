@@ -817,7 +817,8 @@ impl Harness {
             .create(AgentCreateParams {
                 workspace_id: self.workspace.id.clone(),
                 title: "codex".to_owned(),
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
+                profile: None,
                 model: model.map(str::to_owned),
                 mode: None,
                 initial_prompt: prompt.to_owned(),

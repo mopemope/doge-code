@@ -40,6 +40,11 @@ enum Command {
     },
     #[command(flatten)]
     Agent(commands::agent::AgentCommand),
+    /// List named launch profiles.
+    Profile {
+        #[command(subcommand)]
+        command: commands::profile::ProfileCommand,
+    },
     /// List and answer agents' permission requests.
     Permit {
         #[command(subcommand)]
@@ -56,6 +61,7 @@ async fn main() -> ExitCode {
         Some(Command::Project { command }) => commands::project::run(command, cli.json).await,
         Some(Command::Workspace { command }) => commands::workspace::run(command, cli.json).await,
         Some(Command::Agent(command)) => commands::agent::run(command, cli.json).await,
+        Some(Command::Profile { command }) => commands::profile::run(command, cli.json).await,
         Some(Command::Permit { command }) => commands::permit::run(command, cli.json).await,
     };
     match result {

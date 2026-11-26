@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use dgc_protocol::methods::{
     AgentCreateParams, AgentEventsParams, AgentIdParams, AgentListParams, AgentSendParams,
-    PermissionListParams, PermissionRespondParams, ProjectAddParams, ProjectRemoveParams,
-    SubscribeParams, UnsubscribeParams, WorkspaceArchiveParams, WorkspaceCreateParams,
-    WorkspaceListParams,
+    PermissionListParams, PermissionRespondParams, ProfileListResult, ProjectAddParams,
+    ProjectRemoveParams, SubscribeParams, UnsubscribeParams, WorkspaceArchiveParams,
+    WorkspaceCreateParams, WorkspaceListParams,
 };
 use dgc_protocol::model::AgentState;
 use dgc_protocol::rpc::{INTERNAL, INVALID_PARAMS, RpcError};
@@ -16,18 +16,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::agent::{AgentError, AgentManager};
-use crate::server::{ConnCtx, ECHO_LIMIT};
+use crate::config::DaemonConfig;
+use crate::server::ConnCtx;
 use crate::workspace::WorkspaceManager;
-
-/// Longest piece of a deserialization error echoed to the client, in chars
-/// (the same limit as other echoed input).
-const PARSE_ERROR_ECHO: usize = ECHO_LIMIT;
 
 /// Decode request params. A missing (`null`) params value counts as `{}`.
 fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
     let params = if params.is_null() { json!({}) } else { params };
     serde_json::from_value(params).map_err(|err| {
-        let detail: String = err.to_string().chars().take(PARSE_ERROR_ECHO).collect();
+        let detail = crate::clip_error_detail(&err.to_string());
         RpcError::new(INVALID_PARAMS, format!("invalid params: {detail}"))
     })
 }
@@ -91,6 +88,13 @@ pub async fn workspace_archive(
         }
     }
     encode(&manager.archive_workspace(&params.id, params.force).await?)
+}
+
+pub fn profile_list(config: &DaemonConfig) -> Result<Value, RpcError> {
+    let profiles = config
+        .profile_infos()
+        .map_err(|err| RpcError::new(INTERNAL, err.to_string()))?;
+    encode(&ProfileListResult { profiles })
 }
 
 pub async fn agent_create(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {
@@ -272,7 +276,11 @@ mod tests {
             .message
             .strip_prefix("invalid params: ")
             .expect("prefix");
-        assert!(detail.chars().count() <= ECHO_LIMIT, "{}", err.message);
+        assert!(
+            detail.chars().count() <= crate::ECHO_LIMIT,
+            "{}",
+            err.message
+        );
     }
 
     #[tokio::test]

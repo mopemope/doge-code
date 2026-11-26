@@ -8,6 +8,7 @@
 mod common;
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -206,6 +207,67 @@ fn created_id(output: &Output) -> String {
     let id = text.lines().next().expect("run prints the agent id").trim();
     assert!(id.starts_with("agt_"), "unexpected first line: {id}");
     id.to_owned()
+}
+
+#[test]
+fn run_with_profile() {
+    let a = AgentEnv::new("claude_turn", None);
+    let help = a.run(&["run", "--help"]);
+    assert_success(&help);
+    assert!(stdout(&help).contains("--profile"), "{}", stdout(&help));
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&a.env.paths.config_file)
+        .expect("open config")
+        .write_all(
+            br#"
+[profiles.fast]
+provider = "claude"
+model = "haiku"
+mode = "bypassPermissions"
+notes = "Quick\nreview\u001b[2J\u202e"
+"#,
+        )
+        .expect("append profile");
+    let empty = a.env.dir.path().join("empty-path");
+    fs::create_dir(&empty).expect("mkdir");
+    let a = a.with_workspace(Some(&empty));
+    let output = a.run(&[
+        "--json",
+        "run",
+        "--workspace",
+        &a.workspace,
+        "--profile",
+        "fast",
+        "Say pong",
+    ]);
+    let agent = json(&output);
+    assert_eq!(agent["provider"], "claude");
+    assert_eq!(agent["model"], "haiku");
+    assert_eq!(agent["mode"], "bypassPermissions");
+    assert_eq!(agent["auto_approve"], true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("warning:") && stderr.contains("auto-approve"),
+        "{stderr}"
+    );
+    let id = agent["id"].as_str().expect("id");
+    a.wait_state(id, "idle");
+
+    let human = a.run(&["profile", "ls"]);
+    assert_success(&human);
+    let human = stdout(&human);
+    assert!(human.contains("auto-approve"), "{human}");
+    assert!(human.contains(r"Quick\nreview\x1b[2J\u{202e}"), "{human:?}");
+    let output = a.run(&["profile", "ls", "--json"]);
+    assert!(!stdout(&output).contains('\u{202e}'));
+    let listed = json(&output);
+    assert_eq!(listed["profiles"][0]["name"], "fast");
+    assert_eq!(
+        listed["profiles"][0]["notes"],
+        "Quick\nreview\u{1b}[2J\u{202e}"
+    );
+    assert_eq!(listed["profiles"][0]["auto_approve"], true);
 }
 
 #[test]

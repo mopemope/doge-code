@@ -4,8 +4,8 @@ use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
     AGENT_ARCHIVE, AGENT_CREATE, AGENT_INTERRUPT, AGENT_RESUME, AGENT_SEND, AgentCreateParams,
-    AgentIdParams, AgentSendParams, PERMISSION_RESPOND, PermissionRespondParams, WORKSPACE_CREATE,
-    WorkspaceCreateParams,
+    AgentIdParams, AgentSendParams, PERMISSION_RESPOND, PROFILE_LIST, PermissionRespondParams,
+    ProfileListResult, WORKSPACE_CREATE, WorkspaceCreateParams,
 };
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PendingPermission, SendBehavior, SendOutcome, Workspace,
@@ -13,8 +13,8 @@ use dgc_protocol::model::{
 
 use super::input::{Key, KeyInput};
 use super::state::{
-    AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PermissionChange,
-    SNAPSHOT_REFRESH_TICKS, STREAM_CAP, ScrollMotion, default_title,
+    AgentField, AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId,
+    PermissionChange, SNAPSHOT_REFRESH_TICKS, STREAM_CAP, ScrollMotion, default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
@@ -290,6 +290,14 @@ fn on_rpc_done(
 
 fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
     match request {
+        RequestTag::LoadProfiles { generation } => {
+            if generation == state.profile_generation
+                && let Some(Dialog::NewAgent(form)) = &mut state.dialog
+            {
+                form.error = Some(message);
+            }
+            return;
+        }
         RequestTag::Send { agent_id, .. } => {
             if let Some((sent_to, text)) = state.unsent.take()
                 && sent_to == agent_id
@@ -339,8 +347,23 @@ fn on_rpc_ok(
     value: serde_json::Value,
     fx: &mut Vec<Effect>,
 ) {
-    state.clear_error();
+    if !matches!(request, RequestTag::LoadProfiles { .. }) {
+        state.clear_error();
+    }
     match request {
+        RequestTag::LoadProfiles { generation } => {
+            if generation == state.profile_generation
+                && let Some(Dialog::NewAgent(form)) = &mut state.dialog
+            {
+                match serde_json::from_value::<ProfileListResult>(value) {
+                    Ok(mut result) => {
+                        result.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+                        form.profiles = result.profiles;
+                    }
+                    Err(_) => form.error = Some("could not read profiles".to_owned()),
+                }
+            }
+        }
         RequestTag::Send { behavior, .. } => {
             state.unsent = None;
             if behavior != SendBehavior::Queue {
@@ -528,6 +551,14 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
         'n' => match cursor_workspace(state) {
             Some(workspace_id) => {
                 state.open_dialog(Dialog::NewAgent(NewAgentForm::new(workspace_id)));
+                state.profile_generation = state.profile_generation.wrapping_add(1);
+                fx.push(Effect::Call {
+                    request: RequestTag::LoadProfiles {
+                        generation: state.profile_generation,
+                    },
+                    method: PROFILE_LIST,
+                    params: serde_json::json!({}),
+                });
             }
             None => state.set_error("select a workspace first".to_owned()),
         },
@@ -834,6 +865,9 @@ fn agent_form_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
     match key.key {
         Key::Esc => state.close_dialog(),
         Key::Enter => submit_agent(state, fx),
+        Key::Tab | Key::BackTab if form.field == AgentField::Profile => {
+            form.cycle_profile(key.key == Key::Tab);
+        }
         Key::Tab => form.toggle_provider(),
         Key::BackTab | Key::Up => form.move_field(false),
         Key::Down => form.move_field(true),
@@ -862,11 +896,20 @@ fn submit_agent(state: &mut AppState, fx: &mut Vec<Effect>) {
         form.error = Some("prompt is required".to_owned());
         return;
     }
+    let model = form
+        .selected_profile()
+        .and_then(|profile| profile.model.as_ref())
+        .filter(|model| !model.trim().is_empty() && model.as_str() == form.model.text())
+        .cloned()
+        .or_else(|| non_empty(form.model.text()));
     let params = AgentCreateParams {
         workspace_id: form.workspace_id.clone(),
         title: non_empty(form.title.text()).unwrap_or_else(|| default_title(&prompt)),
-        provider: form.provider,
-        model: non_empty(form.model.text()),
+        provider: Some(form.provider),
+        // Submit the displayed settings. An empty mode uses the provider
+        // default even when the selected profile originally filled it.
+        profile: None,
+        model,
         mode: non_empty(form.mode.text()),
         initial_prompt: prompt,
         labels: Default::default(),
@@ -3041,7 +3084,8 @@ mod tests {
             "a tab does not flip it"
         );
         assert!(!form.submitting);
-        // The provider choice (after the prompt) is not a text field.
+        // The provider choice (after the profile selector) has no text field.
+        press_key(&mut f.state, Key::Down);
         press_key(&mut f.state, Key::Down);
         paste(&mut f.state, "codex");
         let Some(Dialog::NewAgent(form)) = &f.state.dialog else {

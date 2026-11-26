@@ -57,6 +57,9 @@ pub enum RequestTag {
     },
     CreateAgent,
     CreateWorkspace,
+    LoadProfiles {
+        generation: u64,
+    },
     Interrupt {
         agent_id: AgentId,
     },

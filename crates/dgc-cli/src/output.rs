@@ -22,6 +22,20 @@ pub fn escape_line(text: &str) -> String {
     escape(text, false)
 }
 
+/// Escape additional terminal control characters in a serialized JSON line
+/// while preserving the original values for JSON readers.
+pub fn escape_json_line(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_control() || is_bidi_control(c) {
+            out.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn escape(text: &str, keep_newline: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {

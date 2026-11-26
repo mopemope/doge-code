@@ -89,6 +89,17 @@ const MODES: [&str; 6] = [
 /// Modes that let Claude act without asking.
 const AUTO_APPROVE_MODES: [&str; 3] = ["bypassPermissions", "auto", "acceptEdits"];
 
+pub(super) fn validate_mode(mode: Option<&str>) -> Result<bool, String> {
+    match mode {
+        None => Ok(false),
+        Some(mode) if MODES.contains(&mode) => Ok(AUTO_APPROVE_MODES.contains(&mode)),
+        Some(mode) => Err(format!(
+            "unknown Claude permission mode {mode:?}; expected one of {}",
+            MODES.join(", ")
+        )),
+    }
+}
+
 /// Bound on waiting for a control response (`initialize`, `interrupt`).
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
 /// Bound on writing one line to the CLI.
@@ -212,14 +223,7 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn validate_mode(&self, mode: Option<&str>) -> Result<bool, String> {
-        match mode {
-            None => Ok(false),
-            Some(mode) if MODES.contains(&mode) => Ok(AUTO_APPROVE_MODES.contains(&mode)),
-            Some(mode) => Err(format!(
-                "unknown Claude permission mode {mode:?}; expected one of {}",
-                MODES.join(", ")
-            )),
-        }
+        validate_mode(mode)
     }
 
     fn start(

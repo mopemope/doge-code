@@ -16,3 +16,10 @@ pub mod time;
 pub mod workspace;
 
 pub use server::{ConnCtx, DaemonDispatcher, DaemonError, run_daemon};
+
+/// Longest piece of untrusted input echoed back in an error message, in chars.
+const ECHO_LIMIT: usize = 64;
+
+fn clip_error_detail(text: &str) -> String {
+    text.chars().take(ECHO_LIMIT).collect()
+}

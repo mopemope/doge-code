@@ -666,8 +666,32 @@ fn field_line(
 }
 
 fn agent_body(form: &NewAgentForm, width: usize) -> DialogBody {
-    let mut lines = vec![Line::raw("")];
+    let mut lines = if form.auto_approve_mode() {
+        wrapped(
+            "WARNING: auto-approve lets the agent run commands and edit files without asking you.",
+            width,
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        vec![Line::raw("")]
+    };
     let mut cursor = None;
+    let profile_focused = form.field == AgentField::Profile;
+    let profile = form
+        .selected_profile()
+        .map_or_else(|| "(none)".to_owned(), |profile| escape_line(&profile.name));
+    lines.push(Line::styled(
+        format!(
+            "{}{:<9}{profile}  (Tab/Shift-Tab)",
+            if profile_focused { "> " } else { "  " },
+            "profile"
+        ),
+        if profile_focused {
+            bold()
+        } else {
+            Style::default()
+        },
+    ));
     let provider_focused = form.field == AgentField::Provider;
     let provider = match form.provider {
         ProviderKind::Claude => "claude",
@@ -705,14 +729,6 @@ fn agent_body(form: &NewAgentForm, width: usize) -> DialogBody {
         lines.push(line);
     }
     lines.push(Line::raw(""));
-    if form.auto_approve_mode() {
-        lines.extend(wrapped(
-            "WARNING: this mode lets the agent run commands and edit files without asking you (auto-approve).",
-            width,
-            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
-        ));
-        lines.push(Line::raw(""));
-    }
     if let Some(error) = &form.error {
         lines.extend(wrapped(error, width, Style::default().fg(DANGER)));
     }
@@ -1104,6 +1120,78 @@ mod tests {
         assert!(text.contains("[s]ession"), "{text}");
         assert!(text.contains("[d]eny"), "{text}");
         assert!(text.contains(&short(&a2.id)), "{text}");
+    }
+
+    #[test]
+    fn profile_selection_fills_form_and_warns_on_auto_approve() {
+        let mut f = Fx::new();
+        press_key(&mut f.state, Key::Down); // workspace
+        let effects = press(&mut f.state, 'n');
+        let request = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request,
+                    method: "profile.list",
+                    ..
+                } => Some(request),
+                _ => None,
+            })
+            .expect("opening the form fetches profiles");
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request,
+                result: Ok(serde_json::json!({"profiles": [
+                    {"name": "z-read", "provider": "claude", "model": null,
+                     "mode": null, "notes": null, "auto_approve": false},
+                    {"name": "a-fast", "provider": "codex", "model": "gpt-5",
+                     "mode": "full-access", "notes": null, "auto_approve": true}
+                ]})),
+            },
+        );
+        press_key(&mut f.state, Key::Down); // profile
+        update(&mut f.state, AppEvent::Paste("\tfull-access\n".to_owned()));
+        let buffer = draw(&f.state, 120, 30);
+        assert!(find(&buffer, "(none)").is_some());
+        assert!(find(&buffer, "WARNING").is_none());
+        press_key(&mut f.state, Key::BackTab); // wrap to last
+        assert!(find(&draw(&f.state, 120, 30), "z-read").is_some());
+        press_key(&mut f.state, Key::Tab); // wrap to none
+        press_key(&mut f.state, Key::Tab); // first in sorted order
+        let buffer = draw(&f.state, 120, 30);
+        for text in ["a-fast", "gpt-5", "full-access"] {
+            assert!(find(&buffer, text).is_some(), "{}", screen(&buffer));
+        }
+        let (x, y) = find(&buffer, "WARNING").expect("warning on selecting auto-approve");
+        assert_eq!(buffer[(x, y)].fg, Color::Red);
+
+        // Clearing the inherited mode must send the provider's ordinary default.
+        for _ in 0..3 {
+            press_key(&mut f.state, Key::Down);
+        }
+        press_key(&mut f.state, Key::End);
+        for _ in "full-access".chars() {
+            press_key(&mut f.state, Key::Backspace);
+        }
+        assert!(find(&draw(&f.state, 120, 30), "WARNING").is_none());
+        press_key(&mut f.state, Key::Down);
+        press_key(&mut f.state, Key::Down);
+        press(&mut f.state, 'x');
+        let effects = press_key(&mut f.state, Key::Enter);
+        let [
+            Effect::Call {
+                method: "agent.create",
+                params,
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected agent.create: {effects:?}");
+        };
+        assert_eq!(params["provider"], "codex");
+        assert_eq!(params["model"], "gpt-5");
+        assert!(params["profile"].is_null() && params["mode"].is_null());
     }
 
     #[test]

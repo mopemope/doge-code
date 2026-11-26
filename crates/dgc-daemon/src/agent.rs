@@ -23,7 +23,7 @@
 //!   out fails the agent, so a wedged session never blocks archive.
 //! - Tracing carries ids and states only, never prompt or output text.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -51,7 +51,7 @@ use tracing::{info, warn};
 mod actor;
 
 use self::actor::{Command, Launch, Start, register, run_actor};
-use crate::config::DaemonConfig;
+use crate::config::{DaemonConfig, ProfileConfig};
 use crate::events_log::EventLog;
 use crate::paths::{DaemonPaths, ensure_private_dir};
 use crate::provider::{ProviderAdapter, ProviderError};
@@ -437,6 +437,7 @@ pub struct AgentManager {
     shared: Arc<Shared>,
     adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>>,
     timeouts: ProviderTimeouts,
+    profiles: BTreeMap<String, ProfileConfig>,
 }
 
 impl AgentManager {
@@ -459,6 +460,7 @@ impl AgentManager {
             }),
             adapters,
             timeouts: ProviderTimeouts::default(),
+            profiles: config.profiles,
         }
     }
 
@@ -498,12 +500,38 @@ impl AgentManager {
             .ok_or_else(|| AgentError::InvalidParams(format!("provider {kind:?} is not available")))
     }
 
+    fn resolve_profile(&self, params: &mut AgentCreateParams) -> Result<ProviderKind, AgentError> {
+        let Some(name) = &params.profile else {
+            return params.provider.ok_or_else(|| {
+                AgentError::InvalidParams("provider is required without a profile".to_owned())
+            });
+        };
+        let profile = self.profiles.get(name).ok_or_else(|| {
+            let name = crate::clip_error_detail(name);
+            AgentError::InvalidParams(format!("unknown profile {name:?}"))
+        })?;
+        if params.provider.is_some_and(|kind| kind != profile.provider) {
+            let provider = crate::provider::resolve::executable_name(profile.provider);
+            return Err(AgentError::InvalidParams(format!(
+                "profile {name} is for {provider}"
+            )));
+        }
+        if params.model.is_none() {
+            params.model.clone_from(&profile.model);
+        }
+        if params.mode.is_none() {
+            params.mode.clone_from(&profile.mode);
+        }
+        Ok(profile.provider)
+    }
+
     /// Store a new agent, record its initial prompt and start it. Returns once
     /// the start has been initiated; the agent becomes `running` (or `failed`)
     /// asynchronously.
-    pub async fn create(&self, params: AgentCreateParams) -> Result<Agent, AgentError> {
+    pub async fn create(&self, mut params: AgentCreateParams) -> Result<Agent, AgentError> {
+        let provider = self.resolve_profile(&mut params)?;
         let workspace = self.active_workspace(&params.workspace_id)?;
-        let adapter = self.adapter(params.provider)?;
+        let adapter = self.adapter(provider)?;
         let auto_approve = adapter
             .validate_mode(params.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
@@ -511,7 +539,7 @@ impl AgentManager {
             id: AgentId::generate(),
             workspace_id: params.workspace_id,
             title: params.title,
-            provider: params.provider,
+            provider,
             model: params.model,
             mode: params.mode,
             auto_approve,

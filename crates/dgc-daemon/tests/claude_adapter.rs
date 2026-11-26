@@ -644,7 +644,8 @@ impl Harness {
             .create(AgentCreateParams {
                 workspace_id: self.workspace.id.clone(),
                 title: "claude".to_owned(),
-                provider: ProviderKind::Claude,
+                provider: Some(ProviderKind::Claude),
+                profile: None,
                 model: model.map(str::to_owned),
                 mode: None,
                 initial_prompt: prompt.to_owned(),

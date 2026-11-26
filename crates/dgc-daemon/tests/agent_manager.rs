@@ -256,7 +256,8 @@ impl Harness {
             .create(AgentCreateParams {
                 workspace_id: self.workspace.id.clone(),
                 title: "t".to_owned(),
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
+                profile: None,
                 model: Some("m1".to_owned()),
                 mode: None,
                 initial_prompt: prompt.to_owned(),
@@ -454,7 +455,8 @@ async fn create_validates_workspace_provider_and_mode() {
     let params = |workspace_id: WorkspaceId, provider, mode: Option<&str>| AgentCreateParams {
         workspace_id,
         title: "t".to_owned(),
-        provider,
+        provider: Some(provider),
+        profile: None,
         model: None,
         mode: mode.map(str::to_owned),
         initial_prompt: "p".to_owned(),

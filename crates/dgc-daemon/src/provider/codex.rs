@@ -219,6 +219,10 @@ pub struct CodexAdapter {
     prefix_args: Vec<String>,
 }
 
+pub(super) fn validate_mode(mode: Option<&str>) -> Result<bool, String> {
+    policy(mode).map(|policy| policy.auto_approve)
+}
+
 impl CodexAdapter {
     /// Run `program` (normally `codex`, resolved on `PATH`).
     pub fn new(program: PathBuf) -> Self {
@@ -241,7 +245,7 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn validate_mode(&self, mode: Option<&str>) -> Result<bool, String> {
-        policy(mode).map(|policy| policy.auto_approve)
+        validate_mode(mode)
     }
 
     fn start(

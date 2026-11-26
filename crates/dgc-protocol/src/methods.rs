@@ -16,6 +16,7 @@ pub const PROJECT_REMOVE: &str = "project.remove";
 pub const WORKSPACE_CREATE: &str = "workspace.create";
 pub const WORKSPACE_LIST: &str = "workspace.list";
 pub const WORKSPACE_ARCHIVE: &str = "workspace.archive";
+pub const PROFILE_LIST: &str = "profile.list";
 pub const AGENT_CREATE: &str = "agent.create";
 pub const AGENT_LIST: &str = "agent.list";
 pub const AGENT_GET: &str = "agent.get";
@@ -112,7 +113,11 @@ pub struct WorkspaceCreateParams {
 pub struct AgentCreateParams {
     pub workspace_id: WorkspaceId,
     pub title: String,
-    pub provider: ProviderKind,
+    /// Required unless a launch profile supplies the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -122,6 +127,21 @@ pub struct AgentCreateParams {
     pub labels: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub parent_id: Option<AgentId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub provider: ProviderKind,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub notes: Option<String>,
+    pub auto_approve: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileListResult {
+    pub profiles: Vec<ProfileInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

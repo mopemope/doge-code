@@ -567,10 +567,17 @@ fn claude_wrapper(dir: &Path, scenario: &str) -> PathBuf {
 /// A daemon whose Claude is the fake replaying `scenario` (codex is
 /// unavailable), plus a greeted client and one local workspace.
 async fn start_agents(scenario: &str) -> (Running, Client, String) {
+    start_agents_with_profiles(scenario, "").await
+}
+
+async fn start_agents_with_profiles(scenario: &str, profiles: &str) -> (Running, Client, String) {
     let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, profiles).expect("write config");
     let config = DaemonConfig {
         claude_path: Some(claude_wrapper(dir.path(), scenario)),
-        ..hermetic_config()
+        codex_path: hermetic_config().codex_path,
+        ..DaemonConfig::load(&path).expect("load config")
     };
     let project_dir = std::fs::canonicalize(dir.path())
         .expect("canon")
@@ -590,6 +597,138 @@ async fn start_agents(scenario: &str) -> (Running, Client, String) {
         .await;
     let ws = workspace["id"].as_str().expect("workspace id").to_owned();
     (daemon, client, ws)
+}
+
+#[tokio::test]
+async fn invalid_profile_mode_fails_startup() {
+    let dir = tempdir().expect("tempdir");
+    let paths = DaemonPaths::under(dir.path());
+    std::fs::create_dir_all(paths.config_file.parent().expect("config dir")).expect("mkdir");
+    std::fs::write(
+        &paths.config_file,
+        "claude_path = '/nonexistent/dgc-test/claude'\n\
+         codex_path = '/nonexistent/dgc-test/codex'\n\
+         [profiles.wrong-mode]\nprovider = 'codex'\nmode = 'acceptEdits'\n",
+    )
+    .expect("write config");
+    let loaded = DaemonConfig::load(&paths.config_file).expect_err("load accepted invalid mode");
+    let text = std::fs::read_to_string(&paths.config_file).expect("read config");
+    let config = toml::from_str(&text).expect("deserialize settings before semantic validation");
+    // Also exercise the public startup function with a directly constructed
+    // config. Pre-signal shutdown in case startup accepts it.
+    let (shutdown, _rx) = watch::channel(true);
+    let startup = timeout(WAIT, run_daemon(paths.clone(), config, shutdown))
+        .await
+        .expect("daemon did not return")
+        .expect_err("daemon accepted invalid mode");
+    for message in [loaded.to_string(), startup.to_string()] {
+        assert!(
+            message.contains("wrong-mode") && message.contains("acceptEdits"),
+            "{message}"
+        );
+        assert!(message.contains("Codex mode"), "{message}");
+    }
+    assert!(!paths.socket.exists());
+}
+
+const PROFILES: &str = "
+[profiles.z-safe]
+provider = 'codex'
+mode = 'read-only'
+
+[profiles.a-fast]
+provider = 'claude'
+model = 'haiku'
+mode = 'bypassPermissions'
+notes = 'Fast review'
+";
+
+#[tokio::test]
+async fn profile_list_reports_auto_approve() {
+    let scenario = claude_scenario(&[text_turn(&["one"])]);
+    let (daemon, mut client, _) = start_agents_with_profiles(&scenario, PROFILES).await;
+    let (response, _) = client.call_collect("profile.list", json!({})).await;
+    daemon.stop().await.expect("stop");
+    assert_eq!(
+        response["result"],
+        json!({"profiles": [
+            {"name": "a-fast", "provider": "claude", "model": "haiku",
+             "mode": "bypassPermissions", "notes": "Fast review", "auto_approve": true},
+            {"name": "z-safe", "provider": "codex", "model": null,
+             "mode": "read-only", "notes": null, "auto_approve": false}
+        ]}),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn create_with_profile_applies_fields_and_explicit_flags_win() {
+    let scenario = claude_scenario(&[text_turn(&["one"])]);
+    let (daemon, mut client, ws) = start_agents_with_profiles(&scenario, PROFILES).await;
+    let (inherited, _) = client
+        .call_collect(
+            "agent.create",
+            json!({"workspace_id": ws, "title": "inherited", "initial_prompt": "hello",
+                   "profile": "a-fast"}),
+        )
+        .await;
+    let (overridden, _) = client
+        .call_collect(
+            "agent.create",
+            json!({"workspace_id": ws, "title": "overridden", "initial_prompt": "hello",
+                   "profile": "a-fast", "provider": "claude", "model": "sonnet", "mode": "manual"}),
+        )
+        .await;
+    daemon.stop().await.expect("stop");
+    for (response, model, mode, auto_approve) in [
+        (inherited, "haiku", "bypassPermissions", true),
+        (overridden, "sonnet", "manual", false),
+    ] {
+        let agent = &response["result"];
+        assert_eq!(agent["provider"], "claude", "{response}");
+        assert_eq!(agent["model"], model);
+        assert_eq!(agent["mode"], mode);
+        assert_eq!(agent["auto_approve"], auto_approve);
+    }
+}
+
+#[tokio::test]
+async fn profile_provider_conflict_is_invalid_params() {
+    let scenario = claude_scenario(&[text_turn(&["one"])]);
+    let (daemon, mut client, ws) = start_agents_with_profiles(&scenario, PROFILES).await;
+    let mut errors = Vec::new();
+    for (fields, message) in [
+        (
+            json!({"profile": "a-fast", "provider": "codex"}),
+            "profile a-fast is for claude",
+        ),
+        (json!({"profile": "absent"}), "unknown profile"),
+        (json!({}), "provider"),
+    ] {
+        let mut params = json!({"workspace_id": ws, "title": "t", "initial_prompt": "hello"});
+        params
+            .as_object_mut()
+            .expect("params")
+            .extend(fields.as_object().expect("fields").clone());
+        let (response, _) = client.call_collect("agent.create", params).await;
+        errors.push((response, message));
+    }
+    let listed = client.call_ok("agent.list", json!({})).await;
+    daemon.stop().await.expect("stop");
+    for (response, message) in errors {
+        assert_eq!(
+            error_code(&response),
+            i64::from(rpc::INVALID_PARAMS),
+            "{response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(message)),
+            "{response}"
+        );
+    }
+    assert_eq!(listed["agents"], json!([]));
 }
 
 async fn create_agent(client: &mut Client, ws: &str) -> String {

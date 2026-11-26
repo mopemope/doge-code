@@ -39,6 +39,14 @@ use dgc_protocol::model::{Decision, PermissionKind, ProviderKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+/// Validate a provider mode and classify auto-approval without a running CLI.
+pub fn validate_mode(kind: ProviderKind, mode: Option<&str>) -> Result<bool, String> {
+    match kind {
+        ProviderKind::Claude => claude::validate_mode(mode),
+        ProviderKind::Codex => codex::validate_mode(mode),
+    }
+}
+
 /// Boxed `Send` future returned by the provider traits.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
