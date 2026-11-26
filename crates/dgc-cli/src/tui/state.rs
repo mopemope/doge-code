@@ -76,10 +76,6 @@ impl Tree {
         self.workspaces.iter().find(|w| &w.id == id)
     }
 
-    pub fn project(&self, id: &ProjectId) -> Option<&Project> {
-        self.projects.iter().find(|p| &p.id == id)
-    }
-
     /// Agents that are not archived.
     pub fn agent_count(&self) -> usize {
         self.agents
@@ -667,7 +663,9 @@ pub const ERROR_TICKS: u32 = 10;
 
 /// Ticks after a permission dialog opens (or its permission changes) during
 /// which a/s/d are ignored, so a key meant for something else cannot answer.
-pub const PERMISSION_ARM_TICKS: u8 = 2;
+/// The dialog can open just before a tick, so only two of the three are
+/// full 250 ms periods: at least 500 ms.
+pub const PERMISSION_ARM_TICKS: u8 = 3;
 
 /// Shown (status line and input title) while typing at an agent that waits
 /// for a permission answer: the dialog never opens over the input.

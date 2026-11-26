@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 Task 4（ランタイムと起動コマンド）
+- タスク: M2 Task 5（M2 受け入れ: 手動確認、画面記録、ドキュメント）
 - 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）
-- 次の一手: M2 計画の Task 4 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。`tui/mod.rs` の `#![allow(dead_code)]` を外し、`render::render` を端末ループから呼ぶ。起動直後と各リサイズで実サイズの `AppEvent::Resize` を送る（決定事項 M2 Task 3 レビュー修正 (h)）
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）。M2 Task 4 完了（ランタイム、デーモン I/O、`dgc-next tui`）
+- 次の一手: M2 計画の Task 5 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。偽プロバイダで `dgc-next tui` を tmux/script 上で操作し画面を記録する。README の TUI 節（起動、キー、権限ダイアログ、切断時の表示）は Task 5 で書く
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -69,7 +69,7 @@
 | 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 完了 | `fix(daemon): bound event log handles and record turn starts` |
 | 2 | TUI の状態と更新（純粋部分） | 完了 | `feat(cli): add TUI state and update logic` |
 | 3 | 描画 | 完了 | `feat(cli): render the TUI layout` |
-| 4 | ランタイムと起動コマンド | 未着手 | |
+| 4 | ランタイムと起動コマンド | 完了 | `feat(cli): run the TUI against the daemon` |
 | 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 未着手 | |
 
 ## 決定事項
@@ -385,7 +385,8 @@
   (a) 権限ダイアログは Input フォーカス中・他のダイアログ表示中には決して自動で開かない。開くのは Tree フォーカスで、選択中
   エージェントに未 dismiss の権限があり、入力欄が空のときの自動と、Tree での明示的な `p`（入力欄が空でなくても開く）だけ。
   Input 中は `AppState::permission_hint()`（`⚠ permission waiting — Esc then p to review`）を入力欄タイトルとステータスに出す。
-  (b) ダイアログが開く／権限が差し替わるたびに a/s/d を 2 Tick（250 ms Tick で 500 ms 以上）無視する（`Dialog::permission_armed()`、
+  (b) ダイアログが開く／権限が差し替わるたびに a/s/d を 3 Tick（M2 Task 4 で 2 から変更。開いた直後に Tick が来ても残り 2 Tick は
+  250 ms の完全な周期なので 500 ms 以上）無視する（`Dialog::permission_armed()`、
   ダイアログに「keys enabled shortly」を表示）。Esc とナビゲーションは有効。
   Input の送信先は入力欄を開いた時点のエージェント（`input_target`）。そのエージェントが archive／snapshot で消えても Input
   フォーカスは維持し、「送信先なし」（`input_target_missing()`、送信は `select an agent first`、入力テキストは保持、ダイアログは開かない）。
@@ -440,6 +441,29 @@
   (iii) summary 中の `↪`（U+21AA）は `\u{21aa}` にエスケープする。本物の行頭の `↪` が折り返しの継続行に見えないようにする（ガターの `↪` だけが折り返しを意味する）。
   (iv) ダイアログの幅の上限（72）と内側の高さは `permission_layout` の値を描画が使う（二重定義を除去）。
 
+- 2026-11-26 (M2 Task 4): 新依存なし（`dgc-client` の tokio に既存 crate の feature `macros` を追加）。
+  (1) `tui::backend::Backend::start(paths, exe)` は 1 タスクで RPC 接続と全エージェント購読接続を持つ。Effect は RPC 接続で順に実行
+  （`LoadSnapshot` = project.list + workspace.list + agent.list{include_archived:false} + permission.list、`LoadHistory` = agent.events
+  を 1 ページだけ取り `done = ページが空`、次のページは `update` が要求する。generation は Effect からそのまま返す。失敗は空の done ページ +
+  `RpcDone{LoadHistory, Err}`）。どちらかの接続が切れたら `Disconnected` を 1 回、1 秒ごとに再接続（購読も張り直してから）して `Connected`。
+  切断中の `Call`/`LoadHistory` はすぐ失敗を返す（再接続後に古い操作を実行しない）。`connect_or_spawn` は最初の 1 回だけで、以後は
+  `connect` のみ（ユーザーの `daemon stop` を TUI が覆さない）。R キーでの再起動は入れず、理由文に「`dgc-next daemon start` starts it」を出す。
+  (2) インターフェースの変更: Effect の送信側は `mpsc::Sender` ではなく `mpsc::UnboundedSender`（UI 側が送信で待たないため。UI→backend
+  と backend→UI が両方満杯で止まる経路をなくす。イベント側は容量 256 の有界のままで、溢れたら購読がデーモン側で lagged になる）。
+  (3) 購読のデコードできない event は lagged と同じ扱い（再購読と再読込）。`Resubscribe` は古い購読タスクを abort して新しい接続で購読する。
+  `dgc-client` の購読タスクは受信側が落ちたらすぐ接続を閉じるよう修正（以前は次の通知が来るまで残り、lagged 後は通知が来ないので
+  接続が漏れていた）。
+  (4) `tui::Runtime<B: ratatui Backend, U>` が状態・端末・Effect 送信を持ち、最初に実サイズの `Resize` を `update` に渡す。各イベントの前に
+  `terminal.size()` と `state.size` を比べ、違えば `Resize` を先に渡す。描画したフレームの大きさが `state.size` と違えば `Resize` を渡して描き直す。
+  デーモンイベントは最大 64 件まとめて処理してから 1 回描画。Tick は `TICK = 250 ms`、`MissedTickBehavior::Delay`。
+  `PERMISSION_ARM_TICKS` を 3 に上げた（上の Task 2 レビュー修正 (b)）。
+  (5) `tui::run`: 標準出力が端末でなければ `the TUI needs a terminal`。raw mode 直後に Drop ガード、パニックフック（復元してから既存フック）、
+  代替画面、マウスなし。SIGTERM/SIGHUP/SIGINT でも通常終了経路で復元。入力は専用スレッドが `crossterm::event::poll(100 ms)` + `read` し、
+  チャネルが閉じたら終わる（join しない）。tracing subscriber は入れない。終了してもデーモンとエージェントは止めない。
+  (6) `dgc-next tui` と引数なしの `dgc-next` で起動。`--json` 付きは `the TUI has no JSON mode`。
+  (7) テスト構成: dgc-cli はライブラリを持たないので `tests/tui_backend.rs` は `#[path]` で `src/output.rs` と `src/tui/mod.rs` を取り込む
+  （そのため tui/output の単体テストがこのテストバイナリでも走る）。偽プロバイダのラッパー生成（`fake_provider`/`scenario`/`write_wrapper`）は
+  `tests/common` に移した。テストの `exe` は `DGC_STATE_ROOT` を固定する `dgc-next` のラッパーで、spawn されたデーモンも一時ディレクトリに置く。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -670,6 +694,20 @@
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
     | `bash scripts/verify.sh msrv` | PASS |
 
+- 2026-11-26 M2 Task 4（固定ツールチェーン 1.99.0）。テストを先に書き RED を確認: `cargo test --locked -p dgc-client --lib
+  dropping_the_subscription` が FAIL（5 s 待っても接続が閉じない）。`cargo test --locked -p dgc-cli --bin dgc-next tui::` と `--test tui_backend`
+  は未実装 API でコンパイルエラー（`Backend`/`Runtime`/`run_loop`/`key_input`/`tick_interval`/`TerminalGuard` など）。API を入れた後
+  `PERMISSION_ARM_TICKS = 2` のまま 2 件 FAIL（500 ms を満たさない）。実装後 GREEN。加えて故意の改変で該当テストが落ちることを確認
+  （サイズ同期を外す、描画時の補正を外す、短いページを done 扱い、再接続で spawn、Resubscribe を無視）:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（104 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（117 passed = 新規 7 + 取り込んだ単体テスト。4 回連続 PASS、デーモン・偽プロバイダの残存なし） |
+    | `cargo test --locked -p dgc-cli -p dgc-client` | PASS（dgc-next 110、agent_cli 12、daemon_cli 7、tui_backend 117、version 1、workspace_cli 3、dgc-client 13） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（dgc-client の Cargo.toml を変更したため） |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
 ## 保留中の小さな改善
 
 - M1 Task 14 受け入れ由来（すべて小さく、受け入れは通った。M2 前か M2 の最初に直す）:

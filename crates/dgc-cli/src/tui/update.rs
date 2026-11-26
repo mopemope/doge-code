@@ -874,7 +874,7 @@ mod tests {
 
     use super::*;
     use crate::tui::input::LineEditor;
-    use crate::tui::state::{STREAM_CAP, Tree};
+    use crate::tui::state::{PERMISSION_ARM_TICKS, STREAM_CAP, Tree};
 
     fn key(state: &mut AppState, key: KeyInput) -> Vec<Effect> {
         update(state, AppEvent::Key(key))
@@ -1052,6 +1052,11 @@ mod tests {
         for _ in 0..times {
             update(state, AppEvent::Tick);
         }
+    }
+
+    /// Tick until a newly opened permission dialog accepts its keys.
+    fn arm(state: &mut AppState) {
+        tick(state, usize::from(PERMISSION_ARM_TICKS));
     }
 
     fn requested(agent: &AgentId, seq: u64, permission: &PendingPermission) -> AppEvent {
@@ -1373,7 +1378,7 @@ mod tests {
         f.select_a1();
         assert_eq!(f.state.focus, Focus::Dialog);
         assert!(matches!(f.state.dialog, Some(Dialog::Permission { .. })));
-        tick(&mut f.state, 2);
+        arm(&mut f.state);
 
         let fx = press(&mut f.state, 'a');
         assert_eq!(
@@ -1411,7 +1416,7 @@ mod tests {
             let perm = permission(&f.a1.id);
             f.snapshot_with(vec![perm.clone()]);
             f.select_a1();
-            tick(&mut f.state, 2);
+            arm(&mut f.state);
             let fx = press(&mut f.state, c);
             assert_eq!(
                 fx,
@@ -1432,7 +1437,7 @@ mod tests {
         let perm = permission(&f.a1.id);
         f.snapshot_with(vec![perm.clone()]);
         f.select_a1();
-        tick(&mut f.state, 2);
+        arm(&mut f.state);
         press(&mut f.state, 'a');
         update(
             &mut f.state,
@@ -1576,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_to_tree_opens_pending_permission_but_keys_wait_two_ticks() {
+    fn esc_to_tree_opens_pending_permission_but_keys_wait_three_ticks() {
         let mut f = Fixture::new();
         f.select_a1();
         press_key(&mut f.state, Key::Enter);
@@ -1590,11 +1595,13 @@ mod tests {
         tick(&mut f.state, 1);
         assert_eq!(press(&mut f.state, 'a'), vec![]);
         tick(&mut f.state, 1);
+        assert_eq!(press(&mut f.state, 'a'), vec![]);
+        tick(&mut f.state, 1);
         assert_eq!(press(&mut f.state, 'a').len(), 1);
     }
 
     #[test]
-    fn decision_keys_are_ignored_for_two_ticks_after_a_dialog_opens() {
+    fn decision_keys_are_ignored_for_three_ticks_after_a_dialog_opens() {
         let mut f = Fixture::new();
         f.snapshot_with(vec![permission(&f.a1.id)]);
         f.select_a1();
@@ -1604,6 +1611,8 @@ mod tests {
         }
         tick(&mut f.state, 1);
         assert_eq!(press(&mut f.state, 's'), vec![], "one tick is not enough");
+        tick(&mut f.state, 1);
+        assert_eq!(press(&mut f.state, 's'), vec![], "two ticks may be 250 ms");
         tick(&mut f.state, 1);
         assert_eq!(press(&mut f.state, 's').len(), 1);
 
@@ -1622,7 +1631,7 @@ mod tests {
         let p2 = permission(&f.a1.id);
         f.snapshot_with(vec![p1.clone(), p2.clone()]);
         f.select_a1();
-        tick(&mut f.state, 2);
+        arm(&mut f.state);
         assert_eq!(open_permission_id(&f.state), Some(p1.id.clone()));
         // P1 is resolved elsewhere; P2 takes its place in the same update.
         update(&mut f.state, resolved(&f.a1.id, 1, &p1));
@@ -1632,7 +1641,7 @@ mod tests {
             vec![],
             "meant for P1, must not answer P2"
         );
-        tick(&mut f.state, 2);
+        arm(&mut f.state);
         let fx = press(&mut f.state, 'a');
         assert!(matches!(
             fx.as_slice(),
@@ -1648,7 +1657,7 @@ mod tests {
         let p2 = permission(&f.a1.id);
         f.snapshot_with(vec![p1.clone(), p2.clone()]);
         f.select_a1();
-        tick(&mut f.state, 2);
+        arm(&mut f.state);
         press(&mut f.state, 'a');
         update(
             &mut f.state,
@@ -2400,7 +2409,7 @@ mod tests {
         let perm = permission(&f.a1.id);
         f.snapshot_with(vec![perm.clone()]);
         f.select_a1();
-        tick(&mut f.state, 2);
+        arm(&mut f.state);
         press(&mut f.state, 'a');
         let fx = update(
             &mut f.state,
@@ -2672,6 +2681,8 @@ mod tests {
         assert!(!armed(&f.state));
         tick(&mut f.state, 1);
         assert!(!armed(&f.state));
+        tick(&mut f.state, 1);
+        assert!(!armed(&f.state), "two ticks can be as short as 250 ms");
         tick(&mut f.state, 1);
         assert!(armed(&f.state));
         tick(&mut f.state, 5);

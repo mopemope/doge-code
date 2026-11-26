@@ -16,12 +16,15 @@ struct Cli {
     /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
     json: bool,
+    /// Without a subcommand the TUI opens.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the terminal UI (the default without a subcommand).
+    Tui,
     /// Manage the background daemon.
     Daemon {
         #[command(subcommand)]
@@ -50,11 +53,12 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Daemon { command } => commands::daemon::run(command, cli.json).await,
-        Command::Project { command } => commands::project::run(command, cli.json).await,
-        Command::Workspace { command } => commands::workspace::run(command, cli.json).await,
-        Command::Agent(command) => commands::agent::run(command, cli.json).await,
-        Command::Permit { command } => commands::permit::run(command, cli.json).await,
+        None | Some(Command::Tui) => run_tui(cli.json).await,
+        Some(Command::Daemon { command }) => commands::daemon::run(command, cli.json).await,
+        Some(Command::Project { command }) => commands::project::run(command, cli.json).await,
+        Some(Command::Workspace { command }) => commands::workspace::run(command, cli.json).await,
+        Some(Command::Agent(command)) => commands::agent::run(command, cli.json).await,
+        Some(Command::Permit { command }) => commands::permit::run(command, cli.json).await,
     };
     match result {
         Ok(code) => code,
@@ -63,4 +67,15 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `dgc-next tui`: the terminal is restored before an error is printed.
+async fn run_tui(json: bool) -> commands::CliResult<ExitCode> {
+    if json {
+        return Err("the TUI has no JSON mode".into());
+    }
+    let paths = commands::resolve_paths()?;
+    let exe = std::env::current_exe()?;
+    tui::run(paths, exe).await?;
+    Ok(ExitCode::SUCCESS)
 }

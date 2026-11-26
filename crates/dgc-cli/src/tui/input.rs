@@ -1,5 +1,15 @@
-//! Key representation (independent of the terminal library) and the
-//! single-line editor behind the input box and dialog fields.
+//! Key representation (independent of the terminal library), the thread
+//! that reads the terminal, and the single-line editor behind the input box
+//! and dialog fields.
+
+use std::io;
+use std::thread;
+use std::time::Duration;
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use tokio::sync::mpsc;
+
+use super::TermEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -29,6 +39,7 @@ pub struct KeyInput {
 
 impl KeyInput {
     /// `key` without modifiers.
+    #[cfg(test)]
     pub fn new(key: Key) -> Self {
         Self {
             key,
@@ -37,11 +48,13 @@ impl KeyInput {
         }
     }
 
+    #[cfg(test)]
     pub fn char(c: char) -> Self {
         Self::new(Key::Char(c))
     }
 
     /// Ctrl + `c`.
+    #[cfg(test)]
     pub fn ctrl(c: char) -> Self {
         Self {
             ctrl: true,
@@ -56,6 +69,75 @@ impl KeyInput {
             _ => None,
         }
     }
+}
+
+/// The key `event` stands for; `None` for releases and keys the TUI does
+/// not use. Shift is part of the character (or `BackTab`), not a flag.
+pub fn key_input(event: &KeyEvent) -> Option<KeyInput> {
+    if event.kind == KeyEventKind::Release {
+        return None;
+    }
+    let key = match event.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        _ => return None,
+    };
+    Some(KeyInput {
+        key,
+        ctrl: event.modifiers.contains(KeyModifiers::CONTROL),
+        alt: event.modifiers.contains(KeyModifiers::ALT),
+    })
+}
+
+/// The TUI's view of a terminal event: keys and resizes, nothing else.
+pub fn term_event(event: Event) -> Option<TermEvent> {
+    match event {
+        Event::Key(key) => key_input(&key).map(TermEvent::Key),
+        Event::Resize(width, height) => Some(TermEvent::Resize { width, height }),
+        _ => None,
+    }
+}
+
+/// How often the input thread looks whether the TUI is gone.
+const INPUT_POLL: Duration = Duration::from_millis(100);
+
+/// Read the terminal on a thread of its own and send keys and resizes to
+/// `events`. The thread ends when `events` closes (checked every 100 ms) or
+/// reading fails; the closed channel then tells the loop.
+pub fn spawn_reader(events: mpsc::UnboundedSender<TermEvent>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("dgc-tui-input".to_owned())
+        .spawn(move || {
+            while !events.is_closed() {
+                match event::poll(INPUT_POLL) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(_) => return,
+                }
+                let Ok(event) = event::read() else {
+                    return;
+                };
+                if let Some(event) = term_event(event)
+                    && events.send(event).is_err()
+                {
+                    return;
+                }
+            }
+        })?;
+    Ok(())
 }
 
 /// A one-line text field with a cursor.
@@ -210,6 +292,79 @@ mod tests {
 
         assert_eq!(e.take(), "o");
         assert!(e.is_empty());
+    }
+
+    #[test]
+    fn crossterm_keys_convert_to_key_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        let press = |code, modifiers| key_input(&KeyEvent::new(code, modifiers));
+        let none = KeyModifiers::NONE;
+        assert_eq!(press(KeyCode::Char('a'), none), Some(KeyInput::char('a')));
+        assert_eq!(
+            press(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Some(KeyInput::char('A')),
+            "shift is already in the character"
+        );
+        assert_eq!(
+            press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(KeyInput::ctrl('c'))
+        );
+        assert_eq!(
+            press(KeyCode::Char('x'), KeyModifiers::ALT),
+            Some(KeyInput {
+                key: Key::Char('x'),
+                ctrl: false,
+                alt: true
+            })
+        );
+        for (code, key) in [
+            (KeyCode::Enter, Key::Enter),
+            (KeyCode::Esc, Key::Esc),
+            (KeyCode::Tab, Key::Tab),
+            (KeyCode::BackTab, Key::BackTab),
+            (KeyCode::Backspace, Key::Backspace),
+            (KeyCode::Delete, Key::Delete),
+            (KeyCode::Left, Key::Left),
+            (KeyCode::Right, Key::Right),
+            (KeyCode::Up, Key::Up),
+            (KeyCode::Down, Key::Down),
+            (KeyCode::Home, Key::Home),
+            (KeyCode::End, Key::End),
+            (KeyCode::PageUp, Key::PageUp),
+            (KeyCode::PageDown, Key::PageDown),
+        ] {
+            assert_eq!(press(code, none), Some(KeyInput::new(key)), "{code:?}");
+        }
+        assert_eq!(
+            press(KeyCode::BackTab, KeyModifiers::SHIFT),
+            Some(KeyInput::new(Key::BackTab)),
+            "shift-tab arrives as BackTab with SHIFT"
+        );
+        assert_eq!(press(KeyCode::F(1), none), None, "unused keys are dropped");
+        assert_eq!(press(KeyCode::Insert, none), None);
+
+        let mut release = KeyEvent::new(KeyCode::Char('a'), none);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(key_input(&release), None, "only presses count");
+        let mut repeat = KeyEvent::new(KeyCode::Down, none);
+        repeat.kind = KeyEventKind::Repeat;
+        assert_eq!(key_input(&repeat), Some(KeyInput::new(Key::Down)));
+    }
+
+    #[test]
+    fn terminal_events_convert_keys_and_resizes() {
+        use super::super::TermEvent;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(term_event(key), Some(TermEvent::Key(KeyInput::char('q'))));
+        assert_eq!(
+            term_event(Event::Resize(120, 40)),
+            Some(TermEvent::Resize {
+                width: 120,
+                height: 40
+            })
+        );
+        assert_eq!(term_event(Event::FocusGained), None);
     }
 
     #[test]

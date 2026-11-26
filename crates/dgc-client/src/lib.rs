@@ -213,7 +213,8 @@ impl Client {
     /// Send `subscribe` and turn the connection into a notification stream.
     /// A background task forwards each notification into the returned bounded
     /// channel (capacity 256); it stops, closing the channel, when the daemon
-    /// disconnects, sends an invalid line, or the receiver is dropped.
+    /// disconnects or sends an invalid line, and stops (closing the
+    /// connection) as soon as the receiver is dropped.
     pub async fn subscribe(
         mut self,
         params: SubscribeParams,
@@ -235,7 +236,14 @@ impl Client {
                 }
             }
             loop {
-                match read_message(&mut reader).await {
+                // Stop as soon as the receiver is gone, even while the
+                // daemon sends nothing (after `lagged`), closing the
+                // connection; a partly read line is discarded with it.
+                let message = tokio::select! {
+                    message = read_message(&mut reader) => message,
+                    _ = tx.closed() => return,
+                };
+                match message {
                     Ok(Incoming::Notification(notification)) => {
                         if tx.send(notification).await.is_err() {
                             return;
@@ -474,6 +482,33 @@ mod tests {
             .await
             .expect("channel closes");
         assert!(end.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_subscription_closes_the_connection() {
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let (_dir, paths) = fake_server(|mut reader, mut write| async move {
+            let request = read_request(&mut reader).await;
+            send(&mut write, &Response::ok(request.id, json!({}))).await;
+            // Silent from here on: only the client can end the connection.
+            let mut sink = Vec::new();
+            let _ = reader.read_to_end(&mut sink).await;
+            let _ = closed_tx.send(());
+        })
+        .await;
+        let client = Client::connect(&paths).await.expect("connect");
+        let rx = client
+            .subscribe(SubscribeParams {
+                agent_id: None,
+                since_seq: None,
+            })
+            .await
+            .expect("subscribe");
+        drop(rx);
+        timeout(Duration::from_secs(5), closed_rx)
+            .await
+            .expect("the connection closes once the receiver is gone")
+            .expect("server saw EOF");
     }
 
     #[tokio::test]
