@@ -1,6 +1,7 @@
 # doge-code development
 
-This Rust repository builds the AI coding agent `dgc`. Respond in Japanese.
+This Rust repository builds `dgc`, a local orchestrator (daemon + CLI/TUI) that
+supervises Claude Code and Codex CLI agents. Respond in Japanese.
 User-facing behavior belongs in `README.md`; development guidance starts here.
 
 ## Work according to the request
@@ -9,84 +10,124 @@ User-facing behavior belongs in `README.md`; development guidance starts here.
   a fix; edit only when implementation is authorized.
 - For small local changes, read the affected code and callers. For cross-module
   changes, record acceptance criteria, affected boundaries, and focused checks.
-- Use current official sources for external APIs, dependency upgrades, or facts
-  that may have changed. Local behavior is established by code and tests.
-- Use `rg` and bounded reads. Load only guidance relevant to the change.
-- Clarify product decisions that affect visible behavior; continue authorized
-  implementation and verification without repeated approval requests.
+- Use current official sources for external APIs, provider CLI behavior, or
+  dependency upgrades. Local behavior is established by code, tests and the
+  recorded fixtures.
+- Use `rg` and bounded reads. Clarify product decisions that affect visible
+  behavior; otherwise continue authorized work without repeated approval requests.
 - Delegate only when authorized and tasks are independent. Give each worker a
   bounded scope, required evidence, and file ownership; count total token use.
-- For long work, retain decisions, open issues, and completed checks in a short
-  project-local work note. Do not commit `.doge/` runtime state.
+- Distinguish observed user directives from interpreted requirements.
 
 ## Product priority
 
-The first practical job is a small bug fix in an existing tested Go/Rust
-repository, delivered as an independently verified, reviewable patch with
-remaining uncertainty. Prioritize observed workflow failures and user effort;
-do not expand languages, providers or UI breadth as a goal. Internal contract
-checks and CI are prerequisites, not product-acceptance evidence. See
-[evaluation](docs/ai/evaluation.md#practical-acceptance-evaluation).
+dgc is a trustworthy local orchestrator that safely supervises Claude Code and
+Codex agents. In order: keep the security invariants below, relay permission
+requests correctly (nothing approved that the user did not approve), and recover
+cleanly (daemon restart, disconnects, crashed providers). Adding providers, UI
+breadth or features is not a goal in itself; new work follows the roadmap in
+the [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md).
 
-## Orchestrator migration (active)
+## Status and next work
 
-dgc is being rebuilt as an orchestrator that drives the Claude Code and Codex
-CLIs instead of calling LLM APIs directly (approved 2026-11-25). Before any work
-on it, read [PROGRESS.md](docs/orchestrator/PROGRESS.md) and resume from its
-"現在の作業" section; it links the design and milestone plans. New code lives in
-`crates/`; the legacy `src/` runtime stays working until milestone M3 removes it.
-Update PROGRESS.md in the same commit as each finished task, and before stopping.
+[PROGRESS.md](docs/orchestrator/PROGRESS.md) is the hand-off file for Claude
+Code and Codex: read "現在の作業" first and resume there; "決定事項" records
+decisions that depart from the design. Update it in the same commit as each
+finished task, and before stopping.
 
-## Choose the relevant guidance
+## Guidance
 
-Skill bodies are shared under `docs/ai/skills/`. Open the relevant `SKILL.md`
-directly if the host cannot discover skills. No full-document reading is required.
-
-| Change | Guidance |
+| Topic | Read |
 |---|---|
-| Tool schema, registration, dispatch, output | [dgc-tool-dev](docs/ai/skills/dgc-tool-dev/SKILL.md), [output contract](docs/tool-output-contract.md) |
-| Verification or CI failures | [dgc-verify](docs/ai/skills/dgc-verify/SKILL.md) |
-| Process policy, timeout, cancellation, jobs | [dgc-execution](docs/ai/skills/dgc-execution/SKILL.md) |
-| Edit tools, undo, persistence, provenance | [dgc-mutation-provenance](docs/ai/skills/dgc-mutation-provenance/SKILL.md) |
-| Context budget, history, compaction, runtime hints | [dgc-context-history](docs/ai/skills/dgc-context-history/SKILL.md) |
-| TUI, MCP, RepoMap, configuration, prompt | Relevant section of [architecture](docs/ai/architecture.md) |
-| Agent guidance, skill layout, development scripts | [agent workflow](docs/ai/workflow.md) |
-| Comparing guidance or model configurations | [evaluation protocol](docs/ai/evaluation.md) |
+| Crates, daemon, protocol, adapters, TUI, security boundary | [architecture](docs/ai/architecture.md) |
+| Which checks to run, CI, development scripts | [workflow](docs/ai/workflow.md) |
+| Requirements and decisions | [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md), PROGRESS "決定事項" |
+| Provider wire formats | [fixtures README](crates/dgc-daemon/tests/fixtures/README.md) |
 
-## Shared constraints
+## Crates and dependencies
 
-- Rust Edition 2024, MSRV in `Cargo.toml`; use rustfmt and `tracing`.
-- Feature implementations belong under `src/features/`.
-- Use typed errors or `?` in production. Message-bearing `expect()` is fine in tests.
-- Tests use `tempdir()` and explicit `AppConfig.project_root`, never real user
-  config or repository-root fixtures. Cover behavior and error paths.
-- dgc text mutation tools use the shared commit helper, `MutationReceipt`, and
-  `FsTools::finalize_mutation`. See [contracts](docs/ai/contracts.md).
-- Finite processes use `src/execution/runner.rs`; preserve policy separation.
-  Register long-running user-visible TUI work through `JobManager`.
-- Budget tool output at its source; return structured outcomes. Keep tool order
-  deterministic. See [output contract](docs/tool-output-contract.md).
-- Preserve unseen tool results and recoverable historical observations. Keep
-  runtime hints request-scoped. Cached tokens still consume context capacity.
-- Distinguish observed user directives from interpreted requirements.
-- Keep durable session/provenance state out of rebuildable RepoMap SQLite and
-  legacy `action_log`. Never commit credentials or project-local runtime state.
+- `dgc-protocol`: protocol types, error codes, normalized events. No I/O.
+- `dgc-daemon`: store, event log, workspaces, agent manager, provider adapters,
+  process groups, socket server, subscriptions.
+- `dgc-client`: socket connection, calls, subscriptions, autostart.
+- `dgc-cli`: the `dgc` binary (CLI subcommands, `daemon run`, TUI).
+- Keep dependencies minimal (design §5.1). Add one only with a reason recorded
+  in PROGRESS "決定事項", declared in root `[workspace.dependencies]` with only
+  the features the crate uses.
+
+## Security invariants
+
+Do not weaken these.
+
+- The daemon opens no network listener. Socket directory 0700, socket 0600,
+  peer UID checked on every connection. State files 0600, never written
+  through symlinks.
+- dgc never reads, stores or forwards provider credentials. Providers inherit
+  the daemon's environment; client environments are never sent.
+- `tracing` never logs prompt, agent or permission text (IDs, states, error
+  kinds only). Text lives only in `events.jsonl`. `check-sensitive-logging.py`
+  enforces this for the provider, agent and TUI modules.
+- Worktree deletion only for dgc-owned workspaces whose path is inside the
+  managed worktree directory, with the archive safety check (no uncommitted or
+  untracked work, no commits outside the base) unless `--force`; destructive
+  git flags stay in the force-only path. Branches are deleted only when the
+  worktree entry still checks out the recorded branch.
+- Permission requests go to the user unless they chose an auto-approve mode,
+  which is always shown (`warning:` line, `auto-approve`, `[auto]`).
+- Human output escapes control and bidi characters (`output::escape_text`/`escape_line`).
+
+## TUI permission safety
+
+These stop a keystroke meant for something else from approving an unread
+request; changing one needs an explicit decision in PROGRESS.
+
+- The dialog never opens by itself in Input focus or over another dialog; only
+  in the tree with an empty input, or by `p`.
+- `a`/`s`/`d` are ignored for `PERMISSION_ARM_TICKS` after it opens, switches
+  request, or the terminal is resized.
+- `a`/`s` require `seen_end`: every summary row was on screen, read
+  contiguously from the top; `End` alone does not count. A window too small
+  for the layout keeps them off. Render and update share `permission_layout`.
+- Wrapped continuation rows carry the `↪` gutter; a literal `↪` in the summary
+  is escaped. Widths are measured per grapheme with ratatui's cell width.
+- Summaries and agent names are escaped before display.
+- Drafts belong to the agent they were typed for and are sent only to it.
+- Bracketed paste goes only into a text field as one line; it never reaches
+  the tree, the permission dialog or the archive confirmation.
+
+## Provider adapters
+
+Follow the contract in `crates/dgc-daemon/src/provider/mod.rs`: no prompt or
+output text in errors; `Exited` once on unexpected exit; no `TurnCompleted` or
+`PermissionRequested` for a turn after `interrupt` returns; bounded time for
+every method. Base wire behavior on recorded fixtures and record the tested CLI
+version.
+
+## Tests
+
+- Use `tempdir()` and `DGC_STATE_ROOT`, never the user's real state, config or
+  provider CLIs. Never leave daemons or fake processes running after a test.
+- Drive providers with `dgc-fake-provider` and the recorded or hand-written
+  (marked synthetic) scenarios under `crates/*/tests/fixtures/`.
+- Typed errors or `?` in production; message-bearing `expect()` is fine in
+  tests. Cover behavior and error paths.
 
 ## Verification and completion
 
+- Use the pinned toolchain 1.99.0 (`rust-toolchain.toml`). The `cargo` on
+  `PATH` may be newer and report different Clippy warnings; if so prefix
+  commands with `PATH=$HOME/.rustup/toolchains/1.99.0-<host>/bin:$PATH`.
 - First run matching tests: `bash scripts/verify.sh test <module_or_name>`.
-  The wrapper rejects zero executed tests. `rg` must be available for search tests.
+  The wrapper rejects zero executed tests.
 - Before finishing Rust changes: `cargo fmt --all`, then
-  `bash scripts/verify.sh rust` (fmt check, warning-free Clippy, full locked tests).
-- Docs/Skills/development-script-only changes: `bash scripts/verify.sh guidance`.
-  Rust checks are required if runtime code or Rust build inputs also changed.
-- Dependency/MSRV changes additionally use `bash scripts/verify.sh msrv`;
-  TUI/dependency changes use `bash scripts/verify.sh tui-deps`. macOS checks and
-  manual TUI verification are described in the verification skill.
-- Reuse passed checks until relevant files or conditions change. Report command,
-  result, and environment-blocked checks; blocked checks are not passes.
-- Update README for new tools, flags, commands, and visible behavior. TUI changes
-  need a screenshot or terminal recording. Commits use `type(scope): summary`.
-- Finish when acceptance criteria are met and required checks pass, or report the
-  concrete blocker and remaining work. Do not claim measured token savings
-  without comparable evaluation runs.
+  `bash scripts/verify.sh rust` (fmt check, warning-free Clippy, locked tests).
+- Docs and development-script changes: `bash scripts/verify.sh guidance`.
+- Dependency/MSRV changes also `msrv`; TUI or dependency graph changes also
+  `tui-deps`; `macos` (CI, or on a Mac) covers process, socket and TUI code.
+- Reuse passed checks until relevant files change. Report command, result and
+  blocked checks; blocked checks are not passes. Real-provider checks are
+  manual (login, tokens) and recorded in PROGRESS.
+- Update README for new commands, flags, keys and visible behavior. TUI changes
+  need a screenshot or terminal recording.
+- Commits use `type(scope): summary`. Never commit credentials, runtime state
+  or unrelated untracked files; stage paths explicitly.

@@ -17,12 +17,13 @@
 
 ## 現在の作業
 
-- タスク: M3 Task 2（ドキュメントとガイダンスの切替）
+- タスク: M3 Task 3（M3 受け入れ）
 - 状態: 未着手
 - 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3 計画作成（Emacs 連携と旧評価ツールの削除はユーザー決定、2026-11-26）。
-  M3 Task 1（旧ランタイム削除、仮想ワークスペース化、`dgc` に改名、検証スクリプトと CI の切替）
-- 次の一手: M3 計画の Task 2 Step 1 から始める（ブランチ `feat/orchestrator-m3`）。README・AGENTS.md・docs/ai はまだ
-  `dgc-next` と旧ランタイムを説明している（Task 1 はリンク切れになった箇所のリンク記法だけ外した）
+  M3 Task 1（旧ランタイム削除、仮想ワークスペース化、`dgc` に改名、検証スクリプトと CI の切替）。
+  M3 Task 2（README・AGENTS.md・docs/ai/workflow.md・docs/ai/architecture.md をオーケストレーター向けに書き直し、旧文書と skills を削除）
+- 次の一手: M3 計画の Task 3 Step 1 から始める（ブランチ `feat/orchestrator-m3`）。スクラッチの `DGC_STATE_ROOT` で `dgc` を通しで確認し、
+  全検証を記録する
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -79,7 +80,7 @@
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
 | 1 | ビルドと検証の切替（旧ランタイム削除、`dgc` に改名、スクリプト・CI） | 完了 | `refactor!: replace the legacy runtime with the orchestrator as dgc` |
-| 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 未着手 | |
+| 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 完了 | `docs: describe dgc as the orchestrator and drop legacy guidance` |
 | 3 | M3 受け入れ | 未着手 | |
 
 ## 決定事項
@@ -103,6 +104,21 @@
 - 2026-11-26 (M3 Task 1): macOS の集中テスト（`verify.sh macos`）のフィルタは `process_group`、`terminate_`（プロセスグループと
   SIGTERM→SIGKILL）、`socket`（unix ソケットのモード・残骸・パス長）、`hello`（全接続が通る peer credential 検査を経る RPC）、
   `autostart`（デーモンの自動起動）、`tui::`。各フィルタが 1 件以上に一致することを Linux で確認済み（下の検証記録）。
+- 2026-11-26 (M3 Task 2): README は `dgc` オーケストレーターだけを説明する（約 430 行。旧ランタイムの節はすべて削除）。M1/M2 でレビュー済みの
+  節を土台にし、各コマンド・フラグは `target/debug/dgc --help` と各サブコマンドの help、キーと挙動は `crates/dgc-cli` の実装で確認した。
+  追加した記述: 目的（ローカル専用・認証情報に触れない）、要件と動作確認版、`cargo install --locked --path crates/dgc-cli`（実行して確認）、
+  `daemon run` のフォアグラウンドは stderr にログ、オンデマンド起動のデーモンは起動したコマンドの環境を引き継ぐ、デーモン停止で
+  プロバイダのプロセスが終わり再起動後は `stopped`、ロードマップ（M4/M5/フェーズ B）。Codex の権限ダイアログの要約に「コマンド」を足した
+  （`provider/codex.rs` の doc どおり。M2 の文はコマンド承認を書き漏らしていた）。
+- 2026-11-26 (M3 Task 2): AGENTS.md・workflow.md・architecture.md は新 crate の規則と構成に書き直した（skills なし。ガイダンスの表は
+  architecture、workflow、設計書、fixtures README を指す）。削除: 計画の一覧どおりの旧 `docs/ai/` 文書、`docs/tool-output-contract.md`、
+  `docs/mcp-3x-migration.md`、`docs/ai/skills/`（5 skills）と `.agents/skills`・`.claude/skills`・`.opencode/skill` のリンク
+  （ホスト側のディレクトリも残らない）。`docs/ai/fixtures/` には無視対象の `__pycache__` だけが残ったので消した。
+  `.gitignore` の skills 用の un-ignore 行と `check-agent-guidance.py` の skills 検査（0 件で合格）は Task 2 の範囲外として残した。
+- 2026-11-26 (M3 Task 2): `docs/orchestrator/m2-tui-screen.txt` は説明文の `dgc-next` を `dgc` にし、画面中で唯一バイナリ名が出る
+  キャプチャ 16 のステータス行も `dgc` にした（計画の `rg` が 0 件であることが条件のため）。ファイル先頭に、キャプチャは改名前のもので
+  その行は書き換えたこと（実際の `dgc` では 120 桁で切れる位置が 5 文字後ろになる）を注記した。
+
 - 2026-11-26 (M3 Task 1): ルート `Cargo.toml` は仮想ワークスペース。`[workspace.dependencies]` の既存エントリは全て新 crate が使っており
   削除なし。`[profile.*]` はもともと無い。`.gitignore` は追跡していた `.doge/config.toml` の例外を外し、開発機に残る旧状態のために
   `.doge/` の無視は残した。CI の ripgrep 導入ステップ（旧 search ツールのテスト用）は削除。
@@ -874,6 +890,15 @@
     | `bash scripts/verify.sh tui-deps` | PASS（`dgc-cli` の crossterm 0.29 のみ） |
     | `bash scripts/verify.sh macos` | 環境で実行不可（Linux。wrapper が拒否） |
     | macOS の 6 フィルタを Linux で wrapper の `run_check` に通す | 全 PASS（process_group 1、terminate_ 4、socket 8、hello 5、autostart 3、tui:: 256 executed） |
+- 2026-11-26 M3 Task 2（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo build --locked -p dgc-cli` → `target/debug/dgc --help` と全サブコマンドの help で README のコマンド・フラグを照合。
+    `cargo install --debug --locked --path crates/dgc-cli --root <scratch>` → `dgc` だけがインストールされることを確認。
+  - workflow.md の集中テストのコマンドを実行: `-p dgc-protocol` 36、`-p dgc-daemon --test store --test events_log` 35、`--test workspace` 37、
+    `--test agent_manager --test claude_adapter --test codex_adapter` 61、`--test process --test server` 37、`-p dgc-client` 13、
+    `-p dgc-cli --test agent_cli --test daemon_cli --test workspace_cli` 22（いずれも全 PASS）。
+  - `rg -n "dgc-next|src/llm|src/features|FsTools|MutationReceipt|JobManager|RepoMap|dgc exec|mcp-server" README.md AGENTS.md docs/ai
+    docs/orchestrator/m2-tui-screen.txt`（未追跡の `docs/ai/audit-2026-10-29.md` を除く）→ 0 件。
+  - `bash scripts/verify.sh guidance` → PASS（ガイダンス検査、sensitive-logging、40 tests）。Rust のコードとビルド入力は変更していない。
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 
