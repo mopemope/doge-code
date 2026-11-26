@@ -4,6 +4,7 @@
 
 mod commands;
 mod output;
+mod tui;
 
 use std::process::ExitCode;
 

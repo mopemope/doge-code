@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 Task 2（TUI の状態と更新（純粋部分））
+- タスク: M2 Task 3（描画）
 - 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）
-- 次の一手: M2 計画の Task 2 Step 1 から始める（ブランチ `feat/orchestrator-m2`）
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）
+- 次の一手: M2 計画の Task 3 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。`tui::state::AppState` だけを読んで描画する
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -67,7 +67,7 @@
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
 | 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 完了 | `fix(daemon): bound event log handles and record turn starts` |
-| 2 | TUI の状態と更新（純粋部分） | 未着手 | |
+| 2 | TUI の状態と更新（純粋部分） | 完了 | `feat(cli): add TUI state and update logic` |
 | 3 | 描画 | 未着手 | |
 | 4 | ランタイムと起動コマンド | 未着手 | |
 | 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 未着手 | |
@@ -370,6 +370,17 @@
 - 2026-11-26 (M2 Task 1): `EventKind::TurnStarted` を、ターンを始める `UserMessage` の直後に 1 回記録する（初期プロンプト、
   Idle からの送信、キュー先頭の送信（ターン完了時・resume 後）、interrupt_and_send）。steer（実行中ターンへの合流）では記録しない。
   長文でチャンク分割された `UserMessage` は最後のチャンクの後に 1 回。
+- 2026-11-26 (M2 Task 2): 新依存なし。`tui/mod.rs` に `#![allow(dead_code)]`（Task 4 で外す）。`AppEvent`/`Effect`/`RequestTag`/`ConnectionState` は
+  `tui/mod.rs`、`AppState` ほかは `tui::state`、`update` は `tui::update`、`KeyInput`/`LineEditor` は `tui::input`。
+  `ConnectionState::Reconnecting` が `AppState` の初期接続状態。`RequestTag` は Send/Respond/CreateAgent/CreateWorkspace/Interrupt/Resume/Archive。
+  設計判断: (1) 履歴読み込み中（選択直後・再接続・lagged 後）の生イベントは保留し、履歴完了（空ページ）後に適用する。
+  seq だけで重複排除すると、先着の生イベントが古い履歴を隠すため。(2) 権限ダイアログは Tree フォーカス、または入力欄が空の Input
+  フォーカスでだけ自動で開く（書きかけのメッセージの `a`/`d` が権限に答えないため）。Esc で閉じた権限は `dismissed` に入り自動では
+  再表示されない（`p` で再表示）。(3) 選択エージェントが Snapshot/archive で変わったら、Input フォーカスは Tree に戻す。
+  (4) 作成ダイアログは RpcDone まで開いたまま（`submitting` で二重送信防止、失敗はダイアログとステータスに表示）。成功したら
+  結果の Agent/Workspace を木に挿入して選択する。(5) 送信失敗時は入力欄が空なら送ったテキストを戻す。(6) Ctrl-C はどのフォーカスでも終了
+  （README のキー表に載せる）。(7) 未知エージェントのイベントによる `LoadSnapshot` は応答待ちの間は 1 回だけ（20 Tick で再試行可）。
+  (8) フォーム内の移動は ↑↓、Tab は provider（ワークスペースは local/worktree）切替。
 
 ## 検証記録
 
@@ -557,6 +568,13 @@
     | `cargo test --locked -p dgc-daemon --test agent_manager` | PASS（27 passed） |
     | `cargo test --locked -p dgc-daemon --test server` | PASS（23 passed、変更なし） |
     | `cargo test --locked -p dgc-cli --test agent_cli` | PASS（12 passed、変更なし） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+- 2026-11-26 M2 Task 2（固定ツールチェーン 1.99.0）。実装を先に書いたため RED は `update` を空 Vec 返しのスタブにして確認
+  （35/39 が FAIL。残り 4 件は `update` に依存しない input/tree の 3 件と空振りで通る 1 件）、実装に戻して GREEN:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（39 passed） |
     | `cargo fmt --all --check` | 差分なし |
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
 
