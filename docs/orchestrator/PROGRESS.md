@@ -431,6 +431,14 @@
   `this request was shortened by dgc — the full command is not shown` を出す。a/s は読了後に使える。完全なコマンドは表示できない。
   (h) 契約（Task 4 へ）: `permission_layout` は `AppState.size` を使うので、ランタイムは起動直後に実端末サイズの `AppEvent::Resize` を 1 回送り、
   以後のリサイズごとに送ること（既定の 80x24 のままだと、描画側の幅と a/s 判定の幅がずれる）。描画は実際のフレームサイズで配置する。
+- 2026-11-26 (M2 Task 3 レビュー修正 2、コントローラ裁定): 権限ダイアログが「描かれていない文字を承認させる」経路を塞ぐ。
+  (i) 幅は ratatui が描画に使う `CellWidth::cell_width()`（半角濁点・半濁点 U+FF9E/U+FF9F を 1 桁と数える）で grapheme 単位に測る
+  （`unicode-width` との差で、行が収まると判断したのに ratatui が行を途中で切ることがあった）。
+  (ii) `permission_layout` は「どの行も 1 桁のガター + 本文が内幅に収まる」ことを保証できなければ `too_small`（a/s 無効、`d` は有効）にする。
+  本文幅は `内幅 - 1`（以前の `.max(1)` を廃止）。内幅が凡例の最長項目（`[Esc] close`）以下のときも `too_small`。端末 19〜20 桁（右ペイン 3〜4 桁）で
+  何も描かれないのに a が通る経路と、2 桁幅の CJK が落ちる経路を閉じる。
+  (iii) summary 中の `↪`（U+21AA）は `\u{21aa}` にエスケープする。本物の行頭の `↪` が折り返しの継続行に見えないようにする（ガターの `↪` だけが折り返しを意味する）。
+  (iv) ダイアログの幅の上限（72）と内側の高さは `permission_layout` の値を描画が使う（二重定義を除去）。
 
 ## 検証記録
 
@@ -650,6 +658,14 @@
     | コマンド | 結果 |
     |---|---|
     | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（89 passed） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS |
+- 2026-11-26 M2 Task 3 レビュー修正 2（固定ツールチェーン 1.99.0）。新規テストを先に書き、旧コードで RED（4 件 FAIL: 行が ratatui の描画幅より広い、
+  19〜24 桁でテキストが描かれないのに a が通る、行頭 `↪` が画面に出る、レイアウト不変条件）。実装後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（94 passed） |
     | `cargo fmt --all --check` | 差分なし |
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
     | `bash scripts/verify.sh msrv` | PASS |

