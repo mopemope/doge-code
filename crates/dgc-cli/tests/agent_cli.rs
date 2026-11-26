@@ -745,3 +745,115 @@ fn slow_provider_probe_does_not_break_autostart() {
     assert_eq!(claude_status["version"], Value::Null);
     assert_eq!(claude_status["tested"], false);
 }
+
+#[test]
+fn handoff_dry_run_prints_prompt() {
+    let a = AgentEnv::new("claude_turn", None).with_workspace(None);
+    let id = created_id(&a.run_agent("claude", &["--follow", "Say pong"]));
+    let output = a.run(&["handoff", &id, "--dry-run"]);
+    assert_success(&output);
+    let prompt = stdout(&output);
+    assert!(prompt.contains("Say pong"), "{prompt}");
+    assert!(prompt.contains("pong"));
+    assert!(prompt.contains("events.jsonl"));
+    let result = json(&a.run(&["handoff", &id, "--dry-run", "--json"]));
+    assert!(result["agent"].is_null());
+    assert_eq!(
+        result["prompt"].as_str().expect("prompt").trim_end(),
+        prompt.trim_end()
+    );
+    assert_eq!(
+        json(&a.run(&["ls", "--json"]))["agents"]
+            .as_array()
+            .expect("agents")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn follow_prints_handoff_suggestion_on_rate_limit() {
+    let a = AgentEnv::new(
+        "../../../../dgc-daemon/tests/fixtures/claude/scenarios/rate_limited_429",
+        None,
+    )
+    .with_workspace(None);
+    let prompt = "Reply with exactly the word: pong";
+    let output = a.run_agent("claude", &["--model", "haiku", "--follow", prompt]);
+    let text = stdout(&output);
+    let id = text.lines().next().expect("agent id");
+    let suggestion =
+        format!("rate limited by claude (http_429) — hand off with: dgc handoff {id} --to codex");
+    assert_eq!(text.matches(&suggestion).count(), 1, "{text}");
+    let output = a.run_agent(
+        "claude",
+        &["--model", "haiku", "--follow", "--json", prompt],
+    );
+    let text = stdout(&output);
+    assert!(!text.contains("hand off with"), "{text}");
+    assert!(
+        text.lines().any(|line| {
+            let value: Value = serde_json::from_str(line).expect("JSON line");
+            value["kind"]["type"] == "rate_limited"
+        }),
+        "{text}"
+    );
+}
+
+#[test]
+fn handoff_with_profile_and_explicit_overrides() {
+    let a = AgentEnv::new("claude_turn", Some("codex_untrusted"));
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(&a.env.paths.config_file)
+        .expect("open config");
+    writeln!(
+        config,
+        "\n[profiles.continue]\nprovider = \"codex\"\nmodel = \"profile-model\"\nmode = \"full-access\""
+    )
+    .expect("write profile");
+    drop(config);
+    let a = a.with_workspace(None);
+    let id = created_id(&a.run_agent("claude", &["--follow", "Say pong"]));
+    let conflict = a.run(&[
+        "handoff",
+        &id,
+        "--profile",
+        "continue",
+        "--to",
+        "claude",
+        "--dry-run",
+    ]);
+    assert!(!conflict.status.success());
+    assert!(stderr(&conflict).contains("profile continue is for codex"));
+    let output = a.run(&[
+        "handoff",
+        &id,
+        "--profile",
+        "continue",
+        "--model",
+        "explicit-model",
+        "--mode",
+        "untrusted",
+        "--json",
+        "--follow",
+    ]);
+    assert_success(&output);
+    let text = stdout(&output);
+    let mut lines = text.lines();
+    let result: Value = serde_json::from_str(lines.next().expect("creation result")).expect("JSON");
+    assert_eq!(result["agent"]["provider"], "codex");
+    assert_eq!(result["agent"]["model"], "explicit-model");
+    assert_eq!(result["agent"]["mode"], "untrusted");
+    assert_eq!(result["agent"]["workspace_id"], a.workspace);
+    assert_eq!(result["agent"]["labels"]["handoff_from"], id);
+    assert!(lines.any(|line| {
+        let event: Value = serde_json::from_str(line).expect("event JSON");
+        event["kind"]["text"] == "pong"
+    }));
+    let output = a.run(&["handoff", &id, "--profile", "continue", "--json"]);
+    assert_success(&output);
+    assert!(stderr(&output).contains("runs in auto-approve mode full-access"));
+    assert_eq!(json(&output)["agent"]["model"], "profile-model");
+    assert_eq!(json(&output)["agent"]["auto_approve"], true);
+}

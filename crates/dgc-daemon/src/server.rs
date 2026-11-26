@@ -17,10 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dgc_protocol::methods::{
-    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_GET, AGENT_INTERRUPT, AGENT_LIST,
-    AGENT_RESUME, AGENT_SEND, DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO, HelloParams,
-    PERMISSION_LIST, PERMISSION_RESPOND, PROFILE_LIST, PROJECT_ADD, PROJECT_LIST, PROJECT_REMOVE,
-    ProviderStatus, SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST,
+    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_GET, AGENT_HANDOFF, AGENT_INTERRUPT,
+    AGENT_LIST, AGENT_RESUME, AGENT_SEND, DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO,
+    HelloParams, PERMISSION_LIST, PERMISSION_RESPOND, PROFILE_LIST, PROJECT_ADD, PROJECT_LIST,
+    PROJECT_REMOVE, ProviderStatus, SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE,
+    WORKSPACE_LIST,
 };
 use dgc_protocol::model::ProviderKind;
 use dgc_protocol::rpc::{
@@ -262,6 +263,7 @@ impl DaemonDispatcher {
             WORKSPACE_ARCHIVE => handlers::workspace_archive(workspaces, agents, params).await,
             PROFILE_LIST => handlers::profile_list(&self.config),
             AGENT_CREATE => handlers::agent_create(agents, params).await,
+            AGENT_HANDOFF => handlers::agent_handoff(agents, params).await,
             AGENT_LIST => handlers::agent_list(agents, params),
             AGENT_GET => handlers::agent_get(agents, params),
             AGENT_SEND => handlers::agent_send(agents, params).await,

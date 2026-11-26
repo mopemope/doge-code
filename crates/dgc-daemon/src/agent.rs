@@ -35,8 +35,8 @@ use dgc_protocol::chunk_text;
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
-    AgentCreateParams, AgentEventsParams, AgentSendParams, MAX_EVENTS_LIMIT,
-    PermissionRespondParams,
+    AgentCreateParams, AgentEventsParams, AgentHandoffParams, AgentHandoffResult, AgentSendParams,
+    MAX_EVENTS_LIMIT, PermissionRespondParams,
 };
 use dgc_protocol::model::{
     Agent, AgentState, PendingPermission, ProviderKind, SendBehavior, SendOutcome, Workspace,
@@ -586,6 +586,75 @@ impl AgentManager {
         };
         tokio::spawn(run_actor(Arc::clone(&self.shared), launch, commands));
         Ok(agent)
+    }
+
+    /// Preview or start a new agent in the source agent's workspace.
+    pub async fn handoff(
+        &self,
+        params: AgentHandoffParams,
+    ) -> Result<AgentHandoffResult, AgentError> {
+        let source = self.handoff_source(&params.agent_id)?;
+        let workspace = self.active_workspace(&source.workspace_id)?;
+        let title = crate::handoff::strip_controls(source.title.lines().next().unwrap_or_default())
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let mut create = AgentCreateParams {
+            workspace_id: workspace.id.clone(),
+            title: format!("handoff: {title}"),
+            provider: params
+                .provider
+                .or_else(|| params.profile.is_none().then(|| source.provider.other())),
+            profile: params.profile,
+            model: params.model,
+            mode: params.mode,
+            initial_prompt: String::new(),
+            labels: BTreeMap::from([("handoff_from".to_owned(), source.id.to_string())]),
+            parent_id: None,
+        };
+        let provider = self.resolve_profile(&mut create)?;
+        crate::provider::validate_mode(provider, create.mode.as_deref())
+            .map_err(AgentError::InvalidParams)?;
+        let dir = self.shared.agent_dir(&source.id);
+        let (first_page, tail) = {
+            let mut logs = lock(&self.shared.logs);
+            let read = || crate::events_log::handoff_history(&dir, crate::handoff::SCAN_LIMIT);
+            if let Some(log) = logs.get(&source.id) {
+                drop(logs);
+                let _guard = lock(&log);
+                read()
+            } else {
+                // Keep a resume from opening an append handle during the read.
+                read()
+            }
+        }
+        .map_err(storage)?;
+        let log_path =
+            std::path::absolute(dir.join(crate::events_log::CURRENT_FILE)).map_err(storage)?;
+        let (status, diff) = crate::handoff::git_state(&workspace.path).await;
+        // The source or workspace may have been archived during the Git calls.
+        self.handoff_source(&source.id)?;
+        self.active_workspace(&workspace.id)?;
+        let prompt =
+            crate::handoff::build_prompt(&source, &first_page, &tail, &status, &diff, &log_path)
+                .ok_or_else(|| AgentError::InvalidState {
+                    state: "handoff required sections exceed 32 KiB".to_owned(),
+                })?;
+        let agent = if params.dry_run {
+            None
+        } else {
+            create.initial_prompt.clone_from(&prompt);
+            Some(self.create(create).await?)
+        };
+        Ok(AgentHandoffResult { prompt, agent })
+    }
+
+    fn handoff_source(&self, id: &AgentId) -> Result<Agent, AgentError> {
+        let source = self.load(id)?;
+        if source.state == AgentState::Archived {
+            return Err(AgentError::state(source.state));
+        }
+        Ok(source)
     }
 
     /// Restart a stopped or failed agent from its provider session. The first

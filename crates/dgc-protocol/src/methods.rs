@@ -17,6 +17,7 @@ pub const WORKSPACE_CREATE: &str = "workspace.create";
 pub const WORKSPACE_LIST: &str = "workspace.list";
 pub const WORKSPACE_ARCHIVE: &str = "workspace.archive";
 pub const PROFILE_LIST: &str = "profile.list";
+pub const AGENT_HANDOFF: &str = "agent.handoff";
 pub const AGENT_CREATE: &str = "agent.create";
 pub const AGENT_LIST: &str = "agent.list";
 pub const AGENT_GET: &str = "agent.get";
@@ -142,6 +143,22 @@ pub struct ProfileInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileListResult {
     pub profiles: Vec<ProfileInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHandoffParams {
+    pub agent_id: AgentId,
+    pub provider: Option<ProviderKind>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentHandoffResult {
+    pub prompt: String,
+    pub agent: Option<crate::model::Agent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

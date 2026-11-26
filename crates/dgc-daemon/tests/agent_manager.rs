@@ -1606,3 +1606,334 @@ async fn event_log_handles_are_bounded() {
     );
     drop(sessions);
 }
+
+async fn handoff_rpc(
+    h: &Harness,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, dgc_protocol::rpc::RpcError> {
+    dgc_daemon::handlers::agent_handoff(&h.manager, params).await
+}
+
+fn stored_handoff_source(h: &Harness, provider: ProviderKind, events: Vec<EventKind>) -> AgentId {
+    let id = AgentId::generate();
+    h.store
+        .put_agent(&Agent {
+            id: id.clone(),
+            workspace_id: h.workspace.id.clone(),
+            title: "Source title".to_owned(),
+            provider,
+            model: Some("source-only-model".to_owned()),
+            mode: Some("source-only-mode".to_owned()),
+            auto_approve: false,
+            provider_session_id: Some("source-only-session".to_owned()),
+            state: AgentState::Stopped,
+            parent_id: None,
+            labels: BTreeMap::new(),
+            created_at: String::new(),
+            last_error: None,
+        })
+        .expect("store source");
+    let dir = h.paths.state_dir.join("agents").join(id.as_str());
+    std::fs::create_dir(&dir).expect("agent dir");
+    let mut log = dgc_daemon::events_log::EventLog::open(&dir, id.clone(), 8 * 1024 * 1024)
+        .expect("open log");
+    log.append(EventKind::StateChanged {
+        state: AgentState::Starting,
+    })
+    .expect("state event");
+    for event in events {
+        log.append(event).expect("append event");
+    }
+    id
+}
+
+fn instruction(text: impl Into<String>) -> EventKind {
+    EventKind::UserMessage {
+        text: text.into(),
+        behavior: SendBehavior::Queue,
+    }
+}
+
+fn answer(text: impl Into<String>, final_: bool) -> EventKind {
+    EventKind::AssistantText {
+        text: text.into(),
+        final_,
+    }
+}
+
+async fn handoff_preview(h: &Harness, id: &AgentId) -> String {
+    let result = handoff_rpc(h, serde_json::json!({"agent_id": id, "dry_run": true}))
+        .await
+        .expect("handoff preview");
+    result["prompt"].as_str().expect("prompt").to_owned()
+}
+
+fn git_in_workspace(h: &Harness, args: &[&str]) {
+    let result = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .current_dir(&h.workspace.path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git");
+    assert!(result.status.success(), "{:?}", result);
+}
+
+#[tokio::test]
+async fn handoff_prompt_contains_instructions_answer_git_and_log_path() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    let file = h.workspace.path.join("edited.txt");
+    std::fs::write(&file, "before\n").expect("tracked file");
+    git_in_workspace(&h, &["add", "edited.txt"]);
+    std::fs::write(&file, "after\n").expect("edit tracked file");
+    std::fs::write(h.workspace.path.join("untracked.txt"), "data").expect("untracked file");
+
+    let mut events = vec![
+        instruction("first instruction"),
+        EventKind::TurnStarted,
+        instruction("first instruction"),
+        EventKind::TurnStarted,
+        answer("old answer", true),
+    ];
+    for text in ["old instruction", "one", "two", "three", "three"] {
+        events.extend([instruction(text), EventKind::TurnStarted]);
+    }
+    events.extend([answer("last answer ", false), answer("continued", true)]);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, events);
+    let prompt = handoff_preview(&h, &id).await;
+    let log = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(id.as_str())
+        .join("events.jsonl");
+    let mut after = 0;
+    for expected in [
+        "You are continuing work started by another coding agent (claude)",
+        "Source title",
+        "first instruction",
+        "one",
+        "two",
+        "three",
+        "last answer continued",
+        "?? untracked.txt",
+        "edited.txt |",
+        &format!(
+            "The full log of the previous agent is at {}.",
+            log.display()
+        ),
+    ] {
+        after += prompt[after..]
+            .find(expected)
+            .unwrap_or_else(|| panic!("expected {expected:?} after byte {after} in {prompt}"))
+            + expected.len();
+    }
+    assert_eq!(prompt.matches("three").count(), 1);
+    assert!(!prompt.contains("old answer"));
+    assert!(!prompt.contains("old instruction"));
+}
+
+#[tokio::test]
+async fn handoff_prompt_is_bounded_and_strips_control_chars() {
+    let h = Harness::new(DEFAULT);
+    // The JSON-escaped initial prompt crosses both chunk and normal
+    // forward-page boundaries, yet fits after controls are removed.
+    let initial = format!(
+        "FIRST\u{7}\t\n{}{}END_FIRST",
+        "\u{1}".repeat(140_000),
+        "初".repeat(6500)
+    );
+    let mut events: Vec<_> = dgc_protocol::chunk_text(&initial)
+        .into_iter()
+        .map(instruction)
+        .collect();
+    events.extend([
+        EventKind::TurnStarted,
+        instruction("新".repeat(3000)),
+        EventKind::TurnStarted,
+        answer(format!("OLD_ANSWER{}", "文".repeat(4000)), false),
+        answer("END_ANSWER\u{1b}", true),
+    ]);
+    let id = stored_handoff_source(&h, ProviderKind::Codex, events);
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(prompt.len() <= 32 * 1024, "{}", prompt.len());
+    assert!(prompt.contains("FIRST\t\n"));
+    assert!(prompt.contains(&format!("FIRST\t\n{}END_FIRST", "初".repeat(6500))));
+    assert_eq!(prompt.matches("END_FIRST").count(), 1);
+    assert!(prompt.contains("…(earlier text omitted)"));
+    assert!(prompt.contains("END_ANSWER"));
+    assert!(!prompt.contains("OLD_ANSWER"));
+    assert!(
+        !prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    );
+    assert!(prompt.ends_with("events.jsonl.\n"));
+}
+
+#[tokio::test]
+async fn handoff_prompt_excludes_env_and_account_data() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    std::fs::write(h.workspace.path.join(".env"), "TOKEN=credential-sentinel")
+        .expect("untracked credentials file");
+    let id = stored_handoff_source(
+        &h,
+        ProviderKind::Codex,
+        vec![
+            instruction("first"),
+            EventKind::TurnStarted,
+            EventKind::RateLimited {
+                detail: serde_json::json!({"reason": "limit-sentinel", "account": "account-sentinel"}),
+            },
+            EventKind::Error {
+                message: "error-sentinel".to_owned(),
+            },
+            EventKind::ToolResult {
+                summary: "tool-sentinel".to_owned(),
+                is_error: false,
+            },
+        ],
+    );
+    let prompt = handoff_preview(&h, &id).await;
+    for excluded in ["sentinel", "source-only", "TOKEN="] {
+        assert!(!prompt.contains(excluded), "{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn handoff_defaults_to_the_other_provider() {
+    let mut h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let result = handoff_rpc(&h, serde_json::json!({"agent_id": id, "dry_run": false}))
+        .await
+        .expect("handoff");
+    let mut target = h.next_session().await;
+    assert_eq!(result["agent"]["provider"], "codex");
+    assert!(result["agent"]["model"].is_null());
+    assert!(result["agent"]["mode"].is_null());
+    assert_eq!(
+        target.next_call().await,
+        Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
+    );
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_dry_run_creates_nothing() {
+    let mut h = Harness::new(DEFAULT);
+    let (source, mut session) = h.running("first").await;
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({"agent_id": source.id, "provider": "codex", "dry_run": true}),
+    )
+    .await
+    .expect("handoff");
+    assert!(result["agent"].is_null());
+    assert!(result["prompt"].as_str().expect("prompt").contains("first"));
+    assert_eq!(h.manager.list().expect("list").len(), 1);
+    assert!(h.sessions.try_recv().is_err());
+    session.assert_no_call();
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_creates_agent_in_same_workspace_with_label() {
+    let mut h = Harness::new(DEFAULT);
+    let (source, mut source_session) = h.running("first").await;
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": source.id, "provider": "codex", "mode": "full-access", "dry_run": false
+        }),
+    )
+    .await
+    .expect("handoff");
+    let mut target = h.next_session().await;
+    let agent: Agent = serde_json::from_value(result["agent"].clone()).expect("agent");
+    assert_ne!(agent.id, source.id);
+    assert_eq!(agent.title, "handoff: t");
+    assert_eq!(agent.workspace_id, source.workspace_id);
+    assert_eq!(
+        agent.labels.get("handoff_from").map(String::as_str),
+        Some(source.id.as_str())
+    );
+    assert!(agent.parent_id.is_none());
+    assert!(agent.auto_approve);
+    assert_eq!(target.spec.cwd, h.workspace.path);
+    assert_eq!(
+        target.next_call().await,
+        Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
+    );
+    assert_eq!(
+        h.manager.get(&source.id).expect("source").state,
+        AgentState::Running
+    );
+    source_session.assert_no_call();
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_requires_active_source_and_workspace() {
+    let mut h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![]);
+    let path = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(id.as_str())
+        .join("events.jsonl");
+    std::fs::remove_file(&path).expect("remove incomplete source log");
+    let params = serde_json::json!({"agent_id": id, "dry_run": true});
+    let result = handoff_rpc(&h, params.clone())
+        .await
+        .expect("preview without log");
+    assert!(
+        result["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("unavailable in the retained event log")
+    );
+    assert!(!path.exists(), "preview created the missing source log");
+
+    let missing = serde_json::json!({"agent_id": AgentId::generate(), "dry_run": true});
+    assert_eq!(
+        handoff_rpc(&h, missing)
+            .await
+            .expect_err("unknown agent")
+            .code,
+        dgc_protocol::rpc::NOT_FOUND
+    );
+
+    h.workspace.state = WorkspaceState::Archived;
+    h.store
+        .put_workspace(&h.workspace)
+        .expect("archive workspace");
+    assert_eq!(
+        handoff_rpc(&h, params.clone())
+            .await
+            .expect_err("archived workspace")
+            .code,
+        dgc_protocol::rpc::INVALID_STATE
+    );
+
+    h.workspace.state = WorkspaceState::Active;
+    h.store
+        .put_workspace(&h.workspace)
+        .expect("activate workspace");
+    h.manager.archive(&id).await.expect("archive agent");
+    assert_eq!(
+        handoff_rpc(&h, params)
+            .await
+            .expect_err("archived source")
+            .code,
+        dgc_protocol::rpc::INVALID_STATE
+    );
+}

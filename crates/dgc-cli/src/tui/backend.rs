@@ -31,10 +31,10 @@ use dgc_daemon::paths::DaemonPaths;
 use dgc_protocol::event::AgentEvent;
 use dgc_protocol::ids::AgentId;
 use dgc_protocol::methods::{
-    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_INTERRUPT, AGENT_LIST, AGENT_RESUME,
-    AGENT_SEND, AgentEventsParams, AgentListParams, MAX_EVENTS_LIMIT, NOTIFY_EVENT, NOTIFY_LAGGED,
-    PERMISSION_LIST, PERMISSION_RESPOND, PROJECT_LIST, PermissionListParams, SubscribeParams,
-    WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST, WorkspaceListParams,
+    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_HANDOFF, AGENT_INTERRUPT, AGENT_LIST,
+    AGENT_RESUME, AGENT_SEND, AgentEventsParams, AgentListParams, MAX_EVENTS_LIMIT, NOTIFY_EVENT,
+    NOTIFY_LAGGED, PERMISSION_LIST, PERMISSION_RESPOND, PROJECT_LIST, PermissionListParams,
+    SubscribeParams, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST, WorkspaceListParams,
 };
 use dgc_protocol::model::{Agent, PendingPermission, Project, Workspace};
 use dgc_protocol::rpc::Notification;
@@ -83,6 +83,7 @@ pub fn is_mutating(method: &str) -> bool {
         method,
         AGENT_SEND
             | AGENT_CREATE
+            | AGENT_HANDOFF
             | AGENT_INTERRUPT
             | AGENT_RESUME
             | AGENT_ARCHIVE

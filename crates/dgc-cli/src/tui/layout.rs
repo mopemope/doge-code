@@ -163,6 +163,65 @@ pub struct SummaryRow {
     pub soft: bool,
 }
 
+/// Escape prompt or permission text and leave the gutter for soft wraps.
+pub fn summary_rows(text: &str, width: usize) -> Vec<SummaryRow> {
+    let escaped = escape_text(text).replace('↪', "\\u{21aa}");
+    escaped
+        .split('\n')
+        .flat_map(|line| {
+            wrap_line(line, width.saturating_sub(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, text)| SummaryRow {
+                    text,
+                    soft: index > 0,
+                })
+        })
+        .collect()
+}
+
+pub const AUTO_APPROVE_WARNING: &str =
+    "WARNING: auto-approve lets the agent run commands and edit files without asking you.";
+pub const HANDOFF_KEYS: &str = "Enter create  Esc cancel  ↑↓ field  PgUp/PgDn preview";
+
+pub struct HandoffLayout {
+    pub rows: Vec<SummaryRow>,
+    pub visible_rows: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl HandoffLayout {
+    pub fn max_scroll(&self) -> usize {
+        self.rows.len().saturating_sub(self.visible_rows)
+    }
+}
+
+pub fn handoff_layout(size: (u16, u16), preview: &str, auto_approve: bool) -> HandoffLayout {
+    let (_, pane, _) = panes(Rect::new(0, 0, size.0, size.1));
+    let width = usize::from(pane.width.min(DIALOG_MAX_WIDTH).saturating_sub(2));
+    let height = usize::from(pane.height.saturating_sub(2));
+    let rows = summary_rows(preview, width);
+    let warnings = if auto_approve {
+        wrap_text(AUTO_APPROVE_WARNING, width).len()
+    } else {
+        0
+    };
+    // Source, target, profile, mode, preview status and the key legend.
+    let reserved = 5 + warnings + wrap_text(HANDOFF_KEYS, width).len();
+    let visible_rows = if width >= 24 {
+        height.saturating_sub(reserved).min(rows.len())
+    } else {
+        0
+    };
+    HandoffLayout {
+        rows,
+        visible_rows,
+        width,
+        height,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionLayout {
     /// The whole escaped summary, wrapped.
@@ -229,22 +288,12 @@ pub fn permission_layout(size: (u16, u16), summary: &str) -> PermissionLayout {
     let max_inner_height = usize::from(pane.height.saturating_sub(2));
     // Every row is drawn as a one-column gutter plus its text.
     let text_cols = inner_width.saturating_sub(1);
-
-    let escaped = if summary.is_empty() {
-        "(no summary)".to_owned()
+    let summary = if summary.is_empty() {
+        "(no summary)"
     } else {
-        // The gutter's `↪` must only ever mean a soft wrap.
-        escape_text(summary).replace('\u{21aa}', "\\u{21aa}")
+        summary
     };
-    let mut rows = Vec::new();
-    for line in escaped.split('\n') {
-        for (index, text) in wrap_line(line, text_cols).into_iter().enumerate() {
-            rows.push(SummaryRow {
-                text,
-                soft: index > 0,
-            });
-        }
-    }
+    let rows = summary_rows(summary, inner_width);
 
     let legend_rows = legend_rows(inner_width);
     let shortened_rows = if is_shortened(summary) {

@@ -223,12 +223,51 @@ daemon-supplied text (agent output, summaries, errors) escaped (`\r`, `\t`,
 `\x1b`, `\u{202e}`; newlines are kept only where text may span lines), so a
 terminal escape cannot hide or rewrite what is displayed.
 
-dgc records at most one `rate limited` event per turn. Claude Code rejection
-statuses, unknown statuses, and HTTP 429 errors trigger the event. Codex
-triggers it when a snapshot reports a reached limit or when a usage-limit or
-rate-limit error ends without retrying. The detail includes the provider,
-a reason token of up to 48 characters, and the reset time in Unix seconds
-when available.
+### Handoff between providers
+
+When Claude Code hits its usage limit, you can continue in the same workspace
+with Codex, and vice versa. The source agent keeps running. Both agents can
+work in the same checkout concurrently.
+
+```sh
+dgc handoff ID --to codex --dry-run
+dgc handoff ID --to codex --follow
+```
+
+- `dgc handoff ID [--to claude|codex] [--profile NAME] [--model M] [--mode MODE]
+  [--dry-run] [--follow] [--json]` defaults to the other provider when you omit
+  both `--to` and `--profile`. `--to` must match the selected profile.
+  `--model` and `--mode` override the profile. The new agent uses the target
+  provider's default mode unless you choose a mode or a profile that sets one.
+  Auto-approve modes print a warning on stderr.
+- `--dry-run` prints the prompt without starting an agent. A launch prints
+  the new agent's ID and optionally follows it. With `--json`, the first
+  result contains `prompt` and `agent` (`null` for a dry run).
+- `run --follow` and `logs --follow` print one handoff suggestion when they
+  encounter a rate limit. In JSON mode they emit the event as usual.
+
+dgc assembles the prompt locally without calling an LLM. It uses the source
+title, first recorded instruction, up to three recent instructions, the last
+turn's assistant text (tail up to 4 KiB), `git status --short` and
+`git diff --stat` (up to 4 KiB apiece), and the absolute path to the source
+event log. It reads recent events from the retained log. Environment
+variables, configuration and credential files, account or plan metadata, and
+rate-limit details are outside the prompt's sources. Values already present in
+conversation text and filenames can appear. The prompt is capped at 32 KiB. If the
+required sections alone exceed that limit, handoff returns an error. A missing
+or rotated-out initial instruction is marked unavailable. The launch rebuilds
+the prompt using the current log and Git state.
+
+dgc records at most one `rate limited` event per turn. Claude Code triggers
+it on a rejected or unknown `rate_limit_event` status or an HTTP 429 in a
+result or assistant error. It ignores `allowed` and `allowed_warning`.
+Codex triggers it when `account/rateLimits/updated` reports a non-null
+`rateLimitReachedType`, or when an error reports `usageLimitExceeded` or
+`rateLimitExceeded` with `willRetry` false or absent. The event carries the
+provider, a reason of up to 48 characters, and a Unix reset time when
+available. Real usage-limit exhaustion has never been observed for these
+checks. The detection conditions come from recorded provider traffic and
+schemas and are tested with synthetic scenarios.
 
 ## Terminal UI
 
@@ -261,6 +300,7 @@ Keys in the tree:
 | `i` | type to the selected agent |
 | `n` | new agent in the selected workspace (form: profile, provider, model, mode, title, prompt) |
 | `w` | new workspace in the selected project (local, or worktree with branch and optional base) |
+| `H` | preview and confirm a handoff of the selected agent |
 | `x` | interrupt the selected agent (discards its queued messages) |
 | `r` | resume a stopped or failed agent |
 | `A` | archive the selected agent (asks first: `y`/`Enter` or `n`/`Esc`) |
@@ -281,6 +321,17 @@ effective mode auto-approves. The new-agent form needs a prompt, and a worktree
 workspace needs a branch. Failures stay in the form. A created agent or
 workspace is selected only if its form is still open when the daemon answers;
 after `Esc` it is still created, but the cursor stays where you left it.
+
+Agents that hit a usage limit show `⇄` in the tree and a handoff hint above
+the stream. The hint clears after the agent completes a later turn without a
+limit, or is archived. Select any agent in the tree and press `H` for a
+handoff. In the dialog, use `↑`/`↓` to select the target, profile or mode
+field. `Tab` switches the target on the target field, and `Tab`/`Shift-Tab`
+cycle profiles on the profile field. The mode field accepts text or paste
+and shows a red warning for auto-approve modes. Use `PgUp`/`PgDn` to scroll
+the escaped dry-run preview. Once the preview is ready and visible, press
+`Enter` to start or `Esc` to cancel. Pending permission dialogs wait while
+the handoff dialog is open.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was
 selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).

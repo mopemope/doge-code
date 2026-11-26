@@ -143,14 +143,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
                 parent_id: None,
             };
             let agent: Agent = client.call(AGENT_CREATE, &params).await?;
-            if agent.auto_approve {
-                eprintln!(
-                    "warning: agent {} runs in auto-approve mode {}: the provider acts \
-                     without asking for permission",
-                    agent.id,
-                    output::escape_line(agent.mode.as_deref().unwrap_or("-"))
-                );
-            }
+            warn_auto_approve(&agent);
             if json {
                 println!("{}", serde_json::to_string(&agent)?);
             } else {
@@ -219,13 +212,17 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
             tail,
             follow,
         } => {
+            let mut output = FollowOutput {
+                json,
+                suggested: false,
+            };
             let since = match tail {
-                Some(n) => print_tail(&mut client, &id, n, follow, json).await?,
+                Some(n) => print_tail(&mut client, &id, n, follow, &mut output).await?,
                 None => since,
             };
             if follow {
                 drop(client);
-                follow_events(&id, since, json, |_| None::<()>).await?;
+                follow_events(&id, since, output, |_| None::<()>).await?;
             } else if tail.is_none() {
                 print_history(&mut client, &id, since, json).await?;
             }
@@ -242,6 +239,17 @@ fn default_title(prompt: &str) -> String {
         .chars()
         .take(DEFAULT_TITLE_CHARS)
         .collect()
+}
+
+pub(super) fn warn_auto_approve(agent: &Agent) {
+    if agent.auto_approve {
+        eprintln!(
+            "warning: agent {} runs in auto-approve mode {}: the provider acts \
+             without asking for permission",
+            agent.id,
+            output::escape_line(agent.mode.as_deref().unwrap_or("-"))
+        );
+    }
 }
 
 fn print_agent(agent: &Agent, json: bool) -> CliResult<()> {
@@ -300,7 +308,7 @@ async fn print_tail(
     id: &AgentId,
     n: u32,
     follow: bool,
-    json: bool,
+    output: &mut FollowOutput,
 ) -> CliResult<u64> {
     let params = AgentEventsParams {
         agent_id: id.clone(),
@@ -313,7 +321,11 @@ async fn print_tail(
     let events: Vec<AgentEvent> = serde_json::from_value(result["events"].clone())?;
     if n > 0 {
         for event in &events {
-            print_event(event, json)?;
+            if follow {
+                output.print(event)?;
+            } else {
+                print_event(event, output.json)?;
+            }
         }
     }
     Ok(events.last().map_or(0, |event| event.seq))
@@ -329,11 +341,19 @@ fn settled(state: AgentState) -> bool {
 
 /// Stream the agent's events from the beginning until it settles; the exit
 /// status is 0 when it settled idle.
-async fn follow_until_settled(id: &AgentId, json: bool) -> CliResult<ExitCode> {
-    let state = follow_events(id, 0, json, |event| match event.kind {
-        EventKind::StateChanged { state } if settled(state) => Some(state),
-        _ => None,
-    })
+pub(super) async fn follow_until_settled(id: &AgentId, json: bool) -> CliResult<ExitCode> {
+    let state = follow_events(
+        id,
+        0,
+        FollowOutput {
+            json,
+            suggested: false,
+        },
+        |event| match event.kind {
+            EventKind::StateChanged { state } if settled(state) => Some(state),
+            _ => None,
+        },
+    )
     .await?;
     Ok(match state {
         Some(AgentState::Idle) => ExitCode::SUCCESS,
@@ -345,13 +365,43 @@ async fn follow_until_settled(id: &AgentId, json: bool) -> CliResult<ExitCode> {
     })
 }
 
+struct FollowOutput {
+    json: bool,
+    suggested: bool,
+}
+
+impl FollowOutput {
+    fn print(&mut self, event: &AgentEvent) -> CliResult<()> {
+        print_event(event, self.json)?;
+        if !self.json
+            && !self.suggested
+            && let EventKind::RateLimited { detail } = &event.kind
+        {
+            let provider = match detail["provider"].as_str() {
+                Some("claude") => ProviderKind::Claude,
+                Some("codex") => ProviderKind::Codex,
+                _ => return Ok(()),
+            };
+            let reason = output::escape_line(detail["reason"].as_str().unwrap_or("unknown"));
+            println!(
+                "rate limited by {} ({reason}) — hand off with: dgc handoff {} --to {}",
+                output::provider_name(provider),
+                event.agent_id,
+                output::provider_name(provider.other()),
+            );
+            self.suggested = true;
+        }
+        Ok(())
+    }
+}
+
 /// Print events after `since` (backfilled by the daemon), then live ones,
 /// until `stop` returns a value or the daemon closes the connection. After a
 /// `lagged` notice the stream is re-subscribed from the last printed seq.
 async fn follow_events<T>(
     id: &AgentId,
     since: u64,
-    json: bool,
+    mut output: FollowOutput,
     stop: impl Fn(&AgentEvent) -> Option<T>,
 ) -> CliResult<Option<T>> {
     let mut last = since;
@@ -371,7 +421,7 @@ async fn follow_events<T>(
                         continue;
                     }
                     last = event.seq;
-                    print_event(&event, json)?;
+                    output.print(&event)?;
                     if let Some(done) = stop(&event) {
                         return Ok(Some(done));
                     }

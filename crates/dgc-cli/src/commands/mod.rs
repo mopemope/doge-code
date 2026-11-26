@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod daemon;
+pub mod handoff;
 pub mod permit;
 pub mod profile;
 pub mod project;

@@ -3,18 +3,21 @@
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
-    AGENT_ARCHIVE, AGENT_CREATE, AGENT_INTERRUPT, AGENT_RESUME, AGENT_SEND, AgentCreateParams,
-    AgentIdParams, AgentSendParams, PERMISSION_RESPOND, PROFILE_LIST, PermissionRespondParams,
-    ProfileListResult, WORKSPACE_CREATE, WorkspaceCreateParams,
+    AGENT_ARCHIVE, AGENT_CREATE, AGENT_HANDOFF, AGENT_INTERRUPT, AGENT_RESUME, AGENT_SEND,
+    AgentCreateParams, AgentHandoffResult, AgentIdParams, AgentSendParams, PERMISSION_RESPOND,
+    PROFILE_LIST, PermissionRespondParams, ProfileListResult, WORKSPACE_CREATE,
+    WorkspaceCreateParams,
 };
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PendingPermission, SendBehavior, SendOutcome, Workspace,
 };
 
 use super::input::{Key, KeyInput};
+use super::layout::handoff_layout;
 use super::state::{
-    AgentField, AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId,
-    PermissionChange, SNAPSHOT_REFRESH_TICKS, STREAM_CAP, ScrollMotion, default_title,
+    AgentField, AppState, Dialog, ERROR_TICKS, Focus, HandoffField, HandoffForm, NewAgentForm,
+    NewWorkspaceForm, NodeId, PermissionChange, SNAPSHOT_REFRESH_TICKS, STREAM_CAP, ScrollMotion,
+    default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
@@ -31,6 +34,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             permissions,
         } => {
             state.snapshot_pending = false;
+            for agent in &agents {
+                if agent.state == AgentState::Archived {
+                    state.rate_limits.remove(&agent.id);
+                }
+            }
             state.tree.replace(projects, workspaces, agents);
             state.permissions = permissions;
             // The snapshot may predate live permission events: apply them again.
@@ -70,6 +78,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 // so a key typed before the resize must not answer.
                 state.sync_permission_view(true);
                 state.rearm_permission();
+                if let Some(Dialog::Handoff(form)) = &mut state.dialog {
+                    form.rearm();
+                }
             }
         }
         AppEvent::Paste(text) => on_paste(state, &text),
@@ -180,6 +191,9 @@ fn on_connection(state: &mut AppState, connection: ConnectionState, fx: &mut Vec
 }
 
 fn on_tick(state: &mut AppState, fx: &mut Vec<Effect>) {
+    if let Some(Dialog::Handoff(form)) = &mut state.dialog {
+        form.ticks_until_armed = form.ticks_until_armed.saturating_sub(1);
+    }
     if let Some(Dialog::Permission {
         ticks_until_armed, ..
     }) = &mut state.dialog
@@ -206,6 +220,7 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
     if state.tree.agent(&event.agent_id).is_none() {
         request_snapshot(state, fx, false);
     }
+    track_rate_limit(state, &event);
     match &event.kind {
         EventKind::StateChanged { state: agent_state } => {
             state.tree.set_agent_state(&event.agent_id, *agent_state);
@@ -223,6 +238,31 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
     }
     if state.stream.agent_id() == Some(&event.agent_id) {
         state.stream.live(&event);
+    }
+}
+
+fn track_rate_limit(state: &mut AppState, event: &AgentEvent) {
+    match event.kind {
+        EventKind::StateChanged {
+            state: AgentState::Archived,
+        } => {
+            state.rate_limits.remove(&event.agent_id);
+        }
+        EventKind::TurnStarted
+        | EventKind::TurnCompleted { .. }
+        | EventKind::RateLimited { .. }
+            if state
+                .tree
+                .agent(&event.agent_id)
+                .is_none_or(|agent| agent.state != AgentState::Archived) =>
+        {
+            state
+                .rate_limits
+                .entry(event.agent_id.clone())
+                .or_default()
+                .observe(event);
+        }
+        _ => {}
     }
 }
 
@@ -255,6 +295,17 @@ fn on_history(
     // new one) must not move `last_seq` past what the current load fetches.
     if state.stream.agent_id() != Some(agent_id) || generation != state.stream.generation() {
         return;
+    }
+    // A live turn may already be ahead of this history page. Record the
+    // last completion first so the older starts can still follow it by seq.
+    if let Some(completion) = events
+        .iter()
+        .rfind(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+    {
+        track_rate_limit(state, completion);
+    }
+    for event in events {
+        track_rate_limit(state, event);
     }
     let advanced = state.stream.history_page(events);
     // A tail, an empty page or one that shows nothing new ends the paging.
@@ -295,6 +346,23 @@ fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
                 && let Some(Dialog::NewAgent(form)) = &mut state.dialog
             {
                 form.error = Some(message);
+                return;
+            }
+            if let Some(form) = current_handoff(state, generation) {
+                form.error = Some(message);
+            }
+            return;
+        }
+        RequestTag::Handoff {
+            generation,
+            preview,
+        } => {
+            if let Some(form) = current_handoff(state, generation) {
+                form.submitting = false;
+                form.preview_failed = preview;
+                form.error = Some(message);
+            } else if !preview {
+                state.set_error(message);
             }
             return;
         }
@@ -347,21 +415,52 @@ fn on_rpc_ok(
     value: serde_json::Value,
     fx: &mut Vec<Effect>,
 ) {
-    if !matches!(request, RequestTag::LoadProfiles { .. }) {
+    if !matches!(
+        request,
+        RequestTag::LoadProfiles { .. } | RequestTag::Handoff { preview: true, .. }
+    ) {
         state.clear_error();
     }
     match request {
         RequestTag::LoadProfiles { generation } => {
-            if generation == state.profile_generation
-                && let Some(Dialog::NewAgent(form)) = &mut state.dialog
-            {
-                match serde_json::from_value::<ProfileListResult>(value) {
-                    Ok(mut result) => {
-                        result.profiles.sort_by(|a, b| a.name.cmp(&b.name));
-                        form.profiles = result.profiles;
+            if generation != state.profile_generation {
+                return;
+            }
+            match serde_json::from_value::<ProfileListResult>(value) {
+                Ok(mut result) => {
+                    result.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+                    match &mut state.dialog {
+                        Some(Dialog::NewAgent(form)) => form.profiles = result.profiles,
+                        Some(Dialog::Handoff(form)) => form.profiles = result.profiles,
+                        _ => {}
                     }
-                    Err(_) => form.error = Some("could not read profiles".to_owned()),
                 }
+                Err(_) => on_rpc_error(state, request, "could not read profiles".to_owned()),
+            }
+        }
+        RequestTag::Handoff {
+            generation,
+            preview,
+        } => {
+            let result = serde_json::from_value::<AgentHandoffResult>(value);
+            match result {
+                Ok(result) if preview && result.agent.is_none() => {
+                    if let Some(form) = current_handoff(state, generation) {
+                        form.preview = Some(result.prompt);
+                        form.rearm();
+                    }
+                }
+                Ok(AgentHandoffResult {
+                    agent: Some(agent), ..
+                }) if !preview => {
+                    let waiting =
+                        current_handoff(state, generation).is_some_and(|form| form.submitting);
+                    if waiting {
+                        state.close_dialog();
+                    }
+                    insert_created_agent(state, agent, waiting);
+                }
+                _ => on_rpc_error(state, request, "could not read handoff result".to_owned()),
             }
         }
         RequestTag::Send { behavior, .. } => {
@@ -385,14 +484,7 @@ fn on_rpc_ok(
                 state.close_dialog();
             }
             match serde_json::from_value::<Agent>(value) {
-                Ok(agent) => {
-                    let node = NodeId::Agent(agent.id.clone());
-                    state.tree.insert_agent(agent);
-                    // Watch the new agent, unless the user is typing at another.
-                    if waiting && state.focus != Focus::Input {
-                        state.tree.reveal(&node);
-                    }
-                }
+                Ok(agent) => insert_created_agent(state, agent, waiting),
                 Err(_) => request_snapshot(state, fx, false),
             }
         }
@@ -417,6 +509,21 @@ fn on_rpc_ok(
         | RequestTag::Resume { .. }
         | RequestTag::Archive { .. }
         | RequestTag::LoadHistory { .. } => {}
+    }
+}
+
+fn current_handoff(state: &mut AppState, generation: u64) -> Option<&mut HandoffForm> {
+    match &mut state.dialog {
+        Some(Dialog::Handoff(form)) if form.generation == generation => Some(form),
+        _ => None,
+    }
+}
+
+fn insert_created_agent(state: &mut AppState, agent: Agent, reveal: bool) {
+    let node = NodeId::Agent(agent.id.clone());
+    state.tree.insert_agent(agent);
+    if reveal && state.focus != Focus::Input {
+        state.tree.reveal(&node);
     }
 }
 
@@ -476,6 +583,11 @@ fn on_paste(state: &mut AppState, text: &str) {
     let editor = match state.focus {
         Focus::Input => Some(&mut state.input),
         Focus::Dialog => match &mut state.dialog {
+            Some(Dialog::Handoff(form)) if form.field == HandoffField::Mode && !form.submitting => {
+                form.rearm();
+                form.mode_editor()
+            }
+            Some(Dialog::Handoff(_)) => None,
             Some(Dialog::NewAgent(form)) => form.editor_mut(),
             Some(Dialog::NewWorkspace(form)) => form.editor_mut(),
             Some(Dialog::Permission { .. } | Dialog::ConfirmArchive { .. }) | None => None,
@@ -538,6 +650,7 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
         'r' => agent_call(state, fx, AGENT_RESUME, |agent_id| RequestTag::Resume {
             agent_id,
         }),
+        'H' => open_handoff(state, fx),
         'A' => match state.selected_agent() {
             Some(agent) => {
                 let dialog = Dialog::ConfirmArchive {
@@ -578,6 +691,38 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
         }
         _ => {}
     }
+}
+
+fn open_handoff(state: &mut AppState, fx: &mut Vec<Effect>) {
+    let Some((agent_id, provider)) = state
+        .selected_agent()
+        .map(|agent| (agent.id.clone(), agent.provider.other()))
+    else {
+        state.set_error("select an agent first".to_owned());
+        return;
+    };
+    state.profile_generation = state.profile_generation.wrapping_add(1);
+    let generation = state.profile_generation;
+    let form = HandoffForm::new(agent_id, provider, generation);
+    let preview = handoff_call(&form, true);
+    state.open_dialog(Dialog::Handoff(form));
+    push_call(state, fx, preview);
+    fx.push(Effect::Call {
+        request: RequestTag::LoadProfiles { generation },
+        method: PROFILE_LIST,
+        params: serde_json::json!({}),
+    });
+}
+
+fn handoff_call(form: &HandoffForm, preview: bool) -> Result<Effect, String> {
+    call(
+        RequestTag::Handoff {
+            generation: form.generation,
+            preview,
+        },
+        AGENT_HANDOFF,
+        serde_json::to_value(form.params(preview)),
+    )
 }
 
 /// `method` with the selected agent's id, for interrupt and resume.
@@ -766,10 +911,70 @@ fn send_message(state: &mut AppState, fx: &mut Vec<Effect>) {
 fn dialog_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
     match &state.dialog {
         Some(Dialog::Permission { .. }) => permission_key(state, &key, fx),
+        Some(Dialog::Handoff(_)) => handoff_key(state, key, fx),
         Some(Dialog::NewAgent(_)) => agent_form_key(state, key, fx),
         Some(Dialog::NewWorkspace(_)) => workspace_form_key(state, key, fx),
         Some(Dialog::ConfirmArchive { .. }) => archive_key(state, &key, fx),
         None => state.focus = state.focus_before_dialog,
+    }
+}
+
+fn handoff_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
+    let Some(Dialog::Handoff(form)) = &mut state.dialog else {
+        return;
+    };
+    if form.submitting || key.ctrl || key.alt {
+        return;
+    }
+    match key.key {
+        Key::Esc => state.close_dialog(),
+        Key::Enter => {
+            if form.ticks_until_armed > 0 || form.preview.is_none() {
+                return;
+            }
+            let preview = form.preview.as_deref().unwrap_or_default();
+            let layout = handoff_layout(state.size, preview, form.auto_approve_mode());
+            if layout.visible_rows == 0 {
+                return;
+            }
+            if let Err(error) =
+                dgc_daemon::provider::validate_mode(form.provider, form.mode_value())
+            {
+                form.error = Some(escape_line(&error));
+                return;
+            }
+            match handoff_call(form, false) {
+                Ok(effect) => {
+                    form.error = None;
+                    form.submitting = true;
+                    fx.push(effect);
+                }
+                Err(error) => form.error = Some(error),
+            }
+        }
+        Key::Tab | Key::BackTab if form.field == HandoffField::Profile => {
+            form.cycle_profile(key.key == Key::Tab);
+        }
+        Key::Tab if form.field == HandoffField::Provider => form.toggle_provider(),
+        Key::BackTab | Key::Up => form.move_field(false),
+        Key::Down => form.move_field(true),
+        Key::PageUp | Key::PageDown => {
+            if let Some(preview) = &form.preview {
+                let layout = handoff_layout(state.size, preview, form.auto_approve_mode());
+                let scroll = form.scroll.min(layout.max_scroll());
+                form.scroll = if key.key == Key::PageUp {
+                    scroll.saturating_sub(layout.visible_rows)
+                } else {
+                    (scroll + layout.visible_rows).min(layout.max_scroll())
+                };
+            }
+        }
+        _ => {
+            if let Some(editor) = form.mode_editor() {
+                editor.handle(&key);
+                form.rearm();
+            }
+        }
     }
 }
 
@@ -3399,5 +3604,146 @@ mod tests {
         assert!(f.state.tree.workspace(&created.id).is_some(), "in the tree");
         assert_eq!(f.state.selected_agent_id(), Some(f.a1.id.clone()));
         assert_eq!(fx, vec![]);
+    }
+    fn handoff_screen(state: &AppState) -> String {
+        let (width, height) = state.size;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("terminal");
+        terminal
+            .draw(|frame| super::super::render::render(state, frame))
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn limit(id: &AgentId, seq: u64) -> AppEvent {
+        AppEvent::AgentEvent(event(
+            id,
+            seq,
+            EventKind::RateLimited {
+                detail: json!({"provider": "claude", "reason": "http_429"}),
+            },
+        ))
+    }
+
+    #[test]
+    fn rate_limited_agent_shows_marker_and_suggestion() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (105, 30);
+        update(&mut f.state, limit(&f.a1.id, 1));
+        let screen = handoff_screen(&f.state);
+        assert!(screen.contains("⇄"), "{screen}");
+        assert!(
+            screen.contains("rate limited (http_429) — H: hand off to codex"),
+            "{screen}"
+        );
+    }
+
+    fn finish_handoff_preview(state: &mut AppState, effects: Vec<Effect>) {
+        let (request, params) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request,
+                    method: "agent.handoff",
+                    params,
+                } => Some((request, params)),
+                _ => None,
+            })
+            .expect("request dry-run preview");
+        assert_eq!(params["dry_run"], true);
+        update(
+            state,
+            AppEvent::RpcDone {
+                request,
+                result: Ok(
+                    json!({"prompt": format!("preview↪\u{1b} {}\n{}END OF PREVIEW", "long ".repeat(20), "line\n".repeat(24)), "agent": null}),
+                ),
+            },
+        );
+    }
+
+    #[test]
+    fn h_opens_confirmation_with_preview_and_enter_creates() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (95, 30);
+        let effects = press(&mut f.state, 'H');
+        assert_eq!(f.state.focus, Focus::Dialog);
+        assert!(handoff_screen(&f.state).contains("loading preview"));
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+        finish_handoff_preview(&mut f.state, effects);
+        let screen = handoff_screen(&f.state);
+        assert!(screen.contains("preview"), "{screen}");
+        assert!(screen.contains("\u{21aa}"), "{screen}");
+        assert!(screen.contains("↪"), "{screen}");
+        assert!(!screen.contains("END OF PREVIEW"), "{screen}");
+        assert!(press_key(&mut f.state, Key::PageDown).is_empty());
+        assert!(handoff_screen(&f.state).contains("END OF PREVIEW"));
+        tick(&mut f.state, usize::from(PERMISSION_ARM_TICKS));
+        let effects = press_key(&mut f.state, Key::Enter);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Call { method: "agent.handoff", params, .. }
+                    if params["agent_id"] == f.a1.id.as_str()
+                        && params["dry_run"] == false
+                        && params["provider"] == "codex"
+            )),
+            "{effects:?}"
+        );
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+    }
+
+    #[test]
+    fn suggestion_clears_after_a_completed_turn() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (105, 30);
+        update(&mut f.state, limit(&f.a1.id, 1));
+        let complete = |seq| {
+            AppEvent::AgentEvent(event(
+                &f.a1.id,
+                seq,
+                EventKind::TurnCompleted { usage: None },
+            ))
+        };
+        update(&mut f.state, complete(2));
+        assert!(handoff_screen(&f.state).contains("⇄"));
+        update(
+            &mut f.state,
+            AppEvent::AgentEvent(event(&f.a1.id, 3, EventKind::TurnStarted)),
+        );
+        assert!(handoff_screen(&f.state).contains("⇄"));
+        update(&mut f.state, complete(4));
+        let screen = handoff_screen(&f.state);
+        assert!(!screen.contains("⇄"), "{screen}");
+        assert!(!screen.contains("H: hand off to"), "{screen}");
+    }
+
+    #[test]
+    fn paste_and_tree_keys_do_not_confirm_handoff() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (95, 30);
+        let effects = press(&mut f.state, 'H');
+        finish_handoff_preview(&mut f.state, effects);
+        arm(&mut f.state);
+        assert!(update(&mut f.state, AppEvent::Paste("a\nH\n".to_owned())).is_empty());
+        assert!(press(&mut f.state, 'H').is_empty());
+        assert!(press(&mut f.state, 'a').is_empty());
+        let permission = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &permission));
+        assert!(handoff_screen(&f.state).contains("Handoff"));
+        assert!(open_permission_id(&f.state).is_none());
+        press_key(&mut f.state, Key::Esc);
+        assert_eq!(open_permission_id(&f.state), Some(permission.id));
     }
 }

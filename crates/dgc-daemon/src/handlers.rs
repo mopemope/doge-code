@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use dgc_protocol::methods::{
-    AgentCreateParams, AgentEventsParams, AgentIdParams, AgentListParams, AgentSendParams,
-    PermissionListParams, PermissionRespondParams, ProfileListResult, ProjectAddParams,
-    ProjectRemoveParams, SubscribeParams, UnsubscribeParams, WorkspaceArchiveParams,
-    WorkspaceCreateParams, WorkspaceListParams,
+    AgentCreateParams, AgentEventsParams, AgentHandoffParams, AgentIdParams, AgentListParams,
+    AgentSendParams, PermissionListParams, PermissionRespondParams, ProfileListResult,
+    ProjectAddParams, ProjectRemoveParams, SubscribeParams, UnsubscribeParams,
+    WorkspaceArchiveParams, WorkspaceCreateParams, WorkspaceListParams,
 };
 use dgc_protocol::model::AgentState;
 use dgc_protocol::rpc::{INTERNAL, INVALID_PARAMS, RpcError};
@@ -100,6 +100,11 @@ pub fn profile_list(config: &DaemonConfig) -> Result<Value, RpcError> {
 pub async fn agent_create(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {
     let params: AgentCreateParams = parse(params)?;
     encode(&agents.create(params).await?)
+}
+
+pub async fn agent_handoff(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {
+    let params: AgentHandoffParams = parse(params)?;
+    encode(&agents.handoff(params).await?)
 }
 
 pub fn agent_list(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {

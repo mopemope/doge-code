@@ -40,6 +40,8 @@ enum Command {
     },
     #[command(flatten)]
     Agent(commands::agent::AgentCommand),
+    /// Continue an agent’s work with another provider.
+    Handoff(commands::handoff::HandoffCommand),
     /// List named launch profiles.
     Profile {
         #[command(subcommand)]
@@ -60,6 +62,7 @@ async fn main() -> ExitCode {
         Some(Command::Daemon { command }) => commands::daemon::run(command, cli.json).await,
         Some(Command::Project { command }) => commands::project::run(command, cli.json).await,
         Some(Command::Workspace { command }) => commands::workspace::run(command, cli.json).await,
+        Some(Command::Handoff(command)) => commands::handoff::run(command, cli.json).await,
         Some(Command::Agent(command)) => commands::agent::run(command, cli.json).await,
         Some(Command::Profile { command }) => commands::profile::run(command, cli.json).await,
         Some(Command::Permit { command }) => commands::permit::run(command, cli.json).await,

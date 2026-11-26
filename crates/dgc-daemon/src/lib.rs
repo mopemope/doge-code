@@ -5,6 +5,7 @@ pub mod agent;
 pub mod config;
 pub mod events_log;
 pub mod handlers;
+mod handoff;
 pub mod lock;
 pub mod paths;
 pub mod process;

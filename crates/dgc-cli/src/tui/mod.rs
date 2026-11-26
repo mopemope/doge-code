@@ -56,6 +56,10 @@ pub enum RequestTag {
         permission_id: PermissionId,
     },
     CreateAgent,
+    Handoff {
+        generation: u64,
+        preview: bool,
+    },
     CreateWorkspace,
     LoadProfiles {
         generation: u64,

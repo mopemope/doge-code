@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use dgc_daemon::provider::validate_mode;
-use dgc_protocol::event::AgentEvent;
+use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
-use dgc_protocol::methods::ProfileInfo;
+use dgc_protocol::methods::{AgentHandoffParams, ProfileInfo};
 use dgc_protocol::model::{
     Agent, AgentState, Isolation, PendingPermission, Project, ProviderKind, SendBehavior,
     Workspace, WorkspaceState,
@@ -649,6 +649,169 @@ impl NewWorkspaceForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffField {
+    Provider,
+    Profile,
+    Mode,
+}
+
+#[derive(Debug, Clone)]
+pub struct HandoffForm {
+    pub agent_id: AgentId,
+    pub provider: ProviderKind,
+    pub field: HandoffField,
+    pub mode: LineEditor,
+    pub profiles: Vec<ProfileInfo>,
+    profile_index: usize,
+    default_provider: ProviderKind,
+    pub preview: Option<String>,
+    pub scroll: usize,
+    pub ticks_until_armed: u8,
+    pub generation: u64,
+    pub submitting: bool,
+    pub preview_failed: bool,
+    pub error: Option<String>,
+}
+
+impl HandoffForm {
+    pub fn new(agent_id: AgentId, provider: ProviderKind, generation: u64) -> Self {
+        Self {
+            agent_id,
+            provider,
+            default_provider: provider,
+            field: HandoffField::Provider,
+            mode: LineEditor::default(),
+            profiles: Vec::new(),
+            profile_index: 0,
+            preview: None,
+            scroll: 0,
+            ticks_until_armed: PERMISSION_ARM_TICKS,
+            generation,
+            submitting: false,
+            preview_failed: false,
+            error: None,
+        }
+    }
+
+    pub fn selected_profile(&self) -> Option<&ProfileInfo> {
+        self.profile_index
+            .checked_sub(1)
+            .and_then(|i| self.profiles.get(i))
+    }
+
+    pub(super) fn cycle_profile(&mut self, forward: bool) {
+        if self.profiles.is_empty() {
+            return;
+        }
+        let count = self.profiles.len() + 1;
+        self.profile_index = if forward {
+            (self.profile_index + 1) % count
+        } else {
+            (self.profile_index + count - 1) % count
+        };
+        let (provider, mode) = self
+            .selected_profile()
+            .map_or((self.default_provider, None), |profile| {
+                (profile.provider, profile.mode.clone())
+            });
+        self.provider = provider;
+        self.mode.set_text(mode.as_deref().unwrap_or_default());
+        self.rearm();
+    }
+
+    pub(super) fn toggle_provider(&mut self) {
+        self.provider = self.provider.other();
+        self.profile_index = 0;
+        self.mode.set_text("");
+        self.rearm();
+    }
+
+    pub(super) fn move_field(&mut self, forward: bool) {
+        use HandoffField::{Mode, Profile, Provider};
+        self.field = match (self.field, forward) {
+            (Provider, true) | (Mode, false) => Profile,
+            (Profile, true) | (Provider, false) => Mode,
+            (Mode, true) | (Profile, false) => Provider,
+        };
+    }
+
+    pub(super) fn mode_editor(&mut self) -> Option<&mut LineEditor> {
+        (self.field == HandoffField::Mode && !self.submitting).then_some(&mut self.mode)
+    }
+
+    pub(super) fn rearm(&mut self) {
+        self.ticks_until_armed = PERMISSION_ARM_TICKS;
+    }
+
+    pub(super) fn mode_value(&self) -> Option<&str> {
+        let mode = self.mode.text().trim();
+        (!mode.is_empty()).then_some(mode)
+    }
+
+    pub fn auto_approve_mode(&self) -> bool {
+        matches!(validate_mode(self.provider, self.mode_value()), Ok(true))
+    }
+
+    pub(super) fn params(&self, dry_run: bool) -> AgentHandoffParams {
+        AgentHandoffParams {
+            agent_id: self.agent_id.clone(),
+            provider: Some(self.provider),
+            // As in NewAgent, expand the displayed settings locally. Clearing
+            // the mode field must select the default even with a profile.
+            profile: None,
+            model: self
+                .selected_profile()
+                .and_then(|profile| profile.model.clone()),
+            mode: self.mode_value().map(str::to_owned),
+            dry_run,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct RateLimitState {
+    last_limit: Option<(u64, String)>,
+    last_start: u64,
+    last_completion: u64,
+    completed_turn_start: u64,
+}
+
+impl RateLimitState {
+    pub(super) fn observe(&mut self, event: &AgentEvent) {
+        match &event.kind {
+            EventKind::RateLimited { detail }
+                if self
+                    .last_limit
+                    .as_ref()
+                    .is_none_or(|(seq, _)| *seq < event.seq) =>
+            {
+                let reason = detail["reason"].as_str().unwrap_or("unknown");
+                self.last_limit = Some((event.seq, reason.to_owned()));
+            }
+            EventKind::TurnStarted => {
+                self.last_start = self.last_start.max(event.seq);
+                // History can arrive after a newer live completion.
+                if event.seq < self.last_completion {
+                    self.completed_turn_start = self.completed_turn_start.max(event.seq);
+                }
+            }
+            EventKind::TurnCompleted { .. } if event.seq > self.last_completion => {
+                self.last_completion = event.seq;
+                if self.last_start < event.seq {
+                    self.completed_turn_start = self.completed_turn_start.max(self.last_start);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        let (seq, reason) = self.last_limit.as_ref()?;
+        (*seq > self.completed_turn_start).then_some(reason)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Dialog {
     Permission {
@@ -668,6 +831,7 @@ pub enum Dialog {
         /// [`AppState::sync_permission_view`].
         seen_end: bool,
     },
+    Handoff(HandoffForm),
     NewAgent(NewAgentForm),
     NewWorkspace(NewWorkspaceForm),
     ConfirmArchive {
@@ -764,6 +928,7 @@ pub struct AppState {
     pub(super) snapshot_refresh_again: bool,
     /// Correlates a profile list reply with the form that requested it.
     pub(super) profile_generation: u64,
+    pub(super) rate_limits: HashMap<AgentId, RateLimitState>,
     /// Ticks connected with no snapshot pending since the last request: at
     /// [`SNAPSHOT_REFRESH_TICKS`] the tree is reloaded (changes made by
     /// other clients have no live event).
@@ -803,6 +968,7 @@ impl Default for AppState {
             snapshot_pending: false,
             snapshot_refresh_again: false,
             profile_generation: 0,
+            rate_limits: HashMap::new(),
             ticks_since_snapshot: 0,
             unsent: None,
             input_target: None,
@@ -813,6 +979,10 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn rate_limit_reason(&self, id: &AgentId) -> Option<&str> {
+        self.rate_limits.get(id)?.reason()
+    }
+
     pub fn rows(&self) -> Vec<Row> {
         self.tree.rows(&self.permissions)
     }

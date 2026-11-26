@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 Task 4（引き継ぎ）
+- タスク: M4 Task 5（受け入れ）
 - 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1 の前提修正、Task 2 の使用量上限検知、Task 3 の名前付き起動プロファイルを実装・検証。
-- 次の一手: M4 計画の Task 4 Step 1 で、引き継ぎ文、同じワークスペースでの起動、CLI と TUI の確認操作のテストを追加する（ブランチ `feat/orchestrator-m4`）。
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 Task 1〜4 を実装・検証し、合成した Claude の上限イベントから TUI で Codex に引き継いだ。
+- 次の一手: M4 計画の Task 5 で、偽プロバイダでの受け入れ、通常モードでの実プロバイダ間の引き継ぎ、全検証を行う（ブランチ `feat/orchestrator-m4`）。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -88,12 +88,17 @@
 | 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 完了 | `fix: tail history reads and other prerequisites for handoff` |
 | 2 | 上限検知（アダプタ） | 完了 | `feat(daemon): detect provider usage limits` |
 | 3 | プロファイル | 完了 | `feat: launch agents from named profiles` |
-| 4 | 引き継ぎ（デーモン、CLI、TUI） | 未着手 | |
+| 4 | 引き継ぎ（デーモン、CLI、TUI） | 完了 | `feat: suggest and run a handoff to another provider` |
 | 5 | M4 受け入れ | 未着手 | |
 
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M4 Task 4): 引き継ぎ文の直近ログは最大 1000 件かつ既存の末尾ページのバイト予算内。
+  冒頭の読み取りにはプロトコルの最大入力 1 件分を確保する。初回指示がログのローテーションで失われた場合は欠落を明示し、
+  必須部分だけで 32 KiB を超える場合は起動を拒否する。プレビューは読み取り専用で、実行時に引き継ぎ文を作り直す。
+  TUI はプレビュー取得後、選択変更後およびリサイズ後に確認キーの猶予を設ける。選んだプロファイルは Task 3 と同様に画面上の設定へ展開する。
 
 - 2026-11-26 (M4 Task 3): 起動プロファイルを明示的に選ぶと、その自動承認モードが適用される。
   設定検証と一覧の判定にはアダプタと同じモード表を使う。TUI は新規エージェントフォームを開くたびに取得し、
@@ -610,6 +615,17 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-26 M4 Task 4（Linux、Rust 1.99.0）:
+  - RED: `agent.handoff` が未定義。CLI は未登録のサブコマンドと上限提案の欠落で 2 件失敗し、TUI の対象 4 件と履歴からの提案テストも失敗。
+  - GREEN: `cargo test --locked -p dgc-daemon --test agent_manager --test events_log` 50 件、
+    `cargo test --locked -p dgc-cli --bin dgc tui::` 137 件、偽プロバイダのビルド後の
+    `cargo test --locked -p dgc-cli --test agent_cli --test tui_backend` 174 件 PASS。
+  - `cargo fmt --all`、4 crate の全ターゲット・全機能の Clippy、`bash scripts/verify.sh rust`（631 件）、
+    `guidance`、`tui-deps` PASS。既存のデーモン再起動テストは全体実行で一度ソケット待ちで失敗し、単独実行と続く全体実行では通過。
+  - 112×32 の tmux で合成 HTTP 429 の CLI と TUI の提案、読み取り専用プレビュー、自動承認の赤い警告、
+    通常モードの偽 Codex が同じワークスペースでターンを完了することを確認。端末記録は Task 4 の作業レポートを参照。
+    実プロバイダと macOS は未検証。
 
 - 2026-11-26 M4 Task 3（Linux、Rust 1.99.0）:
   - RED: 新規の 7 テストが、設定の `profiles` キー、CLI の `--profile`、フォームを開いたときの一覧要求が未実装のため失敗。

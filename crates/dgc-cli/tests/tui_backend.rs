@@ -1025,3 +1025,81 @@ fn calls_that_change_something_get_the_long_limit() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backend_rate_limit_suggests_handoff_from_history() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dgc-daemon/tests/fixtures/claude/scenarios/rate_limited_429.jsonl");
+    let h = Harness::new(&fixture);
+    let workspace = h.add_workspace();
+    let output = h.run(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--provider",
+        "claude",
+        "--model",
+        "haiku",
+        "Reply with exactly the word: pong",
+    ]);
+    assert_success(&output);
+    let agent: AgentId = stdout(&output).trim().parse().expect("agent id");
+    let mut client = Client::connect(&h.env.paths).await.expect("client");
+    timeout(WAIT, async {
+        loop {
+            let result: Value = client
+                .call("agent.events", &json!({"agent_id": agent}))
+                .await
+                .expect("events");
+            if result["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .any(|event| event["kind"]["type"] == "rate_limited")
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("recorded rate limit");
+
+    let (fx, mut rx) = h.start_backend();
+    let connected = wait_for(&mut rx, |ev| {
+        (*ev == AppEvent::Connection(ConnectionState::Connected)).then(|| ev.clone())
+    })
+    .await;
+    let mut state = AppState::default();
+    for effect in tui::update::update(&mut state, connected) {
+        fx.send(effect).expect("backend alive");
+    }
+    tui::update::update(&mut state, wait_for(&mut rx, snapshot_of).await);
+    for _ in 0..2 {
+        for effect in tui::update::update(
+            &mut state,
+            AppEvent::Key(KeyInput::new(tui::input::Key::Down)),
+        ) {
+            fx.send(effect).expect("backend alive");
+        }
+    }
+    let history = wait_for(&mut rx, |event| matches!(event, AppEvent::History {
+        agent_id, events, ..
+    } if agent_id == &agent && events.iter().any(|event| matches!(event.kind, EventKind::RateLimited { .. }))).then(|| event.clone())).await;
+    tui::update::update(&mut state, history);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+    terminal
+        .draw(|frame| tui::render::render(&state, frame))
+        .expect("draw");
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        screen.contains("rate limited (http_429) — H: hand off to codex"),
+        "{screen}"
+    );
+}

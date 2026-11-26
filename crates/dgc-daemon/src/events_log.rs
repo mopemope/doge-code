@@ -16,7 +16,7 @@ use dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
 use crate::paths::ensure_private_dir;
 use crate::time::now_rfc3339;
 
-const CURRENT_FILE: &str = "events.jsonl";
+pub(crate) const CURRENT_FILE: &str = "events.jsonl";
 const ROTATED_FILE: &str = "events.1.jsonl";
 const TAIL_BLOCK_BYTES: usize = 64 * 1024;
 
@@ -144,34 +144,12 @@ impl EventLog {
     /// holds at least one event when any is left, so a short page does not
     /// mean the end: callers page on until an empty page.
     pub fn read_page(&self, since_seq: u64, limit: u32) -> Result<Vec<AgentEvent>, EventLogError> {
-        let limit = limit as usize;
-        let mut page = Vec::new();
-        if limit == 0 {
-            return Ok(page);
-        }
-        // `[` + `]`, then each event's line plus a separating comma.
-        let mut bytes = 2usize;
-        let mut full = false;
-        for path in [&self.rotated_path, &self.current_path] {
-            for_each_event(path, |event, line_len| {
-                if event.seq <= since_seq {
-                    return true;
-                }
-                let cost = line_len + usize::from(!page.is_empty());
-                if !page.is_empty() && bytes + cost > MAX_EVENTS_PAGE_BYTES {
-                    full = true;
-                    return false;
-                }
-                bytes += cost;
-                page.push(event);
-                full = page.len() >= limit;
-                !full
-            })?;
-            if full {
-                break;
-            }
-        }
-        Ok(page)
+        read_page_from(
+            [&self.rotated_path, &self.current_path],
+            since_seq,
+            limit,
+            MAX_EVENTS_PAGE_BYTES,
+        )
     }
 
     /// The newest events in ascending sequence order, up to `n` and the
@@ -184,31 +162,7 @@ impl EventLog {
     /// Return the number of file bytes read as well, for tests.
     #[doc(hidden)]
     pub fn read_tail_with_bytes(&self, n: u32) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
-        let mut page = Vec::new();
-        if n == 0 {
-            return Ok((page, 0));
-        }
-        let mut bytes_read = 0;
-        let mut page_bytes = 2;
-        let mut full = false;
-        for path in [&self.current_path, &self.rotated_path] {
-            bytes_read += for_each_event_reverse(path, |event, line_len| {
-                let cost = line_len + usize::from(!page.is_empty());
-                if !page.is_empty() && page_bytes + cost > MAX_EVENTS_PAGE_BYTES {
-                    full = true;
-                    return false;
-                }
-                page_bytes += cost;
-                page.push(event);
-                full = page.len() == n as usize || page_bytes >= MAX_EVENTS_PAGE_BYTES;
-                !full
-            })?;
-            if full {
-                break;
-            }
-        }
-        page.reverse();
-        Ok((page, bytes_read))
+        read_tail_from([&self.current_path, &self.rotated_path], n)
     }
 
     /// Rotate the current file away and reopen a fresh one with `open`. State
@@ -283,6 +237,86 @@ fn write_line<F: LogFile>(
             Err(WriteFailure { source, dirty })
         }
     }
+}
+
+/// Read a handoff snapshot without opening an append handle or repairing
+/// files. The caller prevents a concurrent rotation across the two reads.
+pub(crate) fn handoff_history(
+    dir: &Path,
+    limit: u32,
+) -> Result<(Vec<AgentEvent>, Vec<AgentEvent>), EventLogError> {
+    let current = dir.join(CURRENT_FILE);
+    let rotated = dir.join(ROTATED_FILE);
+    // Reserve room for one complete RPC-sized initial prompt and the event
+    // headers added when it was chunked. The normal response page is smaller.
+    let initial_budget = dgc_protocol::MAX_MESSAGE_BYTES + MAX_EVENTS_PAGE_BYTES;
+    let first_page = read_page_from([&rotated, &current], 0, limit, initial_budget)?;
+    let (tail, _) = read_tail_from([&current, &rotated], limit)?;
+    Ok((first_page, tail))
+}
+
+fn read_page_from(
+    paths: [&Path; 2],
+    since_seq: u64,
+    limit: u32,
+    byte_budget: usize,
+) -> Result<Vec<AgentEvent>, EventLogError> {
+    let limit = limit as usize;
+    let mut page = Vec::new();
+    if limit == 0 {
+        return Ok(page);
+    }
+    // `[` + `]`, then each event's line plus a separating comma.
+    let mut bytes = 2usize;
+    let mut full = false;
+    for path in paths {
+        for_each_event(path, |event, line_len| {
+            if event.seq <= since_seq {
+                return true;
+            }
+            let cost = line_len + usize::from(!page.is_empty());
+            if !page.is_empty() && bytes + cost > byte_budget {
+                full = true;
+                return false;
+            }
+            bytes += cost;
+            page.push(event);
+            full = page.len() >= limit;
+            !full
+        })?;
+        if full {
+            break;
+        }
+    }
+    Ok(page)
+}
+
+fn read_tail_from(paths: [&Path; 2], n: u32) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
+    let mut page = Vec::new();
+    if n == 0 {
+        return Ok((page, 0));
+    }
+    let mut bytes_read = 0;
+    let mut page_bytes = 2;
+    let mut full = false;
+    for path in paths {
+        bytes_read += for_each_event_reverse(path, |event, line_len| {
+            let cost = line_len + usize::from(!page.is_empty());
+            if !page.is_empty() && page_bytes + cost > MAX_EVENTS_PAGE_BYTES {
+                full = true;
+                return false;
+            }
+            page_bytes += cost;
+            page.push(event);
+            full = page.len() == n as usize || page_bytes >= MAX_EVENTS_PAGE_BYTES;
+            !full
+        })?;
+        if full {
+            break;
+        }
+    }
+    page.reverse();
+    Ok((page, bytes_read))
 }
 
 fn open_append(path: &Path) -> Result<File, EventLogError> {
