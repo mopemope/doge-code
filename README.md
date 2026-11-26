@@ -167,8 +167,12 @@ An unsent draft belongs to the agent it was typed for: after `Esc`, selecting
 another agent shows that agent's own draft (empty if none) and never sends the
 first agent's text; going back restores it. `Tab` changes the mode (the active one is
 highlighted in the input title), `PgUp`/`PgDn` scroll, `Esc` goes back to the
-tree. The modes are the `dgc-next send` behaviors: `queue` (default; sent when
-the current turn ends), `steer` and `interrupt`. Claude agents cannot steer, so
+tree. Pasting (bracketed paste) inserts the text into the input or the
+focused form field as one line: line breaks and tabs become spaces, so a paste
+never sends, never changes the mode and never submits a form. A paste in the
+tree, the permission dialog or the archive confirmation is ignored. The modes
+are the `dgc-next send` behaviors: `queue` (default; sent when the current turn
+ends), `steer` and `interrupt`. Claude agents cannot steer, so
 there `steer` interrupts and then sends, which also discards the queue. A
 queued message appears in the stream only when it is delivered (or shown as
 discarded); the TUI does not confirm a queued send otherwise. If the send

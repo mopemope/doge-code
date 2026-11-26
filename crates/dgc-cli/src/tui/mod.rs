@@ -19,6 +19,7 @@ use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use dgc_daemon::paths::DaemonPaths;
 use dgc_protocol::event::AgentEvent;
@@ -108,6 +109,8 @@ pub enum AppEvent {
         width: u16,
         height: u16,
     },
+    /// Text pasted into the terminal (bracketed paste), as one event.
+    Paste(String),
     Tick,
 }
 
@@ -130,11 +133,13 @@ pub enum Effect {
     Quit,
 }
 
-/// Input from the terminal, forwarded by the input thread.
+/// Input from the terminal, forwarded by the input thread. A paste is one
+/// event, never keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEvent {
     Key(KeyInput),
     Resize { width: u16, height: u16 },
+    Paste(String),
 }
 
 /// Whether the loop goes on after an event.
@@ -271,6 +276,7 @@ where
         match event {
             TermEvent::Key(key) => self.handle(AppEvent::Key(key)),
             TermEvent::Resize { width, height } => self.handle(AppEvent::Resize { width, height }),
+            TermEvent::Paste(text) => self.handle(AppEvent::Paste(text)),
         }
     }
 
@@ -411,10 +417,28 @@ pub fn install_panic_hook(restore: fn()) {
     }));
 }
 
-/// Raw mode off, back to the main screen, cursor visible. Safe to repeat.
+/// Alternate screen, and bracketed paste so a paste arrives as one
+/// [`TermEvent::Paste`] instead of keystrokes (its newlines would send and
+/// its tabs change the send mode).
+fn enter_screen(out: &mut impl io::Write) -> io::Result<()> {
+    crossterm::execute!(out, EnterAlternateScreen, EnableBracketedPaste)
+}
+
+/// Undo [`enter_screen`] and show the cursor.
+fn leave_screen(out: &mut impl io::Write) -> io::Result<()> {
+    crossterm::execute!(
+        out,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )
+}
+
+/// Raw mode and bracketed paste off, back to the main screen, cursor
+/// visible. Safe to repeat.
 fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    let _ = leave_screen(&mut io::stdout());
 }
 
 /// Run the TUI on the controlling terminal against the daemon at `paths`
@@ -435,7 +459,7 @@ pub async fn run(paths: DaemonPaths, exe: PathBuf) -> Result<(), TuiError> {
     crossterm::terminal::enable_raw_mode().map_err(TuiError::Terminal)?;
     let _guard = TerminalGuard::new(restore_terminal);
     install_panic_hook(restore_terminal);
-    crossterm::execute!(io::stdout(), EnterAlternateScreen).map_err(TuiError::Terminal)?;
+    enter_screen(&mut io::stdout()).map_err(TuiError::Terminal)?;
     let terminal =
         Terminal::new(CrosstermBackend::new(io::stdout())).map_err(TuiError::Terminal)?;
 
@@ -588,6 +612,35 @@ mod tests {
             .expect("handle");
         assert_eq!(flow, Flow::Quit);
         assert!(fx.try_recv().is_err(), "Quit is not sent to the backend");
+    }
+
+    #[test]
+    fn pastes_reach_update_as_one_event() {
+        let (mut runtime, recorder, mut fx) = recording_runtime(100, 30);
+        runtime.start().expect("start");
+        let flow = runtime
+            .handle_terminal(TermEvent::Paste("q\nx".to_owned()))
+            .expect("handle");
+        assert_eq!(flow, Flow::Continue, "a pasted q does not quit");
+        assert_eq!(
+            fed(&recorder).last(),
+            Some(&AppEvent::Paste("q\nx".to_owned()))
+        );
+        assert!(fx.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_terminal_setup_enables_bracketed_paste_and_restore_disables_it() {
+        let mut setup = Vec::new();
+        enter_screen(&mut setup).expect("setup");
+        let setup = String::from_utf8(setup).expect("utf-8");
+        assert!(setup.contains("\x1b[?2004h"), "{setup:?}");
+        assert!(setup.contains("\x1b[?1049h"), "{setup:?}");
+        let mut restore = Vec::new();
+        leave_screen(&mut restore).expect("restore");
+        let restore = String::from_utf8(restore).expect("utf-8");
+        assert!(restore.contains("\x1b[?2004l"), "{restore:?}");
+        assert!(restore.contains("\x1b[?1049l"), "{restore:?}");
     }
 
     static GUARD_RESTORES: AtomicUsize = AtomicUsize::new(0);

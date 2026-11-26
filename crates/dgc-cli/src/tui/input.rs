@@ -102,11 +102,13 @@ pub fn key_input(event: &KeyEvent) -> Option<KeyInput> {
     })
 }
 
-/// The TUI's view of a terminal event: keys and resizes, nothing else.
+/// The TUI's view of a terminal event: keys, resizes and pastes, nothing
+/// else.
 pub fn term_event(event: Event) -> Option<TermEvent> {
     match event {
         Event::Key(key) => key_input(&key).map(TermEvent::Key),
         Event::Resize(width, height) => Some(TermEvent::Resize { width, height }),
+        Event::Paste(text) => Some(TermEvent::Paste(text)),
         _ => None,
     }
 }
@@ -181,6 +183,18 @@ impl LineEditor {
         }
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+    }
+
+    /// Insert pasted text at the cursor on this one line: each line break
+    /// (`\r\n`, `\n`, `\r`) and tab becomes one space, other control
+    /// characters are dropped.
+    pub fn paste(&mut self, text: &str) {
+        for c in text.replace("\r\n", "\n").chars() {
+            match c {
+                '\n' | '\r' | '\t' => self.insert(' '),
+                c => self.insert(c),
+            }
+        }
     }
 
     pub fn backspace(&mut self) {
@@ -365,6 +379,27 @@ mod tests {
             })
         );
         assert_eq!(term_event(Event::FocusGained), None);
+    }
+
+    #[test]
+    fn terminal_pastes_convert_to_one_event() {
+        use super::super::TermEvent;
+        use crossterm::event::Event;
+        assert_eq!(
+            term_event(Event::Paste("a\n\tb".to_owned())),
+            Some(TermEvent::Paste("a\n\tb".to_owned())),
+            "a paste stays whole: its newlines and tabs are not keys"
+        );
+    }
+
+    #[test]
+    fn line_editor_pastes_on_one_line() {
+        let mut e = LineEditor::default();
+        type_str(&mut e, "ab");
+        e.handle(&KeyInput::new(Key::Left));
+        e.paste("1\n2\t3\r\n4\r5\x1b");
+        assert_eq!(e.text(), "a1 2 3 4 5b", "breaks and tabs become spaces");
+        assert_eq!(e.cursor_chars(), 10, "the cursor follows the paste");
     }
 
     #[test]

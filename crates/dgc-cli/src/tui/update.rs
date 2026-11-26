@@ -72,6 +72,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 state.rearm_permission();
             }
         }
+        AppEvent::Paste(text) => on_paste(state, &text),
         AppEvent::Tick => on_tick(state),
     }
     settle(state, &mut fx);
@@ -400,6 +401,25 @@ fn on_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
         Focus::Tree => tree_key(state, key, fx),
         Focus::Input => input_key(state, key, fx),
         Focus::Dialog => dialog_key(state, key, fx),
+    }
+}
+
+/// A paste goes into the focused text field only (the input or a form
+/// field), on one line. Elsewhere (the tree, the permission dialog, the
+/// archive confirmation, the provider or isolation choice) it is ignored:
+/// pasted text never acts as keys.
+fn on_paste(state: &mut AppState, text: &str) {
+    let editor = match state.focus {
+        Focus::Input => Some(&mut state.input),
+        Focus::Dialog => match &mut state.dialog {
+            Some(Dialog::NewAgent(form)) => form.editor_mut(),
+            Some(Dialog::NewWorkspace(form)) => form.editor_mut(),
+            Some(Dialog::Permission { .. } | Dialog::ConfirmArchive { .. }) | None => None,
+        },
+        Focus::Tree => None,
+    };
+    if let Some(editor) = editor {
+        editor.paste(text);
     }
 }
 
@@ -889,7 +909,7 @@ mod tests {
 
     use super::*;
     use crate::tui::input::LineEditor;
-    use crate::tui::state::{PERMISSION_ARM_TICKS, STREAM_CAP, Tree};
+    use crate::tui::state::{AgentField, PERMISSION_ARM_TICKS, STREAM_CAP, Tree};
 
     fn key(state: &mut AppState, key: KeyInput) -> Vec<Effect> {
         update(state, AppEvent::Key(key))
@@ -2763,5 +2783,138 @@ mod tests {
         assert!(armed(&f.state));
         tick(&mut f.state, 5);
         assert!(armed(&f.state));
+    }
+
+    // ---- paste ----
+
+    fn paste(state: &mut AppState, text: &str) -> Vec<Effect> {
+        update(state, AppEvent::Paste(text.to_owned()))
+    }
+
+    #[test]
+    fn a_paste_in_the_input_is_one_line_and_sends_nothing() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press(&mut f.state, 'i');
+        type_text(&mut f.state, "> ");
+        // Tab-indented Go and several lines: no line may be sent, and no tab
+        // may change the send mode.
+        let fx = paste(&mut f.state, "func main() {\n\tfmt.Println(1)\r\n}\rend");
+        assert_eq!(fx, vec![]);
+        assert_eq!(
+            f.state.input.text(),
+            "> func main() {  fmt.Println(1) } end"
+        );
+        assert_eq!(f.state.send_mode, SendBehavior::Queue);
+        assert_eq!(f.state.focus, Focus::Input);
+        // Control characters other than line breaks and tabs are dropped.
+        paste(&mut f.state, "\x1b[2J!");
+        assert_eq!(
+            f.state.input.text(),
+            "> func main() {  fmt.Println(1) } end[2J!"
+        );
+        // Sending is still one deliberate Enter.
+        assert_eq!(sent(&press_key(&mut f.state, Key::Enter)).len(), 1);
+    }
+
+    #[test]
+    fn a_paste_in_the_tree_runs_no_command() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        let cursor = f.state.tree.cursor().cloned();
+        let fx = paste(&mut f.state, "x\nr\nq\nAy\nn\nw\ni\n\t");
+        assert_eq!(fx, vec![]);
+        assert_eq!(f.state.focus, Focus::Tree);
+        assert!(f.state.dialog.is_none());
+        assert_eq!(f.state.tree.cursor().cloned(), cursor);
+        assert_eq!(f.state.send_mode, SendBehavior::Queue);
+        assert!(f.state.input.is_empty());
+        assert!(f.state.drafts.is_empty());
+    }
+
+    #[test]
+    fn a_paste_never_answers_a_permission() {
+        let mut f = Fixture::new();
+        let perm = permission(&f.a1.id);
+        f.snapshot_with(vec![perm.clone()]);
+        f.select_a1();
+        arm(&mut f.state);
+        let Some(Dialog::Permission { seen_end, .. }) = &f.state.dialog else {
+            panic!("no permission dialog");
+        };
+        assert!(*seen_end, "a short summary is read at once");
+        for text in ["a", "s", "d", "a\n", "\x1b", "y"] {
+            assert_eq!(paste(&mut f.state, text), vec![], "{text:?}");
+            let Some(Dialog::Permission {
+                permission,
+                sending,
+                ..
+            }) = &f.state.dialog
+            else {
+                panic!("the dialog closed on {text:?}");
+            };
+            assert_eq!(permission.id, perm.id);
+            assert!(!sending);
+        }
+        assert_eq!(f.state.focus, Focus::Dialog);
+        assert_eq!(f.state.permission_count(), 1);
+        assert!(f.state.input.is_empty(), "nothing lands in the input");
+    }
+
+    #[test]
+    fn a_paste_does_not_confirm_an_archive() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press(&mut f.state, 'A');
+        assert_eq!(paste(&mut f.state, "y\n"), vec![]);
+        assert!(matches!(
+            f.state.dialog,
+            Some(Dialog::ConfirmArchive { .. })
+        ));
+    }
+
+    #[test]
+    fn a_paste_fills_only_the_focused_form_field() {
+        let mut f = Fixture::new();
+        press_key(&mut f.state, Key::Down); // workspace row
+        press(&mut f.state, 'n');
+        let fx = paste(&mut f.state, "fix it\n\tnow\n");
+        assert_eq!(fx, vec![], "a newline does not submit");
+        let Some(Dialog::NewAgent(form)) = &f.state.dialog else {
+            panic!("dialog closed");
+        };
+        assert_eq!(form.prompt.text(), "fix it  now ");
+        assert_eq!(
+            form.provider,
+            ProviderKind::Claude,
+            "a tab does not flip it"
+        );
+        assert!(!form.submitting);
+        // The provider choice (after the prompt) is not a text field.
+        press_key(&mut f.state, Key::Down);
+        paste(&mut f.state, "codex");
+        let Some(Dialog::NewAgent(form)) = &f.state.dialog else {
+            panic!("dialog closed");
+        };
+        assert_eq!(form.field, AgentField::Provider);
+        assert_eq!(form.provider, ProviderKind::Claude);
+        assert_eq!(form.model.text(), "");
+        press_key(&mut f.state, Key::Esc);
+
+        // A local workspace has no text field; a worktree's branch takes it.
+        press(&mut f.state, 'w');
+        paste(&mut f.state, "feat/x\n");
+        let Some(Dialog::NewWorkspace(form)) = &f.state.dialog else {
+            panic!("dialog closed");
+        };
+        assert_eq!(form.branch.text(), "");
+        press_key(&mut f.state, Key::Tab);
+        assert_eq!(paste(&mut f.state, "feat/x\n"), vec![]);
+        let Some(Dialog::NewWorkspace(form)) = &f.state.dialog else {
+            panic!("dialog closed");
+        };
+        assert_eq!(form.isolation, Isolation::Worktree);
+        assert_eq!(form.branch.text(), "feat/x ");
+        assert!(!form.submitting);
     }
 }

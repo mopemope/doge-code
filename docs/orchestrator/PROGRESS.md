@@ -477,6 +477,12 @@
 - 2026-11-26 (M2 最終レビュー修正 1): 接続が `serve` 中に失われた（snapshot が読めない、呼び出し失敗、購読が閉じた）後も、`Disconnected` を
   出してから `RETRY_INTERVAL`（1 s）待ってから再接続する（待つ間も Effect は即失敗で答え、UI が閉じれば終わる）。以前は即再接続しており、
   hello には答えるが list 呼び出しに失敗するデーモンとは 2 s で 7000 回以上接続し直していた。
+- 2026-11-26 (M2 最終レビュー修正 2、コントローラ裁定): bracketed paste を有効にする（`run` の `enter_screen` で `EnableBracketedPaste`、
+  `restore_terminal` の `leave_screen` で `DisableBracketedPaste`。Drop ガード・パニックフック・シグナル終了のどの経路も `restore_terminal` を通る）。
+  `TermEvent::Paste(String)` / `AppEvent::Paste(String)` を追加。貼り付けはフォーカス中のテキスト欄（入力欄、またはフォームの編集中の欄）だけに
+  1 行として入る（`LineEditor::paste`: `\r\n`・`\n`・`\r`・`\t` はそれぞれ空白 1 個、他の制御文字は捨てる）。ツリー、権限ダイアログ、archive 確認、
+  プロバイダ／isolation の選択欄では無視する（貼り付けがキーとして働く経路はない）。以前は貼り付けがキー入力として再生され、複数行は 1 行ずつ
+  `agent.send`、タブで送信モードが変わり、ツリーでは `x`/`q`/`A`…`y` が実行されていた。
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
