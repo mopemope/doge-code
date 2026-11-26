@@ -292,6 +292,15 @@ fn input_title(state: &AppState) -> Line<'static> {
         spans.push(Span::styled(mode_name(mode), style));
     }
     spans.push(Span::raw(" "));
+    if let Some(target) = state.input_target()
+        && (state.focus == Focus::Input || state.selected_agent_id().as_ref() == Some(&target.id))
+    {
+        spans.push(Span::raw(format!(
+            "\u{2192} {} {} ",
+            short_id(&target.id),
+            truncate_cols(&escape_line(&target.title), 24)
+        )));
+    }
     if state.input_target_missing() {
         spans.push(Span::styled(
             "\u{b7} no target \u{2014} select an agent ",
@@ -327,7 +336,9 @@ fn render_input(state: &AppState, frame: &mut Frame, area: Rect) -> Option<(u16,
     let prompt = "> ";
     let room = usize::from(inner.width).saturating_sub(prompt.len());
     let (view, cursor) = editor_view(&state.input, room);
-    if state.input.is_empty() && !focused {
+    // The draft belongs to `input_target`: another selection shows none.
+    let own_draft = focused || state.selected_agent_id() == state.input_target;
+    if (state.input.is_empty() || !own_draft) && !focused {
         lines.push(Line::styled(
             "> press i to type to the selected agent",
             dim(),
@@ -671,7 +682,7 @@ fn agent_body(form: &NewAgentForm, width: usize) -> DialogBody {
         ),
         ("mode", &form.mode, AgentField::Mode, "(provider default)"),
         ("title", &form.title, AgentField::Title, "(from the prompt)"),
-        ("prompt", &form.prompt, AgentField::Prompt, "(optional)"),
+        ("prompt", &form.prompt, AgentField::Prompt, "(required)"),
     ];
     for (label, editor, field, placeholder) in fields {
         let focused = form.field == field;
@@ -1686,6 +1697,29 @@ mod tests {
         assert!(!text.contains("keys enabled shortly"), "{text}");
         let (x, y) = find(&buffer, "[a]llow").expect("legend");
         assert!(!buffer[(x, y)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn input_title_names_the_target_and_hides_another_agents_draft() {
+        let mut f = Fx::new();
+        let a1 = f.a1.clone();
+        f.select(&a1, &[]);
+        update(&mut f.state, AppEvent::Key(KeyInput::char('i')));
+        f.state.input.set_text("for a1 only");
+        let text = screen(&draw(&f.state, 120, 30));
+        let title = text
+            .lines()
+            .find(|l| l.contains("send:"))
+            .expect("input title");
+        assert!(title.contains(&short_id(&a1.id)), "{title}");
+        assert!(title.contains(&a1.title), "{title}");
+
+        // In the tree on another agent, a1's draft is not shown there.
+        update(&mut f.state, AppEvent::Key(KeyInput::new(Key::Esc)));
+        update(&mut f.state, AppEvent::Key(KeyInput::char('j')));
+        let text = screen(&draw(&f.state, 120, 30));
+        assert!(!text.contains("for a1 only"), "{text}");
+        assert!(text.contains("press i to type"), "{text}");
     }
 
     #[test]

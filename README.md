@@ -136,8 +136,8 @@ agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
 failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
 selected agent's stream (the same events as `dgc-next logs`, last 2000 lines
 kept), below it the input line, and at the bottom a status bar (connection,
-agent count, agents waiting for a permission, errors, key hints). Under 50
-columns the tree shrinks and drops provider names.
+agent count, agents waiting for a permission, errors, key hints). In a narrow
+tree (under 50 columns) provider names are dropped.
 
 Keys in the tree:
 
@@ -162,7 +162,10 @@ prompt, and a worktree workspace needs a branch; failures stay in the form. The
 form warns in red when the mode is an auto-approve one.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was
-selected when you pressed `i`, `Tab` changes the mode (the active one is
+selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).
+An unsent draft belongs to the agent it was typed for: after `Esc`, selecting
+another agent shows that agent's own draft (empty if none) and never sends the
+first agent's text; going back restores it. `Tab` changes the mode (the active one is
 highlighted in the input title), `PgUp`/`PgDn` scroll, `Esc` goes back to the
 tree. The modes are the `dgc-next send` behaviors: `queue` (default; sent when
 the current turn ends), `steer` and `interrupt`. Claude agents cannot steer, so
@@ -178,30 +181,38 @@ Permission dialog: a pending permission of the selected agent opens a dialog
 automatically when you are in the tree and the input is empty. While you type
 in the input it never opens by itself; the input title and the status bar show
 `permission waiting — Esc then p to review` instead (`p` opens it, also from
-a non-empty input after `Esc`). The dialog shows the agent, the kind and the
-whole request (long ones wrap; a `↪` in the left margin marks a wrapped
-continuation, not a new line). Rules, all there so a keystroke you typed for
-something else cannot approve a command you did not read:
+a non-empty input after `Esc`). The dialog shows the agent, the kind and dgc's
+one-line summary of the request, not the raw request payload. For Claude, Bash
+shows the command, file tools (Write, Edit, ...) show only the path and never
+the content to be written, and other tools show the first of `command`,
+`file_path`, `notebook_path` or `path`, else the input as compact JSON. For
+Codex it is a summary of the file change or of the requested permissions. The
+full raw request is in `dgc-next permit ls --json` (`raw`). Long summaries wrap;
+a `↪` in the left margin marks a wrapped continuation, not a new line. Rules, all
+there so a keystroke you typed for something else cannot approve a summary you
+did not read (reading the summary is not the same as reading everything the
+agent will do, for example the content of a file it writes):
 
 - `a` (allow once), `s` (allow for the session) and `d` (deny) are ignored for
-  about 0.75 s after the dialog opens, is replaced by another request, or the
-  terminal is resized ("keys enabled shortly").
-- `a` and `s` work only after the whole request has been on screen: scroll from
+  about 0.75 s after the dialog opens, after it switches to another request,
+  and after the terminal is resized ("keys enabled shortly").
+- `a` and `s` work only after the whole summary has been on screen: scroll from
   the top with `↑` `↓` / `PgDn` until the footer stops saying `scroll to the
   end to enable [a]/[s]`. Jumping with `End` does not count unless the rows
   between were visible too. A window too small to show the request keeps `a`
   and `s` off.
-- `d` is always available once the keys are enabled, and so is `Esc`, which
-  closes the dialog without answering: the request stays pending and `p`
-  reopens it.
-- A request that dgc had to shorten (the daemon cuts summaries at 4 KiB) shows
-  `this request was shortened by dgc — the full command is not shown`; allow
-  only if you are content to approve a command you cannot see in full.
+- `d` is available once the keys are enabled. `Esc` always closes the dialog
+  without answering: the request stays pending and `p` reopens it.
+- A summary that dgc had to shorten (the daemon cuts summaries at 4 KiB) shows
+  `this request was shortened by dgc — the full command is not shown`. That is
+  one case where the summary is incomplete; allow only if you are content to
+  approve something you cannot see in full.
 
 Disconnects: if the daemon goes away (`dgc-next daemon stop`, a crash, an old
 daemon that cannot answer) the status bar shows `daemon disconnected: REASON`
 and the last tree stays on screen, but nothing can be sent. The TUI retries
-every second, never starts the daemon itself after the first connect, and
+every second, spawns the daemon only on its first connection attempt (never
+again after a disconnect), and
 reloads everything when `dgc-next daemon start` brings it back (agents the
 restart ended show as stopped; resume them with `r`). A request that gets no
 answer within 15 s counts as a disconnect.

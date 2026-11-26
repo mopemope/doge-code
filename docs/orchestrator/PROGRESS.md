@@ -755,17 +755,33 @@
     | `bash scripts/verify.sh tui-deps` | PASS |
     | `bash scripts/verify.sh msrv` | PASS（1.94.0） |
     | `cargo test --locked --workspace --no-fail-fast --config 'env.TMPDIR.value="/var/tmp"' --config 'env.TMPDIR.force=true' -- --test-threads=1` | PASS（2972 passed / 0 failed / 0 ignored、残存プロセスなし） |
-  README を書いた後に実行した。この PROGRESS と README のコミット後は `bash scripts/verify.sh guidance` を再実行して PASS を確認する。
+  README を書いた後に実行した。コミット後（21c110a）に `bash scripts/verify.sh guidance` を再実行して PASS（193 tests）。
+- 2026-11-26 M2 Task 5 修正ラウンド 1（固定ツールチェーン 1.99.0）。レビュー指摘: (1) README が権限ダイアログを「要求全体を表示」と書いていた
+  のを、実際の「dgc の 1 行 summary（Claude のファイル系ツールはパスのみで内容は出ない）」に直した。a/s は「summary 全体が画面に出た後」に有効、
+  4 KiB 短縮は summary が不完全になる場合の 1 つ、と明記。(2) 入力欄の書きかけが全エージェントで共有され、別のエージェントに送られる不具合を修正
+  （コントローラ裁定でバグ）。`AppState.drafts: HashMap<AgentId, LineEditor>` に他エージェントの下書きを退避し、`state.input` は常に
+  `input_target` の下書き。ツリーでの選択変更（`settle`）と `i` で `bind_draft` が入れ替える。自動で開く権限ダイアログの空判定は
+  選択中エージェント自身の下書き（`draft_is_empty`）。送信失敗時の復元も対象エージェントの下書きへ。入力欄の題に `→ <短縮 id> <title>`（`escape_line`、24 桁まで）を
+  出し、別のエージェントを選んだツリーでは他人の下書きを表示しない。新規エージェントのフォームのプロンプトは `(required)` に変更。
+  README の入力節、狭いツリーの文、初回接続だけデーモンを spawn する文を修正。
+  RED（実装前、`cargo test --locked -p dgc-cli --bin dgc-next tui::`）: 105 passed / 3 failed。`a_draft_stays_with_its_agent`（a2 の入力に a1 の文字が残る）、
+  `another_agents_draft_does_not_block_the_permission_dialog`（a2 の権限が開かない）、`input_title_names_the_target_and_hides_another_agents_draft`（題に対象がない）。
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-cli --bin dgc-next tui::` | PASS（108 passed） |
+    | `cargo test --locked -p dgc-cli --test tui_backend` | PASS（123 passed、残存プロセスなし） |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `cargo fmt --all --check` | 差分なし |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests、PROGRESS 更新後に実行） |
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 
-動作の誤りではなく使い勝手。M2 最終レビューで扱いを決める。
+M2 最終レビューで扱いを決める。（3 件目は修正ラウンド 1 でバグと裁定され修正済み。他は使い勝手の指摘。）
 - 実行中のエージェントへ queue で送ってもストリームにもステータスにも何も出ない（`RpcDone` の `queued` 結果を表示していない。
   メッセージは配送時か破棄時にイベントとして出る）。受理されたか分からない。README に現状を書いた。
-- 新規エージェントのフォームのプロンプト欄は `(optional)` と表示するが、空のまま Enter すると `prompt is required`（`render.rs` の
-  プレースホルダと `update.rs` の `submit_agent` が食い違う）。
-- 入力欄の書きかけの文字がエージェント間で共有される。エージェント A 宛てに打った文字が、別のエージェントを選んで `i` を押すと
-  そのエージェント宛てとして残り、Enter でそちらに送られる。
+- （修正済み、修正ラウンド 1）新規エージェントのフォームのプロンプト欄が `(optional)` と表示されるのに空だと `prompt is required` だった。表示を `(required)` に変更。
+- （修正済み、修正ラウンド 1。バグと裁定）入力欄の書きかけの文字がエージェント間で共有され、A 宛てに打った文字が B を選んで `i` → Enter で B に送られた
+  （steer/interrupt モードでは B を中断する）。下書きをエージェントごとに持つようにした。
 - （仕様どおり）`End` で末尾に跳んでも、先頭の画面と重なって全行が一度見えていれば `a`/`s` が有効になる。厳格な経路の検証は単体テストにある。
 
 ## 保留中の小さな改善

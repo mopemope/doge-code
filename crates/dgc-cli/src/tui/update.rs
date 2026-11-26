@@ -82,6 +82,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
 /// selected agent (the input's target while typing), and a pending permission
 /// may open its dialog.
 fn settle(state: &mut AppState, fx: &mut Vec<Effect>) {
+    // In the tree the input shows the selected agent's own draft.
+    if state.focus == Focus::Tree
+        && let Some(agent_id) = state.selected_agent_id()
+    {
+        state.bind_draft(&agent_id);
+    }
     let wanted = state.stream_agent_id();
     if state.stream.agent_id() != wanted.as_ref() {
         state.stream.reset(wanted.clone());
@@ -106,12 +112,16 @@ fn settle(state: &mut AppState, fx: &mut Vec<Effect>) {
 /// another dialog: keys typed there must not answer a request, and even here
 /// the dialog ignores a/s/d for its first ticks.
 fn open_pending_permission(state: &mut AppState) {
-    if state.focus != Focus::Tree || !state.input.is_empty() {
+    if state.focus != Focus::Tree {
         return;
     }
     let Some(agent_id) = state.selected_agent_id() else {
         return;
     };
+    // Only the selected agent's own draft counts.
+    if !state.draft_is_empty(&agent_id) {
+        return;
+    }
     let next = state
         .permissions
         .iter()
@@ -267,13 +277,13 @@ fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
         RequestTag::Send { agent_id } => {
             if let Some((sent_to, text)) = state.unsent.take()
                 && sent_to == agent_id
-                && state.input.is_empty()
+                && state.draft_is_empty(&agent_id)
                 && state
                     .tree
                     .agent(&agent_id)
                     .is_some_and(|a| a.state != AgentState::Archived)
             {
-                state.input.set_text(&text);
+                state.draft_mut(&agent_id).set_text(&text);
             }
         }
         RequestTag::Respond { permission_id } => {
@@ -530,7 +540,7 @@ fn move_cursor(state: &mut AppState, delta: isize) {
 
 fn focus_input(state: &mut AppState) {
     if let Some(agent_id) = state.selected_agent_id() {
-        state.input_target = Some(agent_id);
+        state.bind_draft(&agent_id);
         state.focus = Focus::Input;
     } else {
         state.set_error("select an agent first".to_owned());
@@ -1691,6 +1701,67 @@ mod tests {
         press(&mut f.state, 'p');
         assert_eq!(open_permission_id(&f.state), Some(perm.id.clone()));
         assert_eq!(f.state.input.text(), "draft");
+    }
+
+    /// Which agent a `Send` effect addresses and with what text.
+    fn sent(fx: &[Effect]) -> Vec<(String, String)> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::Call { params, .. } => Some((
+                    params.get("agent_id")?.as_str()?.to_owned(),
+                    params.get("text")?.as_str()?.to_owned(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_draft_stays_with_its_agent() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press(&mut f.state, 'i');
+        type_text(&mut f.state, "for a1");
+        press_key(&mut f.state, Key::Esc);
+        // Select the other agent, open the input and send.
+        press(&mut f.state, 'j');
+        assert_eq!(f.state.selected_agent_id(), Some(f.a2.id.clone()));
+        press(&mut f.state, 'i');
+        assert_eq!(f.state.focus, Focus::Input);
+        assert!(f.state.input.is_empty(), "a1's text is not a2's draft");
+        let fx = press_key(&mut f.state, Key::Enter);
+        assert_eq!(sent(&fx), vec![], "nothing to send to a2");
+        type_text(&mut f.state, "for a2");
+        press_key(&mut f.state, Key::Esc);
+        // Back at a1: its own draft is restored, and it goes to a1 only.
+        press(&mut f.state, 'k');
+        assert_eq!(f.state.selected_agent_id(), Some(f.a1.id.clone()));
+        press(&mut f.state, 'i');
+        assert_eq!(f.state.input.text(), "for a1");
+        let fx = press_key(&mut f.state, Key::Enter);
+        assert_eq!(sent(&fx), vec![(f.a1.id.to_string(), "for a1".to_owned())]);
+        // a2 kept its draft.
+        press_key(&mut f.state, Key::Esc);
+        press(&mut f.state, 'j');
+        press(&mut f.state, 'i');
+        assert_eq!(f.state.input.text(), "for a2");
+    }
+
+    #[test]
+    fn another_agents_draft_does_not_block_the_permission_dialog() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        press(&mut f.state, 'i');
+        type_text(&mut f.state, "for a1");
+        press_key(&mut f.state, Key::Esc);
+        press(&mut f.state, 'j');
+        let perm = permission(&f.a2.id);
+        update(&mut f.state, requested(&f.a2.id, 1, &perm));
+        assert_eq!(
+            open_permission_id(&f.state),
+            Some(perm.id.clone()),
+            "a2 has no draft, so its request opens"
+        );
     }
 
     #[test]

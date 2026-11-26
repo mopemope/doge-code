@@ -4,7 +4,7 @@
 //! error messages) is already escaped with `output::escape_*`. Raw protocol
 //! values kept for dialogs (`PendingPermission`) must be escaped when drawn.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use dgc_protocol::event::AgentEvent;
 use dgc_protocol::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
@@ -684,6 +684,7 @@ pub struct AppState {
     pub focus: Focus,
     pub stream: StreamBuffer,
     pub send_mode: SendBehavior,
+    /// The draft of `input_target`. Other agents' drafts wait in `drafts`.
     pub input: LineEditor,
     pub dialog: Option<Dialog>,
     pub status: Status,
@@ -701,6 +702,9 @@ pub struct AppState {
     /// The agent the input was opened on; messages go there, whatever the
     /// tree cursor does afterwards.
     pub(super) input_target: Option<AgentId>,
+    /// Non-empty drafts of agents other than `input_target`: text typed for
+    /// one agent is never sent to another.
+    pub(super) drafts: HashMap<AgentId, LineEditor>,
     /// Permission changes since the pending snapshot was requested, applied
     /// again on top of it (the snapshot may be older than they are).
     pub(super) permission_log: Vec<PermissionChange>,
@@ -727,6 +731,7 @@ impl Default for AppState {
             snapshot_pending: None,
             unsent: None,
             input_target: None,
+            drafts: HashMap::new(),
             permission_log: Vec::new(),
         }
     }
@@ -764,6 +769,39 @@ impl AppState {
         self.tree
             .agent(id)
             .filter(|a| a.state != AgentState::Archived)
+    }
+
+    /// Make `agent_id` the owner of the input: the previous owner's text is
+    /// kept for it and `agent_id`'s own draft (empty if none) is loaded.
+    pub(super) fn bind_draft(&mut self, agent_id: &AgentId) {
+        if self.input_target.as_ref() == Some(agent_id) {
+            return;
+        }
+        let next = self.drafts.remove(agent_id).unwrap_or_default();
+        let previous = std::mem::replace(&mut self.input, next);
+        if let Some(owner) = self.input_target.replace(agent_id.clone())
+            && !previous.is_empty()
+        {
+            self.drafts.insert(owner, previous);
+        }
+    }
+
+    /// Whether the agent has no unsent text.
+    pub fn draft_is_empty(&self, agent_id: &AgentId) -> bool {
+        if self.input_target.as_ref() == Some(agent_id) {
+            self.input.is_empty()
+        } else {
+            self.drafts.get(agent_id).is_none_or(|d| d.is_empty())
+        }
+    }
+
+    /// The editor holding `agent_id`'s draft.
+    pub(super) fn draft_mut(&mut self, agent_id: &AgentId) -> &mut LineEditor {
+        if self.input_target.as_ref() == Some(agent_id) {
+            &mut self.input
+        } else {
+            self.drafts.entry(agent_id.clone()).or_default()
+        }
     }
 
     /// Typing with the input focused but its agent gone (archived or dropped
