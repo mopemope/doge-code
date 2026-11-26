@@ -16,8 +16,8 @@ protect mechanisms; their count or CI success does not establish usefulness.
 Doge-Code is being rebuilt as an orchestrator that drives the existing Claude
 Code and Codex CLIs instead of calling LLM APIs itself. The new daemon and its
 `dgc-next` client live under `crates/`. They run Claude Code and Codex agents
-from the command line (milestone M1; no TUI yet); the `dgc` binary described
-below keeps working until the legacy runtime is removed. See the
+from the command line and from a terminal UI (milestones M1 and M2); the `dgc`
+binary described below keeps working until the legacy runtime is removed. See the
 [design](docs/superpowers/specs/2026-11-25-orchestrator-design.md) and
 [progress](docs/orchestrator/PROGRESS.md).
 
@@ -121,6 +121,90 @@ Agents:
   permissions (network access, file system paths) is listed with kind `other`
   and a `permissions: ...` summary; `allow` grants them for the turn,
   `allow --session` for the session, `deny` grants none.
+
+### Terminal UI (`dgc-next tui`)
+
+`dgc-next tui` (or `dgc-next` with no arguments) opens a full-screen terminal UI
+for all projects, workspaces and agents. It needs a terminal on stdout (and no
+`--json`), starts the daemon if it is not running, and works against the same
+state as the other commands. Quitting leaves the daemon and every agent running;
+the next `dgc-next tui` shows them again. A recorded session is in
+[m2-tui-screen.txt](docs/orchestrator/m2-tui-screen.txt).
+
+Layout: on the left the tree (project, workspace, agent) with a state symbol per
+agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
+failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
+selected agent's stream (the same events as `dgc-next logs`, last 2000 lines
+kept), below it the input line, and at the bottom a status bar (connection,
+agent count, agents waiting for a permission, errors, key hints). Under 50
+columns the tree shrinks and drops provider names.
+
+Keys in the tree:
+
+| Key | Action |
+|---|---|
+| `↑` `↓` / `k` `j` | move; `←` collapse or go to the parent; `→` expand or enter |
+| `Enter` | expand/collapse a project or workspace; on an agent, start typing |
+| `i` | type to the selected agent |
+| `n` | new agent in the selected workspace (form: provider, model, mode, title, prompt) |
+| `w` | new workspace in the selected project (local, or worktree with branch and optional base) |
+| `x` | interrupt the selected agent (discards its queued messages) |
+| `r` | resume a stopped or failed agent |
+| `A` | archive the selected agent (asks first: `y`/`Enter` or `n`/`Esc`) |
+| `p` | jump to the next agent with a pending permission and open its dialog |
+| `Tab` / `Shift-Tab` | change the send mode: queue, steer, interrupt |
+| `PgUp` / `PgDn` | scroll the stream |
+| `q`, `Ctrl-C` | quit (`Ctrl-C` works everywhere) |
+
+In forms `↑` `↓` move between fields, `Tab` switches the provider (or the
+workspace isolation), `Enter` creates, `Esc` cancels. The new-agent form needs a
+prompt, and a worktree workspace needs a branch; failures stay in the form. The
+form warns in red when the mode is an auto-approve one.
+
+Sending: `i` focuses the input; `Enter` sends the line to the agent that was
+selected when you pressed `i`, `Tab` changes the mode (the active one is
+highlighted in the input title), `PgUp`/`PgDn` scroll, `Esc` goes back to the
+tree. The modes are the `dgc-next send` behaviors: `queue` (default; sent when
+the current turn ends), `steer` and `interrupt`. Claude agents cannot steer, so
+there `steer` interrupts and then sends, which also discards the queue. A
+queued message appears in the stream only when it is delivered (or shown as
+discarded); the TUI does not confirm a queued send otherwise. If the send
+fails, the text returns to an empty input and the error shows in the status
+bar. If the agent you were typing to is archived or disappears, the input keeps
+its text and shows `no target — select an agent`; leave with `Esc` and pick
+another agent.
+
+Permission dialog: a pending permission of the selected agent opens a dialog
+automatically when you are in the tree and the input is empty. While you type
+in the input it never opens by itself; the input title and the status bar show
+`permission waiting — Esc then p to review` instead (`p` opens it, also from
+a non-empty input after `Esc`). The dialog shows the agent, the kind and the
+whole request (long ones wrap; a `↪` in the left margin marks a wrapped
+continuation, not a new line). Rules, all there so a keystroke you typed for
+something else cannot approve a command you did not read:
+
+- `a` (allow once), `s` (allow for the session) and `d` (deny) are ignored for
+  about 0.75 s after the dialog opens, is replaced by another request, or the
+  terminal is resized ("keys enabled shortly").
+- `a` and `s` work only after the whole request has been on screen: scroll from
+  the top with `↑` `↓` / `PgDn` until the footer stops saying `scroll to the
+  end to enable [a]/[s]`. Jumping with `End` does not count unless the rows
+  between were visible too. A window too small to show the request keeps `a`
+  and `s` off.
+- `d` is always available once the keys are enabled, and so is `Esc`, which
+  closes the dialog without answering: the request stays pending and `p`
+  reopens it.
+- A request that dgc had to shorten (the daemon cuts summaries at 4 KiB) shows
+  `this request was shortened by dgc — the full command is not shown`; allow
+  only if you are content to approve a command you cannot see in full.
+
+Disconnects: if the daemon goes away (`dgc-next daemon stop`, a crash, an old
+daemon that cannot answer) the status bar shows `daemon disconnected: REASON`
+and the last tree stays on screen, but nothing can be sent. The TUI retries
+every second, never starts the daemon itself after the first connect, and
+reloads everything when `dgc-next daemon start` brings it back (agents the
+restart ended show as stopped; resume them with `r`). A request that gets no
+answer within 15 s counts as a disconnect.
 
 The daemon log never contains prompt or agent text; it is stored only in each
 agent's `events.jsonl` (0600).

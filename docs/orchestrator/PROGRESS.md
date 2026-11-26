@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 Task 5（M2 受け入れ: 手動確認、画面記録、ドキュメント）
-- 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）。M2 Task 4 完了（ランタイム、デーモン I/O、`dgc-next tui`）
-- 次の一手: M2 計画の Task 5 Step 1 から始める（ブランチ `feat/orchestrator-m2`）。偽プロバイダで `dgc-next tui` を tmux/script 上で操作し画面を記録する。README の TUI 節（起動、キー、権限ダイアログ、切断時の表示）は Task 5 で書く
+- タスク: M2 完了（Task 5 受け入れ済み）。次は M2 全体の最終レビューと PR
+- 状態: 完了
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）。M2 Task 2 完了（TUI の状態と更新、純粋部分）。M2 Task 3 完了（`tui::render`、ratatui/crossterm 依存追加）。M2 Task 4 完了（ランタイム、デーモン I/O、`dgc-next tui`）。M2 Task 5 完了（偽プロバイダと実 Claude で受け入れ、画面記録、README の TUI 節、全体検証）
+- 次の一手: M2 全体の最終レビュー（ブランチ `feat/orchestrator-m2`）、下の「M2 受け入れで見つかった小さな指摘」3 件の扱いを決める、PR 作成。その後 M3（旧 `src/` 削除、`dgc` に改名）の計画を作る
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -29,7 +29,7 @@
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
-| M2 | TUI | 作業中 | m2-tui |
+| M2 | TUI | 完了（最終レビューと PR 待ち） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
@@ -70,7 +70,7 @@
 | 2 | TUI の状態と更新（純粋部分） | 完了 | `feat(cli): add TUI state and update logic` |
 | 3 | 描画 | 完了 | `feat(cli): render the TUI layout` |
 | 4 | ランタイムと起動コマンド | 完了 | `feat(cli): run the TUI against the daemon` |
-| 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 未着手 | |
+| 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 完了 | `docs(orchestrator): complete M2 acceptance` |
 
 ## 決定事項
 
@@ -730,6 +730,44 @@
     | `cargo fmt --all --check` | 差分なし |
     | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
     | `bash scripts/verify.sh msrv` | PASS（dgc-cli の Cargo.toml を変更したため） |
+- 2026-11-26 M2 Task 5 受け入れ（Linux、固定ツールチェーン 1.99.0）。手動確認なので TDD は適用しない。コードは変更していない。
+  Step 1（偽プロバイダ、PASS）: tmux（`-L dgcm2`、120x32）の実 pty で `dgc-next tui` を操作。`claude_path` は `dgc-fake-provider` を実行する
+  ラッパー（手書きの合成シナリオ。長い複数行 Bash 権限要求 43 行 → allow → ターン継続 → queue/interrupt/steer の各送信に対応）。使い捨て git
+  リポジトリ、スクラッチの `DGC_STATE_ROOT`。画面は `docs/orchestrator/m2-tui-screen.txt`（19 枚）。確認できたこと:
+  空のツリー（`w` はプロジェクト未選択で `select a project first`）、`w` でローカルと worktree ワークスペース作成、`n` でエージェント作成、
+  権限ダイアログ（開いた直後の `a` は無視 = `keys enabled shortly`、未スクロールの `a` は無視、↓/End で全行が一度見えた後の `a` は許可）、
+  ストリーム（許可・ツール結果・応答・turn completed）、`i` で入力、送信 3 モード（idle への queue = sent、実行中の queue 2 件、steer、
+  interrupt。steer/interrupt で `queued message discarded` と `user (steer)` / `user (interrupt)` がストリームに出る）、Input フォーカスの権限ヒント
+  （ダイアログは自動で開かず、Esc 後 `p` で再表示）、`A` の確認ダイアログ、60x20 の狭い端末、`q` で終了しエージェントは running のまま、
+  再起動後にツリーとストリームが再表示、TUI を開いたまま `daemon stop` → ステータスバーに `daemon disconnected: ...retrying every second`、
+  `daemon start` → 自動再接続し、エージェントは stopped 表示。バグは見つからず。
+  Step 2（実 Claude 2.1.332、`--model haiku`、`--mode manual`（自動承認ではない）、使い捨てリポジトリ、PASS）: TUI の `w` → `n`（model/mode/prompt を
+  フォームに入力、プロンプトは hello.txt を Write ツールで作らせる短文）→ file_change の権限ダイアログが出た → `a` → `tool result` → `assistant: done` →
+  `turn completed` → idle まで 1 ターン。観察: haiku は Write の絶対パスの途中の `/` を `-` に取り違え（`.../doge-code-e2584448...` のように）、
+  リポジトリの外の別ディレクトリに hello.txt を作った（ダイアログがそのパスを表示していたので利用者は気付ける。dgc の不具合ではない）。
+  後始末として、その余分なディレクトリを削除。TUI/デーモン/tmux は停止し、残存する `dgc-next`/`dgc-fake-provider`/`claude -p` なし。
+  Step 3（固定ツールチェーン cargo/rustc 1.99.0）:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
+    | `bash scripts/verify.sh guidance` | PASS（193 tests） |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+    | `bash scripts/verify.sh msrv` | PASS（1.94.0） |
+    | `cargo test --locked --workspace --no-fail-fast --config 'env.TMPDIR.value="/var/tmp"' --config 'env.TMPDIR.force=true' -- --test-threads=1` | PASS（2972 passed / 0 failed / 0 ignored、残存プロセスなし） |
+  README を書いた後に実行した。この PROGRESS と README のコミット後は `bash scripts/verify.sh guidance` を再実行して PASS を確認する。
+
+## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
+
+動作の誤りではなく使い勝手。M2 最終レビューで扱いを決める。
+- 実行中のエージェントへ queue で送ってもストリームにもステータスにも何も出ない（`RpcDone` の `queued` 結果を表示していない。
+  メッセージは配送時か破棄時にイベントとして出る）。受理されたか分からない。README に現状を書いた。
+- 新規エージェントのフォームのプロンプト欄は `(optional)` と表示するが、空のまま Enter すると `prompt is required`（`render.rs` の
+  プレースホルダと `update.rs` の `submit_agent` が食い違う）。
+- 入力欄の書きかけの文字がエージェント間で共有される。エージェント A 宛てに打った文字が、別のエージェントを選んで `i` を押すと
+  そのエージェント宛てとして残り、Enter でそちらに送られる。
+- （仕様どおり）`End` で末尾に跳んでも、先頭の画面と重なって全行が一度見えていれば `a`/`s` が有効になる。厳格な経路の検証は単体テストにある。
+
 ## 保留中の小さな改善
 
 - M1 Task 14 受け入れ由来（すべて小さく、受け入れは通った。M2 前か M2 の最初に直す）:
