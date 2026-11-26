@@ -1112,3 +1112,22 @@ M2 はタスクごとのレビューと全体の最終レビュー（修正の�
 - Final: fix wave done 8b24f22..b8795d7 (7 commits); Ruling: item 6 applied to workspace.create too (same class) — accepted
 
 - 2026-11-26 M2 最終検証（固定ツールチェーン 1.99.0）: fmt / clippy -D warnings / ワークスペース全体のテスト（直列、TMPDIR=/var/tmp）3021 passed / 0 failed / guidance / tui-deps / msrv すべて PASS。
+
+## M3 レビューで保留した指摘と判断（2026-11-26、実行台帳から移記）
+
+M3 はタスクごとのレビューと全体の最終レビュー（修正の再レビューまで）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): sensitive-logging fails only if ALL scope entries missing (per-entry check stricter); scope could be crates/*/src at zero cost; macOS filters are name substrings covering ~5/13 process tests (run whole --test binaries instead); git-unavailable fallback untested; unstaged new docs skipped locally
+- Task 2: minor (deferred): README "about 0.75 s" is really 0.5–0.75 s; AGENTS.md 133 lines vs ~120 target (accepted)
+- Task 2: minor (deferred, consider at final): README:334 says prompts/output stored in events.jsonl (also queue.json + title); README:27 omits interrupt/shutdown cancel and provider-mode note
+- Final: minor (deferred): README/AGENTS say daemon stop cancels pending requests "(answered deny or cancel)" — on stop the provider is terminated, only interrupt answers it (safety claim unaffected); workflow.md tui-deps sentence merged into macOS line (cosmetic); macOS full-workspace run only exercised in CI
+
+### コントローラの判断（Ruling）
+
+- Ruling: none at pre-flight
+- Task 2: implementer DONE_WITH_CONCERNS 8b4b24d; Ruling: captured screen content must not be edited — restore capture 16's original 'dgc-next daemon start' line, keep the predates-rename note, exclude captures from the stale-name rg — records must reflect what was on screen — cost if wrong: one stale name in a historical capture
+- Task 2: Ruling: fold Minor 3 (credentials wording: env inheritance; "not sent over the socket") and Minor 4 (remove .gitignore skills un-ignores — personal skills could become trackable — and the skills check/tests in check-agent-guidance) — security-wording and guidance debt left by this task — cost if wrong: none
+- Final: Ruling: macOS mode runs the full workspace test suite (drop name filters) — platform coverage over speed — cost if wrong: longer macOS CI job
+- Final: Ruling: sensitive-logging scope = all crate src dirs via glob, each must exist — reviewer found zero false positives — cost if wrong: future false positives need targeted exemptions
