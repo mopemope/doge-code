@@ -1,9 +1,8 @@
-"""Behavior regressions for verification, routing guards, and measured comparisons."""
+"""Behavior regressions for the verification wrapper and development checks."""
 
 from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +13,9 @@ from unittest.mock import patch
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+VIRTUAL_MANIFEST = ('[workspace]\nmembers = ["crates/*"]\nresolver = "3"\n\n'
+                    '[workspace.package]\nedition = "2024"\nrust-version = "{version}"\n'
+                    'version = "0.1.0"\n')
 
 
 def load_module(name, filename):
@@ -25,7 +27,6 @@ def load_module(name, filename):
 
 verify = load_module("verify", "verify.py")
 guidance = load_module("guidance", "check-agent-guidance.py")
-evals = load_module("evals", "compare-agent-evals.py")
 tui_deps = load_module("tui_deps", "check-tui-deps.py")
 
 
@@ -71,13 +72,33 @@ class VerificationTests(unittest.TestCase):
         code, _ = self.run_fixture("documentation checks passed", require_tests=False)
         self.assertEqual(code, 0)
 
-    def test_msrv_follows_manifest(self):
+    def test_msrv_follows_virtual_workspace_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "Cargo.toml").write_text('[package]\nrust-version = "1.88"\n')
+            (root / "Cargo.toml").write_text(VIRTUAL_MANIFEST.format(version="1.88"))
             command = verify.commands("msrv", None, root)[0][0]
             self.assertEqual(command[:3], ["rustup", "run", "1.88.0"])
             self.assertIn("--locked", command)
+            self.assertIn("--workspace", command)
+
+    def test_msrv_rejects_a_manifest_without_workspace_rust_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # The legacy root package no longer exists; it is not a fallback.
+            (root / "Cargo.toml").write_text('[package]\nrust-version = "1.88"\n')
+            with self.assertRaises(KeyError):
+                verify.commands("msrv", None, root)
+
+    def test_macos_mode_runs_the_whole_workspace_test_suite(self):
+        # Filters would skip the symlink, permission and path-safety tests that
+        # matter most on macOS (/var is a symlink to /private/var).
+        with patch.object(verify.sys, "platform", "darwin"):
+            checks = verify.commands("macos", None, SCRIPTS.parent)
+        self.assertEqual(checks, [(["cargo", "test", "--locked", "--workspace"], True)])
+
+    def test_macos_mode_refuses_other_platforms(self):
+        with patch.object(verify.sys, "platform", "linux"), self.assertRaises(ValueError):
+            verify.commands("macos", None, SCRIPTS.parent)
 
     def test_python_discovery_zero_tests_is_not_verification(self):
         commands = verify.commands("guidance", None, SCRIPTS.parent)
@@ -106,31 +127,35 @@ class VerificationTests(unittest.TestCase):
         msrv = verify.commands("msrv", None, SCRIPTS.parent)[0][0]
         self.assertIn("--workspace", msrv)
 
-    def test_guidance_includes_test_integrity_checker(self):
+    def test_guidance_runs_checkers_before_script_discovery(self):
         commands = verify.commands("guidance", None, SCRIPTS.parent)
         labels = [" ".join(argv) for argv, _ in commands]
         positions = {}
-        for marker in ("check-sensitive-logging.py", "check-test-integrity.py"):
+        for marker in ("check-agent-guidance.py", "check-sensitive-logging.py"):
             matches = [index for index, label in enumerate(labels) if marker in label]
             self.assertEqual(len(matches), 1, marker)
             positions[marker] = matches[0]
+        # The legacy-only test-integrity checker was removed with src/.
+        self.assertFalse(any("check-test-integrity.py" in label for label in labels), labels)
         discovery = [
             index for index, (_, value) in enumerate(commands) if value == "unittest"
         ]
         self.assertEqual(len(discovery), 1)
-        self.assertLess(
-            positions["check-sensitive-logging.py"],
-            positions["check-test-integrity.py"],
-        )
-        self.assertLess(positions["check-test-integrity.py"], discovery[0])
+        self.assertLess(max(positions.values()), discovery[0])
+        for argv, _ in commands:
+            script = next((arg for arg in argv if arg.startswith("scripts/")), None)
+            if script and script.endswith(".py"):
+                self.assertTrue((SCRIPTS.parent / script).is_file(), script)
 
 
 class TuiDependencyTests(unittest.TestCase):
     def run_graph(self, direct, full, requirement="^0.29"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # A virtual workspace: there is no root package to inspect.
             (root / "Cargo.toml").write_text(
-                f'[package]\nname = "fixture"\n[dependencies]\ncrossterm = "{requirement}"\n'
+                VIRTUAL_MANIFEST.format(version="1.94")
+                + f'[workspace.dependencies]\ncrossterm = "{requirement}"\n'
             )
             calls = []
 
@@ -162,95 +187,83 @@ class TuiDependencyTests(unittest.TestCase):
         code, _ = self.run_graph("crossterm v0.29.0\n", "crossterm v0.29.0\ncrossterm v0.28.2\n")
         self.assertEqual(code, 1)
 
+    def test_graph_is_inspected_for_the_dgc_cli_package(self):
+        code, calls = self.run_graph("dgc-cli v0.1.0\ncrossterm v0.29.0\n", "crossterm v0.29.0\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(call[call.index("--package") + 1], "dgc-cli", call)
+            self.assertIn("--locked", call)
+
+    def test_missing_direct_crossterm_is_rejected(self):
+        code, _ = self.run_graph("dgc-cli v0.1.0\n", "crossterm v0.29.0\n")
+        self.assertEqual(code, 1)
+
 
 class GuidanceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.write("src/llm/tool_def.rs", "pub fn default_tools_def() -> Vec<ToolDef> {\n"
-                   "vec![tools::read::tool_def(),]\n}\n")
-        self.write("src/tools/read.rs", 'pub fn tool_def() -> ToolDef {\n'
-                   'ToolDef { function: ToolFunctionDef { name: "fs_read".to_string(), } }\n}\n')
-        self.write("src/llm/tool_execution/dispatch.rs", 'match name {\n'
-                   '"fs_read" => fs::fs_read(runtime, args_val).await,\n}\n')
-        self.write("README.md", "## 🛠️ Tools and Commands\n- `fs_read`: Read files\n\n## Other\n")
-        self.write("docs/ai/tool-routing-exceptions.json", json.dumps({
-            "dispatch_only": {}, "runtime_tools": {}, "readme_commands": {}
-        }))
 
     def write(self, path, content):
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
 
-    def test_consistent_catalog(self):
-        errors, count = guidance.check_catalog(self.root)
-        self.assertEqual(errors, [])
-        self.assertEqual(count, 1)
-
-    def test_missing_dispatch_is_detected(self):
-        self.write("src/llm/tool_execution/dispatch.rs", "match name {}\n")
-        errors, _ = guidance.check_catalog(self.root)
-        self.assertTrue(any("fs_read" in error for error in errors))
-
-    def test_missing_readme_is_detected(self):
-        self.write("README.md", "## 🛠️ Tools and Commands\n\n## Other\n")
-        errors, _ = guidance.check_catalog(self.root)
-        self.assertTrue(any("README" in error for error in errors))
-
-    def test_duplicate_schema_is_detected(self):
-        self.write("src/llm/tool_def.rs", "pub fn default_tools_def() -> Vec<ToolDef> {\n"
-                   "vec![tools::read::tool_def(), tools::read::tool_def(),]\n}\n")
-        errors, _ = guidance.check_catalog(self.root)
-        self.assertTrue(any("Duplicate schema" in error for error in errors))
-
-    def test_internal_route_requires_explicit_exception(self):
-        self.write("src/llm/tool_execution/dispatch.rs", 'match name {\n'
-                   '"fs_read" => fs::fs_read(runtime, args_val).await,\n'
-                   '"internal" => tools::internal(runtime, args_val).await,\n}\n')
-        errors, _ = guidance.check_catalog(self.root)
-        self.assertTrue(any("internal" in error for error in errors))
-        self.write("docs/ai/tool-routing-exceptions.json", json.dumps({
-            "dispatch_only": {"internal": "An intentional internal fixture route"},
-            "runtime_tools": {}, "readme_commands": {}
-        }))
-        self.assertEqual(guidance.check_catalog(self.root)[0], [])
-
-    def test_unsupported_registry_syntax_fails_closed(self):
-        self.write("src/llm/tool_def.rs", "vec![make_dynamic_tools()]\n")
-        with self.assertRaises(ValueError):
-            guidance.check_catalog(self.root)
-
-    def test_constant_schema_name_is_resolved(self):
-        self.write("src/tools/read.rs", 'pub const NAME: &str = "fs_read";\n'
-                   'pub fn tool_def() -> ToolDef {\n'
-                   'ToolDef { function: ToolFunctionDef { name: NAME.to_string(), } }\n}\n')
-        self.assertEqual(guidance.check_catalog(self.root)[0], [])
-
     def test_broken_or_outside_link_is_detected(self):
         self.write("docs/guide.md", "[missing](gone.md)\n[outside](../../elsewhere.md)\n")
         self.assertEqual(len(guidance.check_links(self.root / "docs/guide.md", self.root)), 2)
 
-    def test_host_links_must_target_same_canonical_skill(self):
-        self.write("AGENTS.md", "[Skill](docs/ai/skills/dgc-test/SKILL.md)\n")
+    def test_local_agent_host_skills_are_not_guidance(self):
+        self.write("AGENTS.md", "[Workflow](docs/ai/workflow.md)\n")
         self.write("CLAUDE.md", "@AGENTS.md\n")
-        self.write("docs/tool-output-contract.md", "Contract\n")
-        self.write("docs/ai/skills/dgc-test/SKILL.md", "---\nname: dgc-test\n"
-                   "description: Verify a scoped dgc fixture.\n---\n")
-        for host in guidance.HOSTS:
-            directory = self.root / host
-            directory.mkdir(parents=True)
-            (directory / "dgc-test").symlink_to("../../docs/ai/skills/dgc-test", target_is_directory=True)
-        self.assertEqual(guidance.check_skills(self.root), [])
-        link = self.root / ".agents/skills/dgc-test"
-        link.unlink()
-        link.symlink_to("../../docs/ai/skills/missing", target_is_directory=True)
-        self.assertTrue(guidance.check_skills(self.root))
+        self.write("README.md", "dgc\n")
+        self.write("docs/ai/workflow.md", "Workflow\n")
+        self.assertEqual(guidance.check_guidance(self.root), [])
+        # Personal skills under an agent host directory are local state, not
+        # repository guidance: they must not fail the check.
+        for host in (".claude/skills", ".opencode/skill", ".agents/skills"):
+            self.write(f"{host}/foo/SKILL.md", "personal\n")
+        self.write(".claude/skills/bar/SKILL.md", "---\nname: other\n---\n")
+        self.assertEqual(guidance.check_guidance(self.root), [])
+
+    def test_claude_md_must_import_agents_md(self):
+        self.write("AGENTS.md", "Guidance\n")
+        self.write("README.md", "dgc\n")
+        self.write("CLAUDE.md", "Separate guidance\n")
+        errors = guidance.check_guidance(self.root)
+        self.assertTrue(any("CLAUDE.md" in error for error in errors), errors)
+
+    def test_broken_links_in_guidance_documents_are_detected(self):
+        self.write("AGENTS.md", "[Gone](src/main.rs)\n")
+        self.write("CLAUDE.md", "@AGENTS.md\n")
+        self.write("README.md", "[Gone](elisp/emacs-integration.md)\n")
+        self.write("docs/ai/architecture.md", "[Gone](../../src/lib.rs)\n")
+        errors = guidance.check_guidance(self.root)
+        for name in ("AGENTS.md", "README.md", "docs/ai/architecture.md"):
+            self.assertTrue(any(error.startswith(name) for error in errors), (name, errors))
+
+    def test_untracked_notes_are_not_link_checked_in_a_git_checkout(self):
+        self.write("AGENTS.md", "Guidance\n")
+        self.write("CLAUDE.md", "@AGENTS.md\n")
+        self.write("README.md", "dgc\n")
+        self.write("docs/ai/tracked.md", "[Gone](../../src/lib.rs)\n")
+        git = ["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        subprocess.run(git + ["add", "AGENTS.md", "CLAUDE.md", "README.md", "docs/ai/tracked.md"],
+                       check=True)
+        # A local, never-committed note: CI cannot see it, so it is not guidance.
+        self.write("docs/ai/local-note.md", "[Gone](../../src/tools/edit.rs)\n")
+        errors = guidance.check_guidance(self.root)
+        self.assertTrue(any("docs/ai/tracked.md" in error for error in errors), errors)
+        self.assertFalse(any("local-note.md" in error for error in errors), errors)
 
     def test_ci_msrv_and_command_drift_are_detected(self):
-        version = tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())["package"]["rust-version"]
-        self.write("Cargo.toml", f'[package]\nrust-version = "{version}"\n')
+        manifest = tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())
+        self.assertNotIn("package", manifest, "the root manifest must stay a virtual workspace")
+        version = manifest["workspace"]["package"]["rust-version"]
+        self.write("Cargo.toml", VIRTUAL_MANIFEST.format(version=version))
         toolchain = version + ".0" if version.count(".") == 1 else version
         self.write("scripts/verify.py", (SCRIPTS / "verify.py").read_text())
         self.write("rust-toolchain.toml", (SCRIPTS.parent / "rust-toolchain.toml").read_text())
@@ -278,6 +291,25 @@ class GuidanceTests(unittest.TestCase):
         errors = guidance.check_ci(self.root)
         self.assertTrue(any("verify.sh macos" in error for error in errors), errors)
 
+    def test_ci_reads_msrv_from_the_workspace_package(self):
+        self.write("scripts/verify.py", (SCRIPTS / "verify.py").read_text())
+        self.write("rust-toolchain.toml", (SCRIPTS.parent / "rust-toolchain.toml").read_text())
+        source = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
+        self.write(".github/workflows/ci.yml", source)
+        version = tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())["workspace"]["package"]["rust-version"]
+        self.write("Cargo.toml", VIRTUAL_MANIFEST.format(version=version))
+        self.assertEqual(guidance.check_ci(self.root), [])
+        # Drifting only the workspace MSRV must be noticed against the CI job.
+        self.write("Cargo.toml", VIRTUAL_MANIFEST.format(version="1.80"))
+        errors = guidance.check_ci(self.root)
+        self.assertTrue(any("1.80.0" in error for error in errors), errors)
+
+    def test_ci_tests_the_whole_workspace_without_legacy_setup(self):
+        source = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
+        self.assertIn("run: cargo test --locked --workspace", source)
+        # ripgrep was only needed by the legacy search tool tests.
+        self.assertNotIn("ripgrep", source)
+
     def test_workflow_doc_lists_wrapper_rust_commands(self):
         self.write("scripts/verify.py", (SCRIPTS / "verify.py").read_text())
         self.write("Cargo.toml", (SCRIPTS.parent / "Cargo.toml").read_text())
@@ -287,311 +319,6 @@ class GuidanceTests(unittest.TestCase):
         self.write("docs/ai/workflow.md", source.replace(" --workspace", ""))
         errors = guidance.check_workflow_doc(self.root)
         self.assertTrue(any("cargo test --locked --workspace" in error for error in errors), errors)
-
-    def test_skill_description_rejects_invalid_yaml_scalar(self):
-        self.write("AGENTS.md", "Guidance\n")
-        self.write("CLAUDE.md", "@AGENTS.md\n")
-        self.write("docs/tool-output-contract.md", "Contract\n")
-        for description in ("dgc: invalid mapping", "[dgc, a list]", "*dgc-alias",
-                            " [dgc, a list]", "0xAB", ".5", "true"):
-            with self.subTest(description=description):
-                self.write("docs/ai/skills/dgc-test/SKILL.md", "---\nname: dgc-test\n"
-                           f"description: {description}\n---\n")
-                for host in guidance.HOSTS:
-                    directory = self.root / host
-                    directory.mkdir(parents=True, exist_ok=True)
-                    link = directory / "dgc-test"
-                    if not link.is_symlink():
-                        link.symlink_to("../../docs/ai/skills/dgc-test", target_is_directory=True)
-                self.assertTrue(guidance.check_skills(self.root))
-
-    def test_quoted_skill_description_accepts_yaml_punctuation(self):
-        self.assertTrue(guidance.valid_description('"dgc: scoped #description"'))
-        self.assertTrue(guidance.valid_description("A scoped dgc workflow."))
-        self.assertFalse(guidance.valid_description('"unterminated'))
-
-
-class EvaluationTests(unittest.TestCase):
-    def setUp(self):
-        self.record = {
-            "case_id": "fixture", "trial": 1, "base_commit": "commit",
-            "model": "model", "settings": {"effort": "medium"}, "variant": "baseline",
-            "accepted": True, "input_tokens": 100, "output_tokens": 20,
-            "cached_input_tokens": 50, "elapsed_seconds": 3,
-            "tool_calls": 2, "rework_count": 0, "contract_violations": 0,
-        }
-
-    def load_fixture(self, records):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "runs.jsonl"
-            path.write_text("\n".join(json.dumps(record) for record in records))
-            return evals.load_runs(path)
-
-    def test_failed_runs_count_toward_effort_per_success(self):
-        failed = dict(self.record, trial=2, accepted=False)
-        summary = evals.summarize(self.load_fixture([self.record, failed]))
-        self.assertEqual(summary["acceptance_rate"], 0.5)
-        self.assertEqual(summary["tokens_per_accepted_run"], 240)
-        self.assertEqual(summary["seconds_per_accepted_run"], 6)
-
-    def test_no_success_produces_null_efficiency(self):
-        summary = evals.summarize(self.load_fixture([dict(self.record, accepted=False)]))
-        self.assertIsNone(summary["tokens_per_accepted_run"])
-
-    def test_invalid_telemetry_and_accepted_violations_rejected(self):
-        for update in ({"elapsed_seconds": float("nan")}, {"input_tokens": -1},
-                       {"cached_input_tokens": 101}, {"contract_violations": 1},
-                       {"accepted": 1}, {"settings": None}):
-            with self.subTest(update=update), self.assertRaises(ValueError):
-                self.load_fixture([dict(self.record, **update)])
-
-    def test_non_object_and_duplicate_trials_rejected(self):
-        for records in ([[]], [self.record, self.record]):
-            with self.assertRaises(ValueError):
-                self.load_fixture(records)
-
-    def v2_record(self, **overrides):
-        record = {
-            "schema_version": 2, "case_id": "fixture", "trial": 1,
-            "base_commit": "commit", "model": "model",
-            "settings": {"environment": "fixed"}, "variant": "baseline",
-            "run_status": "completed", "stop_reason": None,
-            "request_attempts": 1, "usage_records": 1, "unknown_usage_attempts": 0,
-            "cached_usage_records": 1,
-            "accepted": True, "input_tokens": 100, "output_tokens": 20,
-            "cached_input_tokens": 50, "elapsed_seconds": 3,
-            "tool_calls": 2, "rework_count": 0, "contract_violations": 0,
-        }
-        record.update(overrides)
-        return record
-
-    def test_incomplete_usage_cannot_produce_complete_token_or_cache_totals(self):
-        cases = [
-            {"request_attempts": 2, "usage_records": 1, "unknown_usage_attempts": 1},
-            {"request_attempts": 1, "usage_records": 1, "unknown_usage_attempts": 1},
-            {"request_attempts": 2, "usage_records": 1},
-            {"usage_records": 2},
-            {"request_attempts": None},
-            {"usage_records": None},
-            {"unknown_usage_attempts": None},
-        ]
-        for fields in cases:
-            with self.subTest(fields=fields):
-                summary = evals.summarize(self.load_fixture([self.v2_record(**fields)]))
-                self.assertFalse(summary["token_metrics_complete"])
-                self.assertEqual(summary["token_complete_runs"], 0)
-                self.assertIsNone(summary["total_tokens"])
-                self.assertIsNone(summary["tokens_per_accepted_run"])
-                self.assertIsNone(summary["cached_input_tokens"])
-                self.assertEqual(summary["cached_token_complete_runs"], 0)
-                self.assertEqual(summary["known_total_tokens"], 120)
-                self.assertEqual(summary["known_cached_input_tokens"], 50)
-                self.assertEqual(summary["acceptance_rate"], 1)
-                self.assertEqual(summary["seconds_per_accepted_run"], 3)
-                self.assertEqual(summary["tool_calls"], 2)
-
-    def test_missing_usage_coverage_fields_are_unknown(self):
-        for field in ("request_attempts", "usage_records", "unknown_usage_attempts"):
-            record = self.v2_record()
-            del record[field]
-            with self.subTest(field=field):
-                summary = evals.summarize(self.load_fixture([record]))
-                self.assertFalse(summary["token_metrics_complete"])
-                self.assertIsNone(summary["cached_input_tokens"])
-
-    def test_invalid_usage_coverage_counters_are_rejected(self):
-        for field in ("request_attempts", "usage_records", "unknown_usage_attempts"):
-            for value in (True, False, -1, 1.5, "1"):
-                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
-                    self.load_fixture([self.v2_record(**{field: value})])
-
-    def test_zero_attempt_usage_is_complete_when_explicit(self):
-        summary = evals.summarize(self.load_fixture([self.v2_record(
-            request_attempts=0, usage_records=0, unknown_usage_attempts=0,
-            input_tokens=0, output_tokens=0, cached_input_tokens=0, cached_usage_records=0)]))
-        self.assertTrue(summary["token_metrics_complete"])
-        self.assertEqual(summary["total_tokens"], 0)
-        self.assertEqual(summary["tokens_per_accepted_run"], 0)
-        self.assertEqual(summary["cached_input_tokens"], 0)
-
-    def test_unknown_tokens_are_not_zero(self):
-        summary = evals.summarize(self.load_fixture(
-            [self.v2_record(), self.v2_record(trial=2, input_tokens=None)]))
-        self.assertFalse(summary["token_metrics_complete"])
-        self.assertEqual(summary["token_complete_runs"], 1)
-        self.assertIsNone(summary["total_tokens"])
-        self.assertIsNone(summary["tokens_per_accepted_run"])
-        self.assertEqual(summary["known_total_tokens"], 120)
-
-    def test_partial_token_coverage_returns_null_efficiency(self):
-        summary = evals.summarize(self.load_fixture(
-            [self.v2_record(accepted=False), self.v2_record(trial=2)]))
-        self.assertEqual(summary["tokens_per_accepted_run"], 240)
-        missing = evals.summarize(self.load_fixture(
-            [self.v2_record(output_tokens=None)]))
-        self.assertIsNone(missing["tokens_per_accepted_run"])
-
-    def test_known_token_totals_still_compare(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
-            baseline.write_text(json.dumps(self.v2_record()))
-            candidate.write_text(json.dumps(
-                self.v2_record(variant="candidate", input_tokens=80)))
-            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
-                       str(baseline), str(candidate)]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0)
-            compared = json.loads(result.stdout)
-            self.assertEqual(compared["candidate"]["total_tokens"], 100)
-            self.assertEqual(compared["baseline"]["completed_runs"], 1)
-
-    def test_cli_mixed_coverage_preserves_quality_and_known_subtotals(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
-            records = [self.v2_record(), self.v2_record(
-                trial=2, accepted=False, run_status="failed", request_attempts=2,
-                usage_records=1, unknown_usage_attempts=1)]
-            baseline.write_text("\n".join(json.dumps(record) for record in records))
-            candidate.write_text("\n".join(json.dumps(dict(record, variant="candidate"))
-                                           for record in records))
-            result = subprocess.run(
-                [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
-                 str(baseline), str(candidate)], capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            for summary in json.loads(result.stdout).values():
-                self.assertEqual(summary["token_complete_runs"], 1)
-                self.assertIsNone(summary["total_tokens"])
-                self.assertIsNone(summary["tokens_per_accepted_run"])
-                self.assertEqual(summary["known_total_tokens"], 240)
-                self.assertEqual(summary["cached_token_complete_runs"], 1)
-                self.assertIsNone(summary["cached_input_tokens"])
-                self.assertEqual(summary["known_cached_input_tokens"], 100)
-                self.assertEqual(summary["acceptance_rate"], 0.5)
-                self.assertEqual(summary["completed_runs"], 1)
-                self.assertEqual(summary["failed_runs"], 1)
-                self.assertEqual(summary["seconds_per_accepted_run"], 6)
-                self.assertEqual(summary["tool_calls"], 4)
-
-    def test_partial_cached_item_coverage_does_not_invalidate_normal_tokens(self):
-        summary = evals.summarize(self.load_fixture([self.v2_record(
-            request_attempts=2, usage_records=2, cached_usage_records=1,
-            input_tokens=200, output_tokens=40, cached_input_tokens=80)]))
-        self.assertEqual(summary["total_tokens"], 240)
-        self.assertEqual(summary["tokens_per_accepted_run"], 240)
-        self.assertEqual(summary["cached_token_complete_runs"], 0)
-        self.assertIsNone(summary["cached_input_tokens"])
-        self.assertEqual(summary["known_cached_input_tokens"], 80)
-
-    def test_legacy_cache_uses_original_field_even_with_new_extension(self):
-        record = dict(self.record, known_cached_input_tokens=0, cached_usage_records=0)
-        summary = evals.summarize(self.load_fixture([record]))
-        self.assertEqual(summary["cached_input_tokens"], 50)
-        self.assertEqual(summary["known_cached_input_tokens"], 50)
-        self.assertEqual(summary["cached_token_complete_runs"], 1)
-
-    def test_old_v2_and_inconsistent_cache_coverage_keep_known_subtotals(self):
-        for count in (None, 0, 2):
-            record = self.v2_record(cached_usage_records=count)
-            summary = evals.summarize(self.load_fixture([record]))
-            self.assertIsNone(summary["cached_input_tokens"])
-            self.assertEqual(summary["known_cached_input_tokens"], 50)
-            self.assertEqual(summary["total_tokens"], 120)
-        record = self.v2_record()
-        del record["cached_usage_records"]
-        summary = evals.summarize(self.load_fixture([record]))
-        self.assertIsNone(summary["cached_input_tokens"])
-        self.assertEqual(summary["known_cached_input_tokens"], 50)
-
-    def test_new_known_cache_is_counted_once_and_zero_is_not_missing(self):
-        for known, expected in ((0, 0), (40, 40), (None, 50)):
-            summary = evals.summarize(self.load_fixture([self.v2_record(
-                cached_usage_records=0, known_cached_input_tokens=known)]))
-            self.assertIsNone(summary["cached_input_tokens"])
-            self.assertEqual(summary["known_cached_input_tokens"], expected)
-        summary = evals.summarize(self.load_fixture([
-            self.v2_record(known_cached_input_tokens=50),
-            self.v2_record(trial=2, cached_input_tokens=None, cached_usage_records=0,
-                           known_cached_input_tokens=30)]))
-        self.assertEqual(summary["cached_token_complete_runs"], 1)
-        self.assertIsNone(summary["cached_input_tokens"])
-        self.assertEqual(summary["known_cached_input_tokens"], 80)
-        self.assertEqual(summary["total_tokens"], 240)
-
-    def test_invalid_optional_counter_or_known_subtotal_is_rejected(self):
-        for field in ("cached_usage_records", "reasoning_usage_records", "cache_write_usage_records",
-                      "known_cached_input_tokens", "known_reasoning_tokens", "known_cache_write_tokens"):
-            for value in (True, -1, 1.5, "1"):
-                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
-                    self.load_fixture([self.v2_record(**{field: value})])
-        with self.assertRaises(ValueError):
-            self.load_fixture([self.v2_record(known_cached_input_tokens=101)])
-
-    def test_unknown_cached_tokens_are_supported(self):
-        summary = evals.summarize(self.load_fixture(
-            [self.v2_record(cached_input_tokens=None)]))
-        self.assertEqual(summary["cached_token_complete_runs"], 0)
-        self.assertIsNone(summary["cached_input_tokens"])
-        self.assertEqual(summary["known_cached_input_tokens"], 0)
-
-    def test_unreviewed_record_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self.load_fixture([self.v2_record(accepted=None)])
-        self.assertIn("has not been reviewed", str(ctx.exception))
-
-    def test_missing_run_status_is_rejected(self):
-        record = self.v2_record()
-        del record["run_status"]
-        with self.assertRaises(ValueError) as ctx:
-            self.load_fixture([record])
-        self.assertIn("run_status", str(ctx.exception))
-
-    def test_variant_metadata_may_differ(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
-            baseline.write_text(json.dumps(self.v2_record(
-                variant_metadata={"agent_command_fingerprint": "aaa"})))
-            candidate.write_text(json.dumps(self.v2_record(
-                variant="candidate",
-                variant_metadata={"agent_command_fingerprint": "bbb"})))
-            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
-                       str(baseline), str(candidate)]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0)
-
-    def test_matched_settings_must_still_match(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
-            baseline.write_text(json.dumps(self.v2_record()))
-            candidate.write_text(json.dumps(self.v2_record(
-                variant="candidate", settings={"environment": "other"})))
-            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"),
-                       str(baseline), str(candidate)]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 1)
-
-    def test_legacy_schema_v1_still_loads(self):
-        summary = evals.summarize(self.load_fixture([self.record]))
-        self.assertEqual(summary["total_tokens"], 120)
-        self.assertEqual(summary["tokens_per_accepted_run"], 120)
-
-    def test_comparison_requires_matched_configuration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            baseline, candidate = root / "baseline.jsonl", root / "candidate.jsonl"
-            baseline.write_text(json.dumps(self.record))
-            candidate.write_text(json.dumps(dict(self.record, variant="candidate", model="other")))
-            command = [sys.executable, str(SCRIPTS / "compare-agent-evals.py"), str(baseline), str(candidate)]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 1)
-            candidate.write_text(json.dumps(dict(self.record, variant="candidate", input_tokens=80)))
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0)
-            compared = json.loads(result.stdout)
-            self.assertEqual(compared["candidate"]["total_tokens"], 100)
 
 
 if __name__ == "__main__":

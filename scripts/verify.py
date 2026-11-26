@@ -18,6 +18,12 @@ UNITTEST_RESULT = re.compile(r"^Ran (\d+) tests? in ", re.M)
 UNITTEST_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
 
 
+def workspace_rust_version(root):
+    """Return the MSRV of the virtual workspace (`[workspace.package] rust-version`)."""
+    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    return manifest["workspace"]["package"]["rust-version"]
+
+
 def executed_tests(output):
     """Count executed Rust tests across test binaries, excluding ignored tests."""
     return sum(int(passed) + int(failed) for passed, failed in TEST_RESULT.findall(output))
@@ -60,7 +66,6 @@ def commands(mode, test_filter, root):
     if mode == "guidance":
         return [([sys.executable, "scripts/check-agent-guidance.py"], False),
                 ([sys.executable, "scripts/check-sensitive-logging.py"], False),
-                ([sys.executable, "scripts/check-test-integrity.py"], False),
                 ([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests",
                   "-p", "test_*.py"], "unittest")]
     if mode == "test":
@@ -71,8 +76,7 @@ def commands(mode, test_filter, root):
                   "--", "-D", "warnings"], False),
                 (["cargo", "test", "--locked", "--workspace"], True)]
     if mode == "msrv":
-        manifest = tomllib.loads((root / "Cargo.toml").read_text())
-        version = manifest["package"]["rust-version"]
+        version = workspace_rust_version(root)
         if re.fullmatch(r"\d+\.\d+", version):
             version += ".0"
         return [(["rustup", "run", version, "cargo", "check", "--locked", "--workspace",
@@ -80,8 +84,9 @@ def commands(mode, test_filter, root):
     if mode == "macos":
         if sys.platform != "darwin":
             raise ValueError("macos checks require macOS; this platform cannot supply macOS evidence")
-        return [(["cargo", "test", "--locked", name], True)
-                for name in ("tui::", "execution::", "jobs::")]
+        # The whole workspace, not name filters: filters would skip the symlink,
+        # permission and path-safety tests that matter most on macOS.
+        return [(["cargo", "test", "--locked", "--workspace"], True)]
     if mode == "tui-deps":
         return [([sys.executable, "scripts/check-tui-deps.py"], False)]
     raise ValueError(f"Unknown mode: {mode}")

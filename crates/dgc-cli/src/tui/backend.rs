@@ -448,7 +448,7 @@ fn connected() -> AppEvent {
 
 fn disconnected(cause: &str) -> AppEvent {
     AppEvent::Connection(ConnectionState::Disconnected {
-        reason: format!("{cause} — retrying every second (`dgc-next daemon start` starts it)"),
+        reason: format!("{cause} — retrying every second (`dgc daemon start` starts it)"),
     })
 }
 

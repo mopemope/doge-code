@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Reject raw-content identifiers in LLM diagnostic logging.
+"""Reject raw-content identifiers in diagnostic logging of prompt and agent text.
 
-Scope:
-  src/llm/**
-  src/features/openai_subscription/**
-  src/tui/llm_response_handler.rs
+Scope: every `.rs` file under `crates/*/src` (discovered by glob, so new
+crates are included). Prompts, agent output and permission text cross crate
+boundaries, so the whole source tree is checked rather than a module list.
+The check fails when an expected crate has no `src` directory, so a renamed
+or moved crate cannot turn it into a partial pass.
 
 Macros:
   trace!, debug!, info!, warn!, error!
@@ -25,11 +26,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-SENSITIVE_SCOPE = [
-    ROOT / "src/llm",
-    ROOT / "src/features/openai_subscription",
-    ROOT / "src/tui/llm_response_handler.rs",
-]
+# Crates whose `src` directory must exist. Other `crates/*/src` directories
+# are discovered and checked too; this list only guards against removal.
+EXPECTED_CRATES = ("dgc-protocol", "dgc-daemon", "dgc-client", "dgc-cli")
 
 MACROS = ("trace", "debug", "info", "warn", "error")
 
@@ -203,24 +202,28 @@ def check_invocation(inside: str) -> list[str]:
 
 def collect_scope_files(root: Path) -> list[Path]:
     files: list[Path] = []
-    for scope in SENSITIVE_SCOPE:
-        # Resolve against the provided root (tests use a fixture root).
-        if scope == ROOT / "src/tui/llm_response_handler.rs":
-            candidate = root / "src/tui/llm_response_handler.rs"
-        elif scope == ROOT / "src/llm":
-            candidate = root / "src/llm"
-        else:
-            candidate = root / "src/features/openai_subscription"
-        if candidate.is_file():
-            files.append(candidate)
-        elif candidate.is_dir():
-            files.extend(sorted(candidate.rglob("*.rs")))
+    for src in sorted((root / "crates").glob("*/src")):
+        if src.is_dir():
+            files.extend(sorted(src.rglob("*.rs")))
     return files
 
 
+def missing_crate_sources(root: Path) -> list[str]:
+    return [
+        f"sensitive logging scope is missing crates/{crate}/src; update EXPECTED_CRATES"
+        for crate in EXPECTED_CRATES
+        if not (root / "crates" / crate / "src").is_dir()
+    ]
+
+
 def check_root(root: Path) -> list[str]:
-    errors: list[str] = []
-    for path in collect_scope_files(root):
+    errors: list[str] = missing_crate_sources(root)
+    files = collect_scope_files(root)
+    if not files:
+        # A moved module must not turn the check into a silent pass.
+        errors.append("sensitive logging scope matched no files; update the crate layout")
+        return errors
+    for path in files:
         try:
             source = path.read_text()
         except OSError as exc:

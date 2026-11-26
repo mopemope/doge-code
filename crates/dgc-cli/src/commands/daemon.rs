@@ -1,4 +1,4 @@
-//! `dgc-next daemon {run|start|stop|status}`.
+//! `dgc daemon {run|start|stop|status}`.
 
 use std::path::Path;
 use std::process::ExitCode;

@@ -4,7 +4,7 @@
 最初にここを読み「現在の作業」から再開する。
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
-- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md)
+- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,10 +17,12 @@
 
 ## 現在の作業
 
-- タスク: M3（切替: 新バイナリを `dgc` に改名、旧 `src/` と旧専用依存・ドキュメント・skills を削除）の計画作成
+- タスク: M4 の計画作成
 - 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2（TUI）完了、最終レビューと修正の再レビュー済み（2026-11-26）、PR #185（`feat/orchestrator-m2` → `develop`）でレビュー待ち
-- 次の一手: M3 の計画を作成する（superpowers:writing-plans）。M1/M2 の保留指摘（本ファイル末尾）から、切替前に直すものを選んで計画に含める
+- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3（切替）完了、最終レビューと修正の再レビュー済み、PR #186（`feat/orchestrator-m3` → `develop`）でレビュー待ち
+  ブランチ `feat/orchestrator-m3` で完了（PR は未作成）。
+- 次の一手: M4（プロファイル、スケジュール、heartbeat、ワークスペーススクリプト、レート制限時の引き継ぎ提案）の計画を作成する。
+  M1/M2 の保留指摘から M4 の前提になるもの（例: 一覧の読み直しの積み上がり、送信モードの持ち越し、履歴の末尾読み込み）を選ぶ
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -29,8 +31,8 @@
 |---|---|---|---|
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
-| M2 | TUI | 完了（最終レビュー済み、2026-11-26） | m2-tui |
-| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 未着手 | 未作成 |
+| M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
+| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了 | m3-cutover |
 | M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
 | M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
@@ -72,9 +74,64 @@
 | 4 | ランタイムと起動コマンド | 完了 | `feat(cli): run the TUI against the daemon` |
 | 5 | M2 受け入れ（手動確認、画面記録、ドキュメント） | 完了 | `docs(orchestrator): complete M2 acceptance` |
 
+### M3
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | ビルドと検証の切替（旧ランタイム削除、`dgc` に改名、スクリプト・CI） | 完了 | `refactor!: replace the legacy runtime with the orchestrator as dgc` |
+| 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 完了 | `docs: describe dgc as the orchestrator and drop legacy guidance` |
+| 3 | M3 受け入れ | 完了 | `docs(orchestrator): complete M3 cutover acceptance` |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M3): Emacs 連携（`elisp/`、旧 `dgc exec` に依存）は削除する（ユーザー決定）。旧エージェント評価・修復受け入れツールと関連文書は削除し、AGENTS.md の Product priority をオーケストレーター向けに書き直す（ユーザー決定）。
+- 2026-11-26 (M3 Task 1, 実装者判断): `scripts/check-test-integrity.py` とそのテストは削除した。検査 3 種（`DOGE_SKIP_HTTPTEST`、
+  `Skipping httptest-based test` の文言、`src/llm/...` の HTTP 回帰テストへの `#[ignore]`）はすべて旧ランタイム固有で、新 crate に流用できる
+  汎用検査が無かったため（計画の「汎用検査が無ければ checker ごと削除」）。
+- 2026-11-26 (M3 Task 1, 実装者判断): `scripts/check-sensitive-logging.py` は削除せず付け替えた。対象は `crates/dgc-daemon/src/provider/`、
+  `crates/dgc-daemon/src/agent.rs`、`crates/dgc-daemon/src/agent/`、`crates/dgc-cli/src/tui/`（プロンプト・エージェント出力・権限要求を扱う範囲）。
+  禁止識別子と抽出規則は従来のまま。付け替え時点で 13 ファイル・tracing 呼び出し 76 件に誤検出なし。対象が 0 ファイルになった場合は
+  合格ではなく失敗にした（モジュール移動で無言の no-op にならないように）。
+- 2026-11-26 (M3 Task 1, 実装者判断): `check-agent-guidance.py` のリンク検査は、ルートが git のトップレベルなら追跡済みの Markdown だけを
+  対象にする（CI が見るのは追跡済みファイルだけ。ユーザーの未追跡メモ `docs/ai/audit-2026-10-29.md` は削除した `src/` へリンクしており、
+  触らない約束なので検査対象から外す必要があった）。git でない場合（テストの一時ディレクトリ）は従来どおり全ファイル。
+  skills は 0 件でも合格、`docs/tool-output-contract.md` は存在すれば検査。旧ツールカタログ検査は削除。
+- 2026-11-26 (M3 Task 1): 削除したファイルへのリンクが残る文書（README の Emacs 節、`docs/ai/evaluation.md`、`docs/ai/repair-acceptance.md`、
+  `docs/ai/develop-investigation-2026-10-11.md`）は、リンク記法だけをコード表記に変えた。文書の書き直し・削除は Task 2。
+- 2026-11-26 (M3 Task 1): macOS の集中テスト（`verify.sh macos`）のフィルタは `process_group`、`terminate_`（プロセスグループと
+  SIGTERM→SIGKILL）、`socket`（unix ソケットのモード・残骸・パス長）、`hello`（全接続が通る peer credential 検査を経る RPC）、
+  `autostart`（デーモンの自動起動）、`tui::`。各フィルタが 1 件以上に一致することを Linux で確認済み（下の検証記録）。
+  （最終レビュー修正で置き換え。下の 2026-11-26 M3 最終レビュー修正 2 を参照）
+- 2026-11-26 (M3 Task 2): README は `dgc` オーケストレーターだけを説明する（約 430 行。旧ランタイムの節はすべて削除）。M1/M2 でレビュー済みの
+  節を土台にし、各コマンド・フラグは `target/debug/dgc --help` と各サブコマンドの help、キーと挙動は `crates/dgc-cli` の実装で確認した。
+  追加した記述: 目的（ローカル専用・認証情報に触れない）、要件と動作確認版、`cargo install --locked --path crates/dgc-cli`（実行して確認）、
+  `daemon run` のフォアグラウンドは stderr にログ、オンデマンド起動のデーモンは起動したコマンドの環境を引き継ぐ、デーモン停止で
+  プロバイダのプロセスが終わり再起動後は `stopped`、ロードマップ（M4/M5/フェーズ B）。Codex の権限ダイアログの要約に「コマンド」を足した
+  （`provider/codex.rs` の doc どおり。M2 の文はコマンド承認を書き漏らしていた）。
+- 2026-11-26 (M3 Task 2): AGENTS.md・workflow.md・architecture.md は新 crate の規則と構成に書き直した（skills なし。ガイダンスの表は
+  architecture、workflow、設計書、fixtures README を指す）。削除: 計画の一覧どおりの旧 `docs/ai/` 文書、`docs/tool-output-contract.md`、
+  `docs/mcp-3x-migration.md`、`docs/ai/skills/`（5 skills）と `.agents/skills`・`.claude/skills`・`.opencode/skill` のリンク
+  （ホスト側のディレクトリも残らない）。`docs/ai/fixtures/` には無視対象の `__pycache__` だけが残ったので消した。
+  （修正 1 で、`.gitignore` の skills 用の un-ignore 行と `check-agent-guidance.py` の skills 検査も削除。下記。）
+- 2026-11-26 (M3 Task 2 修正 1、コントローラ裁定): `docs/orchestrator/m2-tui-screen.txt` は説明文（見出し・キャプチャの説明行）だけ
+  `dgc-next` を `dgc` にし、キャプチャした画面は一切書き換えない（キャプチャ 16 のステータス行は `dgc-next daemon start` のまま）。
+  ファイル先頭に、キャプチャは改名前のもので画面はそのままであることを注記した。改名漏れの `rg` 検査はこのファイルのキャプチャを除外する。
+- 2026-11-26 (M3 Task 2 修正 1): ガイダンスの不変条件の記述を実装に合わせた。(a) プロンプト・エージェント本文の保存先は
+  `events.jsonl` だけではなく、エージェントの 0600 の状態ファイル（`events.jsonl`、キューの `queue.json`、既定でプロンプト 1 行目になる
+  title を持つエージェントレコード）。tracing と `daemon.log` には出ない。(b) 権限: dgc は利用者の代わりに承認しない。プロバイダが出した
+  要求は利用者を待ち、interrupt / shutdown のときだけ deny / cancel で取り消す。要求なしで何が動くかはプロバイダの mode と利用者の
+  プロバイダ設定が決める（Codex `workspace-write`、Claude の allow ルール）。(c) オンデマンド起動のデーモンは起動したコマンドの環境を
+  引き継ぎ、クライアントの環境はソケットで送らない。
+- 2026-11-26 (M3 Task 2 修正 1): skills の残骸を削除。`.gitignore` の `.claude/skills/`・`.opencode/skill/`・`.agents/skills/` の
+  un-ignore をやめ、`.claude/`・`.opencode/`・`.agents/` を丸ごと無視する（個人の skills や設定が追跡対象にならないように。`!CLAUDE.md` は残す）。
+  `check-agent-guidance.py` から skills 検査（HOSTS、`valid_description`、`check_skills`）と `docs/tool-output-contract.md` の任意検査を
+  削除し、リンク検査と CLAUDE.md 検査は `check_guidance` に改名して残した。CI・ラッパー一致と workflow.md のコマンド検査はそのまま。
+
+- 2026-11-26 (M3 Task 1): ルート `Cargo.toml` は仮想ワークスペース。`[workspace.dependencies]` の既存エントリは全て新 crate が使っており
+  削除なし。`[profile.*]` はもともと無い。`.gitignore` は追跡していた `.doge/config.toml` の例外を外し、開発機に残る旧状態のために
+  `.doge/` の無視は残した。CI の ripgrep 導入ステップ（旧 search ツールのテスト用）は削除。
 
 - 2026-11-26 (M2): TUI の画面構成はサイドバー（プロジェクト／ワークスペース／エージェントのツリー）+ 選択エージェントのストリームと入力欄（ユーザー決定）。`dgc-next tui` と引数なしの `dgc-next` で起動。
 
@@ -506,6 +563,22 @@
   ときだけそれを閉じて新しいエージェントを選択する。Esc で閉じた後なら、ツリーに追加するだけでカーソルは動かさない（以前は選択が新しい
   エージェントに飛び、利用者の `x`/`r`/`A` がそちらに当たった）。その間に開いた別のフォーム（submitting でない）は閉じない。
   同じ扱いを `workspace.create` にも適用した（ブリーフは agent のみ。カーソルが飛ぶと次の `n` が意図しないワークスペースに作るため、同じ誤対象の類）。
+- 2026-11-26 (M3 最終レビュー修正、コントローラ裁定): 7 項目を修正。(1) CLI テストは `dgc-daemon` の `dgc-fake-provider`（裁定 R3、
+  `dgc` の隣のバイナリ）を使う。`-p dgc-cli` や `--test` 指定ではビルドされず、クリーンビルドでは "dgc-fake-provider is missing" で落ち、
+  古い target では古い偽プロバイダが黙って使われる。workflow.md の CLI 行を「先に `cargo build --locked -p dgc-daemon --bin
+  dgc-fake-provider`、または `bash scripts/verify.sh test <name>`（ワークスペース全体をビルド）」に変え、理由を明記。テストの panic
+  メッセージにもビルドコマンドを書いた。AGENTS.md と README の開発者向け節に同じ落とし穴はなかった（README は verify.sh のみ）。
+  (2) `verify.sh macos` は `MACOS_FILTERS` をやめて `cargo test --locked --workspace` 全体を実行する（0 件拒否は維持）。フィルタでは
+  store の権限・symlink、flock、`--test process` の大半、`no_tcp_listener`、`second_daemon_is_refused`、`foreground_run_stops_on_sigterm`、
+  `run_detach…`、ワークスペースの symlink/パス安全性（macOS では `/var` → `/private/var`）が実行されなかった。上の Task 1 の
+  フィルタ決定を置き換える。workflow.md・AGENTS.md の説明も合わせた。CI の macOS ジョブは `bash scripts/verify.sh macos` のまま。
+  (3) `check-sensitive-logging.py` の対象を `crates/*/src` 全体（glob で発見するので新 crate も入る）に広げた（41 ファイル、既存コードに
+  誤検出なし）。`EXPECTED_CRATES`（protocol/daemon/client/cli）のどれかの `src` がなければ失敗（全部ないときだけでなく）。上の Task 1 の
+  対象範囲の決定を置き換える。AGENTS.md・architecture.md・workflow.md を更新。(4) README の権限ダイアログの無効時間を "about 0.75 s" から
+  "0.5-0.75 s" に。(5) README の保存先を AGENTS.md と同じ記述（`events.jsonl`、`queue.json`、エージェント記録のタイトル）に。
+  (6) README 冒頭の安全性の要約に、interrupt/デーモン停止での要求のキャンセル（deny/cancel）と、`--mode` なしでは provider の既定モードが
+  確認なしに動く範囲を決めることを追記し、Security properties and limits へリンク。(7) 上記の保留項目（M0 の rust-version）を解決済みにした。
+
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
@@ -826,6 +899,80 @@
   使い捨て `DGC_STATE_ROOT`）: 空のツリーに `no projects — add one with:` / `dgc-next project add <path>` が出る。`tmux paste-buffer -p`（bracketed）で
   `q\nx\tA y\n` を貼り付けても TUI は終了せず何も起きない（打鍵の `q` では終了）。TUI を開いたまま別のシェルで `project add` すると、キーを押さずに
   約 6 s 後のツリーに出た。入力欄・フォームへの貼り付けは単体テストのみ（実エージェントでは未確認）。デーモンは `daemon stop` で停止、残存プロセスなし。
+- 2026-11-26 M3 Task 1（Linux、固定ツールチェーン 1.99.0）:
+  - RED（スクリプトのテストを先に更新、`python3 -m unittest discover -s scripts/tests -p 'test_*.py'`）: 177 tests、15 failures / 14 errors
+    （msrv・check_ci・check-tui-deps が `manifest["package"]` を読む、macOS フィルタが旧名、ガイダンスが test-integrity を実行、
+    skills 0 件・未追跡メモの扱い、CI の ripgrep、sensitive-logging の対象が旧 `src/`）。
+  - GREEN: 同コマンドで 40 tests OK（旧評価ツールのテストは削除）。
+  - `cargo build --workspace --offline` で Cargo.lock を更新（510 パッケージ削除、追加・版変更なし）。`cargo build --locked --workspace` PASS。
+  - `cargo tree --workspace | rg -c "sea-orm|reqwest|tree-sitter|rmcp|axum"` → 0 件。`rg -n "dgc-next" crates scripts .github` → 0 件。
+    `rg -n 'CARGO_BIN_EXE_dgc\b|CARGO_BIN_EXE_dgc"' crates` → dgc-cli のテスト 4 箇所。`target/debug/dgc --version` → `dgc 0.1.0`。
+  - 各 crate 単独の `cargo check --locked -p <crate> --all-targets`: 4 crate とも PASS（ルートパッケージの feature 統合が無くなっても成立）。
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all` → `bash scripts/verify.sh rust` | PASS（fmt、clippy `-D warnings`、test 576 executed。旧 `/tmp/.git` 由来・並列 flake の失敗は消えた） |
+    | `bash scripts/verify.sh guidance` | PASS（40 tests） |
+    | `bash scripts/verify.sh msrv` | PASS（rustup 1.94.0） |
+    | `bash scripts/verify.sh tui-deps` | PASS（`dgc-cli` の crossterm 0.29 のみ） |
+    | `bash scripts/verify.sh macos` | 環境で実行不可（Linux。wrapper が拒否） |
+    | macOS の 6 フィルタを Linux で wrapper の `run_check` に通す | 全 PASS（process_group 1、terminate_ 4、socket 8、hello 5、autostart 3、tui:: 256 executed） |
+- 2026-11-26 M3 Task 2（Linux、固定ツールチェーン 1.99.0）:
+  - `cargo build --locked -p dgc-cli` → `target/debug/dgc --help` と全サブコマンドの help で README のコマンド・フラグを照合。
+    `cargo install --debug --locked --path crates/dgc-cli --root <scratch>` → `dgc` だけがインストールされることを確認。
+  - workflow.md の集中テストのコマンドを実行: `-p dgc-protocol` 36、`-p dgc-daemon --test store --test events_log` 35、`--test workspace` 37、
+    `--test agent_manager --test claude_adapter --test codex_adapter` 61、`--test process --test server` 37、`-p dgc-client` 13、
+    `-p dgc-cli --test agent_cli --test daemon_cli --test workspace_cli` 22（いずれも全 PASS）。
+  - `rg -n "dgc-next|src/llm|src/features|FsTools|MutationReceipt|JobManager|RepoMap|dgc exec|mcp-server" README.md AGENTS.md docs/ai
+    docs/orchestrator/m2-tui-screen.txt`（未追跡の `docs/ai/audit-2026-10-29.md` を除く）→ 0 件。
+  - `bash scripts/verify.sh guidance` → PASS（ガイダンス検査、sensitive-logging、40 tests）。Rust のコードとビルド入力は変更していない。
+- 2026-11-26 M3 Task 2 修正 1（Linux）:
+  - RED: 作業ツリーに未追跡の `.claude/skills/foo/SKILL.md` を置くと `bash scripts/verify.sh guidance` が
+    `.claude/skills/foo: stale or noncanonical skill entry` で FAIL（`git status` では `?? .claude/`、追跡され得る状態）。
+    先に追加したテスト `test_local_agent_host_skills_are_not_guidance` は `check_guidance` 未定義で ERROR。
+  - GREEN: unittest 37 tests OK（skills のテスト 4 件を削除、新テスト 1 件）。同じ `.claude/skills/foo` を置いて `verify.sh guidance`
+    PASS（37 tests）、`git status --ignored` は `!! .claude/`。確認後に `.claude/` を削除。
+  - `rg -n "dgc-next|src/llm|src/features|FsTools|MutationReceipt|JobManager|RepoMap|dgc exec|mcp-server" README.md AGENTS.md docs/ai`
+    （未追跡の audit を除く）→ 0 件。`m2-tui-screen.txt` の `dgc-next` はキャプチャ 16 の画面行 1 件だけ。
+- 2026-11-26 M3 Task 3 受け入れ（Linux、固定ツールチェーン 1.99.0、実プロバイダなし）:
+  - インストール: `cargo install --locked --path crates/dgc-cli --root <scratch>/inst` → `inst/bin/dgc` のみ、`dgc --version` は `dgc 0.1.0`。
+    `cargo build --locked -p dgc-daemon` で `dgc-fake-provider` を用意。`config.toml` の `claude_path` / `codex_path` を、`--version` に
+    テスト済みバージョンを返し、それ以外は偽プロバイダ（`claude_turn.jsonl` / `codex_untrusted.jsonl`）を exec するラッパーに向けた。
+    `DGC_STATE_ROOT` はソケット長の上限のため短いシンボリックリンク `/tmp/dgcm3`（スクラッチ配下を指す）。
+  - README のクイックスタート順に、インストールした `dgc` で確認（使い捨ての git リポジトリ。初回コミットは `-c user.name=dgc -c user.email=dgc@example.invalid`）:
+    | 手順 | 結果 |
+    |---|---|
+    | `dgc daemon status`（自動起動） | PASS: pid、protocol_version 1、claude 2.1.332 (tested)、codex 0.172.0 (tested)、終了コード 0 |
+    | `dgc project add <repo>` | PASS: `prj_…  repo  <path>` を表示 |
+    | `dgc workspace create --project … --worktree --branch dgc-m3` | PASS: `<worktrees>/repo-<id>/dgc-m3` に worktree、`ls` に active で出る |
+    | `dgc run --follow "ping the fake"` | PASS: starting → user → turn started → running → assistant: pong → turn completed → idle、終了コード 0 |
+    | `dgc ls` / `dgc logs ID` / `dgc show ID` | PASS: `idle` の 1 行、7 件のイベントが `--follow` の出力と一致、provider_session が出る |
+    | `dgc workspace archive`（クリーン） | PASS: archived、worktree ディレクトリとブランチ dgc-m3 が消え、エージェントも archived |
+    | `dgc workspace archive`（未追跡ファイルあり、2 つ目の worktree） | PASS（拒否）: 終了コード 1、`has uncommitted changes; archiving would delete them`（-32009）。ファイルとブランチ、エージェントは idle のまま |
+    | `dgc workspace archive --force` | PASS: archived、worktree とブランチが消え、`git worktree list` はメインだけ |
+    | `dgc tui`（tmux 専用ソケット、120x30） | PASS: 左ペインに `▾ repo` / `▾ ws local` / `○ claude tui check`（archived の worktree は出ない）、右に stream、下に入力欄、フッター `daemon ok · 1 agents · 0 waiting permission`。`q` で終了コード 0 |
+    | `dgc daemon stop` | PASS: `daemon stopped`、終了コード 0 |
+    終了後 `tmux kill-server`、`pgrep -af 'dgc daemon|dgc-fake|dgcm3|tmux'` は 0 件（残存プロセスなし、tmux ソケットファイルも削除）。dgc のバグは見つからなかった。
+  - 全検証（固定ツールチェーン 1.99.0）:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo fmt --all --check` | PASS |
+    | `bash scripts/verify.sh rust`（標準設定） | PASS（fmt、clippy `-D warnings`、test 576 executed） |
+    | `bash scripts/verify.sh guidance` | PASS（ガイダンス検査、sensitive-logging、37 tests） |
+    | `bash scripts/verify.sh msrv` | PASS（rustup 1.94.0、`cargo check --locked --workspace --all-targets --all-features`） |
+    | `bash scripts/verify.sh tui-deps` | PASS |
+    | `bash scripts/verify.sh macos` | 環境で実行不可（Linux。Task 1 で 6 フィルタを Linux で確認済み） |
+
+- 2026-11-26 M3 最終レビュー修正（Linux、固定ツールチェーン 1.99.0）。スクリプトの変更はテストを先に書いて RED を確認:
+  `python3 -m unittest discover -s scripts/tests` が 1 FAIL（`test_macos_mode_runs_the_whole_workspace_test_suite`: 旧コードは 6 フィルタ）
+  + 12 ERROR（`EXPECTED_CRATES` が未定義）。GREEN: 40 tests OK。
+  | コマンド | 結果 |
+  |---|---|
+  | 旧 CLI 集中コマンド（`CARGO_TARGET_DIR` を空の scratch にして `cargo test --locked -p dgc-cli --test agent_cli`） | 再現: `dgc-fake-provider is missing`（`tests/common/mod.rs:22` の panic） |
+  | 新コマンド（空の scratch target で `cargo build --locked -p dgc-daemon --bin dgc-fake-provider && cargo test --locked -p dgc-cli --test agent_cli --test daemon_cli --test workspace_cli`） | PASS（12 + 7 + 3 passed） |
+  | `python3 scripts/check-sensitive-logging.py` | PASS（41 files、既存コードに誤検出なし） |
+  | `bash scripts/verify.sh guidance` | PASS（40 tests） |
+  | `TMPDIR=/var/tmp bash scripts/verify.sh rust` | PASS（fmt、clippy `-D warnings`、test 576 executed） |
+  | `bash scripts/verify.sh macos` | 環境で実行不可（Linux）。コマンドは `cargo test --locked --workspace` に変更（unit test で確認） |
 
 ## M2 受け入れで見つかった小さな指摘（2026-11-26、修正は未着手）
 
@@ -851,8 +998,9 @@ M2 最終レビューで扱いを決める。（3 件目は修正ラウンド 1 
   `allow --session`・resume 後の policy）は検証記録 B に記録。未検証で残るのは Codex の `thread/resume` の `excludeTurns:true`
   （コードは `true` を送る。記録 `resume_exclude_turns.jsonl` は resume 応答までで、その後のターンは未記録。2026-11-26 に
   「現状は `false`」の誤記を訂正）と、`decline` が提示される承認種別（コマンド承認では提示されなかった）のみ。
-- M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
-  の一致を検査していない。M1 で crate を増やす前に `check_ci` へ一致検査を足すとよい。
+- （M3 で解決）M0 最終レビュー由来: `Cargo.toml` の `[workspace.package].rust-version` とルート `[package].rust-version`
+  の一致を検査していない。M3 でルートの `[package]` がなくなり（仮想ワークスペース）、MSRV は `[workspace.package]` の 1 か所になった。
+  `check_ci` はその値と CI の msrv ジョブ、rust-toolchain を照合する。
 - M0 最終レビュー由来: `test_rust_and_test_modes_cover_workspace` は rust モードの clippy が
   消えても通る（空リストに `all`）。`assertTrue(clippy)` を足す。
 - M0 最終レビュー由来: `crates/dgc-cli/tests/version.rs` は版を直書き。`env!("CARGO_PKG_VERSION")` を使う。
@@ -964,3 +1112,22 @@ M2 はタスクごとのレビューと全体の最終レビュー（修正の�
 - Final: fix wave done 8b24f22..b8795d7 (7 commits); Ruling: item 6 applied to workspace.create too (same class) — accepted
 
 - 2026-11-26 M2 最終検証（固定ツールチェーン 1.99.0）: fmt / clippy -D warnings / ワークスペース全体のテスト（直列、TMPDIR=/var/tmp）3021 passed / 0 failed / guidance / tui-deps / msrv すべて PASS。
+
+## M3 レビューで保留した指摘と判断（2026-11-26、実行台帳から移記）
+
+M3 はタスクごとのレビューと全体の最終レビュー（修正の再レビューまで）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): sensitive-logging fails only if ALL scope entries missing (per-entry check stricter); scope could be crates/*/src at zero cost; macOS filters are name substrings covering ~5/13 process tests (run whole --test binaries instead); git-unavailable fallback untested; unstaged new docs skipped locally
+- Task 2: minor (deferred): README "about 0.75 s" is really 0.5–0.75 s; AGENTS.md 133 lines vs ~120 target (accepted)
+- Task 2: minor (deferred, consider at final): README:334 says prompts/output stored in events.jsonl (also queue.json + title); README:27 omits interrupt/shutdown cancel and provider-mode note
+- Final: minor (deferred): README/AGENTS say daemon stop cancels pending requests "(answered deny or cancel)" — on stop the provider is terminated, only interrupt answers it (safety claim unaffected); workflow.md tui-deps sentence merged into macOS line (cosmetic); macOS full-workspace run only exercised in CI
+
+### コントローラの判断（Ruling）
+
+- Ruling: none at pre-flight
+- Task 2: implementer DONE_WITH_CONCERNS 8b4b24d; Ruling: captured screen content must not be edited — restore capture 16's original 'dgc-next daemon start' line, keep the predates-rename note, exclude captures from the stale-name rg — records must reflect what was on screen — cost if wrong: one stale name in a historical capture
+- Task 2: Ruling: fold Minor 3 (credentials wording: env inheritance; "not sent over the socket") and Minor 4 (remove .gitignore skills un-ignores — personal skills could become trackable — and the skills check/tests in check-agent-guidance) — security-wording and guidance debt left by this task — cost if wrong: none
+- Final: Ruling: macOS mode runs the full workspace test suite (drop name filters) — platform coverage over speed — cost if wrong: longer macOS CI job
+- Final: Ruling: sensitive-logging scope = all crate src dirs via glob, each must exist — reviewer found zero false positives — cost if wrong: future false positives need targeted exemptions

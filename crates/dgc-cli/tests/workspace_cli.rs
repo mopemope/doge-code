@@ -1,4 +1,4 @@
-//! End-to-end tests for `dgc-next project ...` and `dgc-next workspace ...`.
+//! End-to-end tests for `dgc project ...` and `dgc workspace ...`.
 
 mod common;
 
@@ -56,7 +56,7 @@ fn project_and_worktree_workspace_lifecycle() {
         .command(&["--json", "project", "add", "."])
         .current_dir(&repo)
         .output()
-        .expect("dgc-next should start");
+        .expect("dgc should start");
     let project = json(&added);
     assert_eq!(project["path"], repo.to_str().expect("utf8"));
     let project_id = project["id"].as_str().expect("id").to_owned();

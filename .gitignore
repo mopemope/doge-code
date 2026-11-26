@@ -28,13 +28,11 @@ target
 # Local credentials/environment files
 .env
 
-# Project-local agent state (sessions, memory, workflows) is ignored,
-# but the committed dogfood config is tracked.
-.doge/*
-!.doge/config.toml
+# Project-local state of the removed legacy runtime (sessions, RepoMap,
+# logs). Developer checkouts may still hold it; never commit it.
+.doge/
 # Legacy diagnostic log location. Older versions wrote prompt/source/tool
 # content to the repository root; never commit it if one remains.
-# New logs live under .doge/logs/ (already ignored above).
 /debug.log
 .serena
 .amazonq
@@ -47,18 +45,9 @@ backlog
 # Development-script import caches.
 __pycache__/
 
-# Agent skills are shared repo files; un-ignore them even when a global
-# gitignore excludes .claude/ or CLAUDE.md. Local settings stay ignored.
+# CLAUDE.md is shared guidance; keep it even when a global gitignore excludes it.
 !CLAUDE.md
-!.claude
-.claude/*
-!.claude/skills/
-
-# Same for opencode: track skills only; local config/state stays untracked.
-.opencode/*
-!.opencode/skill/
-
-# Codex shares the canonical skill bodies; local agent configuration stays private.
-!.agents/
-.agents/*
-!.agents/skills/
+# Agent host directories hold local settings and personal skills; never track them.
+.claude/
+.opencode/
+.agents/

@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [[bin]]
-name = "dgc-next"
+name = "dgc"
 path = "src/main.rs"
 
 [dependencies]

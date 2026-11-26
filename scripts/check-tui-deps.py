@@ -6,18 +6,18 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+# The root manifest is a virtual workspace; the terminal UI lives in dgc-cli.
+PACKAGE = "dgc-cli"
 
 
 def main():
-    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
     command = ["cargo", "tree", "--locked", "--all-features", "--target", "all",
-               "--package", manifest["package"]["name"], "--prefix", "none"]
+               "--package", PACKAGE, "--prefix", "none"]
     versions = []
     # Dependency requirements (for example ^0.29) are not package-ID versions.
-    # Inspect the actual root dependency and then the full active graph instead.
+    # Inspect the package's direct dependency and then its full active graph instead.
     for options in (["--depth", "1"], []):
         result = subprocess.run(
             command + options, cwd=ROOT, text=True,

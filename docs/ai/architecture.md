@@ -1,289 +1,147 @@
-# Architecture and change routing
+# Architecture
 
-Read only the section relevant to the requested change. Paths are relative to the repository root.
+dgc is a daemon that supervises Claude Code and Codex CLI processes, plus a
+client binary (`dgc`) with a CLI and a terminal UI. This page maps the code. The
+requirements and their reasons are in the
+[design](../superpowers/specs/2026-11-25-orchestrator-design.md); decisions that
+refine or depart from it (limits, timeouts, safety rules) are in
+[PROGRESS "決定事項"](../orchestrator/PROGRESS.md#決定事項). Look a detail up
+there or in the module docs rather than copying it here. User-visible behavior is
+in the [README](../../README.md).
 
-## Module Map
+```
+dgc (CLI / TUI) ── Unix socket, newline-delimited JSON-RPC ── dgc daemon run
+                   (requests/responses + event notifications)   ├ Store, EventLog
+                                                               ├ WorkspaceManager ── git
+                                                               └ AgentManager ─ actor per agent
+                                                                   ├ ClaudeAdapter ── claude -p (stream-json)
+                                                                   └ CodexAdapter  ── codex app-server
+```
 
-| Path | Responsibility |
-|---|---|
-| `src/main.rs` | CLI entry point (clap), mode wiring |
-| `src/execution/` | Execution foundation: policy, lifecycle, bounded output, and policy-free managed process mechanics |
-| `src/execution/runner.rs` | Policy-free managed process mechanics: `ManagedProcessSpec`/`ManagedRunOptions`, bounded capture, timeout/cancellation, process-group cleanup/reap, and future-drop safety guard |
-| `src/execution/process.rs` | ExecutionPolicy-aware LLM adapter: cwd/env/program policy, timeout resolution, and stable `ProcessResult` mapping |
-| `src/execution/lifecycle.rs` | Unix process groups, SIGTERM/SIGKILL, explicit reap, and process-group existence checks |
-| `src/exec.rs` | Non-interactive `exec` orchestration |
-| `src/llm/` | OpenAI-compatible client, agent loop, tool dispatch |
-| `src/llm/tool_def.rs` | Registry of tools exposed to the LLM (`default_tools_def`) |
-| `src/llm/tool_execution/agent_loop.rs` | Main agent loop: iteration, loop detection, compaction triggers |
-| `src/llm/tool_execution/dispatch.rs` | Tool call dispatch (one arm per tool) |
-| `src/llm/tool_execution/dispatch/tools.rs` | Tool call handlers (one fn per tool) |
-| `src/llm/tool_execution/history.rs` | Conversation state only (proactive + reactive compaction, stale tool-result clearing) |
-| `src/llm/runtime_context.rs` | Request-scoped bootstrap hints (Recent Files / automatic memory), first-request-only overlay |
-| `src/llm/context_budget.rs` | Preflight context governor: request footprint, token estimate, pressure classification (pure, no history mutation) |
-| `src/config/context_budget.rs` | Preflight governor config (`[context_budget] mode = auto/observe/off`) |
-| `src/llm/message_utils.rs` | Global tool-output truncation caps (see `docs/tool-output-contract.md`) |
-| `src/llm/tool_runtime.rs` | Shared runtime handles for tool execution |
-| `src/llm/tool_execution/agent_budget.rs` | Main agent loop bounds: `agent_budget.max_iterations` (default 256, config in `src/config/agent_budget.rs`) enforced by the loop in `agent_loop.rs` |
-| `src/llm/tool_execution/subagent.rs` | `task` sub-agent loop (read-only, isolated context); `subagent/budget.rs` tracks finite resources, `subagent/evidence.rs` preserves bounded partial findings |
-| `src/tools/` | Tool implementations (each file exposes a `tool_def()`); `budget.rs` for output budgets; `process.rs` is a thin `execute_process` adapter over `src/execution/` (keep policy/lifecycle logic in `src/execution/`, not in `FsTools`) |
-| `src/analysis/` | tree-sitter parsing, symbol extraction, RepoMap, SQLite DAO, `loop_detector.rs`, `task_sentinel.rs` |
-| `src/analysis/symbol_identity.rs` | Stable semantic IDs (`SymbolId`), content fingerprints, `SymbolIdentityIndex`, source spans |
-| `src/analysis/parser.rs` | File parsing plus single-snapshot `analyze_source` for transactions |
-| `src/features/semantic_edit.rs` | Transactional symbol edit engine (prepare/precondition/candidate/postcondition/shared mutation commit) |
-| `src/provenance/` | Plan-to-Evidence graph: `types.rs` (v8 canonical envelope), `wire/` (`v1.rs` legacy read-only, `v2.rs` legacy read-only, `v3.rs` legacy read-only, `v4.rs` legacy read-only, `v5.rs` legacy read-only, `v6.rs` legacy read-only, `v7.rs` legacy read-only, `v8.rs` current), `store.rs` (v1+v2+v3+v4+v5+v6+v7+v8 merged reads, v8 writes), `query.rs` (file-chain + symbol active/diverged/reverted coverage), `verification.rs` (conservative classifier), `obligations.rs` (obligation matching, binding hash, evidence states), `context.rs` (per-turn attribution, never global), `requirements.rs` (event-sourced state + requirement coverage) |
-| `src/tools/requirements.rs` | `requirements_write` / `requirements_read` (directive-gated writes, budgeted reads with coverage) |
-| `src/tools/mutation.rs` | Unified mutation transactions: snapshots, shared commit writer, receipts, diff/stats |
-| `src/tui/` | ratatui TUI; slash commands under `src/tui/commands/` |
-| `src/session/` | JSON session checkpoints with atomic replacement, exclusive ownership and recovery export |
-| `src/jobs/` | Long-running application jobs: ownership, cancellation, task tracking, graceful shutdown |
-| `src/mcp/` | MCP protocol/transport boundary (rmcp 3.x) |
-| `src/mcp/client.rs` | Outbound MCP transport, negotiated connection lifecycle, timeouts, cancellation, and SDK response handling |
-| `src/tools/remote_tools.rs` | Remote registry, stable aliases, and MCP-result → Doge normalized-result boundary |
-| `src/mcp/server.rs` | Local listener lifecycle / graceful shutdown (`spawn_mcp_server`, `McpServerHandle`, bind-before-spawn) |
-| `src/mcp/service.rs` | MCP tool/resource service (`DogeMcpService`, `McpServiceState` with shared `AppConfig`/RepoMap/build lock) |
-| `src/mcp/http_security.rs` | Local HTTP Host/Origin security + loopback bind validation |
-| `src/mcp/resource_path.rs` | Project resource path validation (`doge://files/`, `doge://symbols/`) |
-| `src/config/` | AppConfig, `.doge/config.toml` loading |
-| `src/features/evidence_report/` | Read-only session evidence collection, Git/workspace snapshots, typed schema v2, Markdown/JSON export |
-| `src/features/verification_snapshot/` | Bounded project code-state endpoint acquisition and comparison for verification records; no coverage inference |
-| `src/features/session_recovery.rs` | Read-only saved/live recovery diagnosis and operator guidance; transitions, retention and export stay session-owned |
-| `src/features/` | `testing.rs` (/test), `workflow.rs` (CLI run), `doc_skill/`, `worktree_manager.rs` |
-| `src/watch.rs` | File watch mode (`dgc watch`) |
-| `src/error_recovery/` | Autonomous error recovery hints |
-| `src/hooks/` | Post-instruction hook system (repomap updates) |
-| `resources/system_prompt.md` | System prompt template (Tera, rust-embed) |
-| `elisp/` | Emacs integration (outside CI; see `elisp/emacs-integration.md`) |
+## Crates
 
-## Responsibility boundaries (develop audit, 2026-10-13)
+| Crate | Kind | Responsibility |
+|---|---|---|
+| `crates/dgc-protocol` | lib | Wire types: JSON-RPC envelopes and error codes, method names and params/results, ids (`prj_`/`ws_`/`agt_`/`perm_` + uuid v7), entities, normalized `AgentEvent`s, size limits and truncation/chunking helpers. No I/O. |
+| `crates/dgc-daemon` | lib + test bin | The daemon: paths, config, lock, store, event log, workspaces, agents, provider adapters, process groups, socket server, subscriptions. `src/bin/dgc-fake-provider.rs` replays scenarios for tests. |
+| `crates/dgc-client` | lib | One socket connection: `hello`, sequential `call`, subscriptions, and autostart (`connect_or_spawn` runs `dgc daemon run` in a new session). |
+| `crates/dgc-cli` | bin `dgc` | Subcommands (`commands/`), human/JSON output with escaping (`output.rs`), and the TUI (`tui/`). |
 
-Ownership, dependency direction and observable contracts determine a split;
-file length alone does not. The audit starts from develop `ed6a967` (PR #134).
+Dependencies are deliberately few; adding one needs a reason in PROGRESS
+"決定事項" (design §5.1).
 
-| Boundary | Owner and allowed direction |
-|---|---|
-| Presentation | `main`, `exec`, `tui`: parse operations, wire modes and render state; call application features and jobs |
-| Shared prompt | `features/agent_prompt`: instruction discovery and composition; uses configuration/assets, never UI state or provider requests |
-| Agent application | `llm/tool_execution/agent_loop`: iteration, request budget, compaction and scheduling; uses provider client and ToolRuntime |
-| Provider adapter | `llm/client_core`, subscription/opencode features: transport, authentication, response/usage binding; do not own UI or saved acceptance |
-| Tool adapter | `tools`, `ToolRuntime`: schemas, scoped operations and mutation/provenance integration; finite process adapters delegate policy/mechanics to execution |
-| Execution/jobs | `execution`: policy-aware adapter → policy-free runner; `jobs`: ownership, cancellation, workspace gates and completion |
-| Durable state | `session`, `provenance`: exclusive session ownership, atomic checkpoints and versioned events; never use RepoMap as authoritative storage |
-| Evidence | evidence-report and verification features: frozen-input acquisition and conservative projections; observed checks do not imply human acceptance |
-| Evaluation entrypoints | live runner owns model/API orchestration; offline repair owns preparation/check/review/read-only handoff; neither imports the other |
-| Evaluation mechanism/policy | both entrypoints → `scripts/agent_eval_process.py` for bounded capture/cleanup; offline review → `repair_acceptance_contracts.py` for pure payload validation |
+## Daemon
 
-The prompt implementation previously lived in TUI despite having no UI inputs.
-CLI, startup discovery, TUI and the agent loop now call the same application
-implementation directly. Discovery order, explicit-path resolution, literal
-rendering and missing/unreadable-file behavior are preserved. Add prompt changes
-and focused characterization tests there; presentation does not own discovery.
+Startup order (`server.rs`, `run_daemon`): instance lock → store → bind the
+socket and set modes → resolve providers (`provider/resolve.rs`: configured
+absolute path or the daemon's own `PATH`, `--version` with a timeout) →
+`AgentManager::recover_on_startup` (agents that were live become `stopped`) →
+accept. Shutdown stops accepting, flushes connections, shuts every agent down
+(provider process groups included), then removes the socket and releases the
+lock.
 
-The offline checker previously dynamically loaded the live-model entrypoint only
-to call `stream_child`. The shared process module now owns stream limits, timeout,
-interruption, reader completion and process-group cleanup. Callers supply commands,
-environments and sinks; it has no provider, API budget or trial accounting imports.
-The live runner retains the imported `stream_child` callable for its orchestration
-seam. Patch shared capture limits in the mechanism module when testing the actual
-capture contract. Review validation consumes payload/kind/machine outcome without
-filesystem writes; the offline entrypoint validates frozen evidence before calling
-it and performs the append-only write afterward.
+- **Paths** (`paths.rs`): XDG locations or `DGC_STATE_ROOT`; directories are
+  created 0700.
+- **Store** (`store.rs`): one versioned JSON file per project, workspace and
+  agent; atomic writes, 0600, no symlink following. Unknown versions are
+  rejected; `list_*` skips broken entries with a warning.
+- **Event log** (`events_log.rs`): per agent `events.jsonl` with one rotated
+  generation; `seq` is monotonic per agent and survives restarts. It holds
+  prompts and agent output; besides it only the agent's `queue.json` (queued
+  messages) and its record (title, by default the prompt's first line) contain
+  prompt text.
+- **Workspaces** (`workspace.rs`): projects, local and worktree workspaces.
+  git runs as a bounded child with a sanitized environment. Removal of a
+  worktree is gated by ownership, `is_managed_path`, and the archive safety
+  check; destructive flags are confined to the force path.
+- **Agents** (`agent.rs`, `agent/actor.rs`): one actor task per live agent owns
+  its `ProviderSession` and message queue (persisted as `queue.json`). The
+  manager talks to actors with commands and oneshot replies. Every event is
+  appended to the log, then broadcast. Provider calls are bounded
+  (`ProviderTimeouts`); a timeout fails the agent.
+- **Processes** (`process.rs`): each provider leads its own process group;
+  terminate is SIGTERM then SIGKILL to the group, and dropping a child kills
+  it. Stdout is read line by line with a size cap; only a stderr tail is kept
+  for error messages.
+- **Handlers** (`handlers.rs`): parse params and map `WorkspaceError` /
+  `AgentError` to RPC errors.
 
-Fresh plans bind the offline entrypoint, process mechanism and review-contract
-source hashes. Previously prepared records retain their original checker identity:
-read-only inspection/summary still reads them without rescoring; new checks and
-review writes require the prepared checker. No serialized schema, CLI option,
-provider permission, evidence status or saved acceptance is migrated by this split.
+## Socket protocol
 
-### Follow-up boundary cleanup (develop `fef3a21`, PR #135 merged)
+`server.rs` accepts connections on the Unix socket, checks the peer UID, and
+requires `hello` (protocol major version) first. Messages are one JSON object per
+line with a size cap; an oversized line closes the connection. Each connection
+has one bounded outbound queue and a writer task; responses wait for room,
+notifications do not. Methods are listed in `dgc-protocol/src/methods.rs`
+(`project.*`, `workspace.*`, `agent.*`, `permission.*`, `subscribe` /
+`unsubscribe`, `daemon.status` / `daemon.shutdown`).
 
-- Remove the unused TUI executor argument from the application loop and all
-  callers. Test-only presentation conveniences are gated to tests; entirely
-  unused UI state/hooks are removed. PTY ownership remains private and retained
-  until session drop. Presentation stays private; no public UI API is added to
-  suppress dead-code warnings.
-- `agent_error::AgentErrorKind` owns the shared failure vocabulary. Provider and
-  execution adapters depend on this neutral type. `llm::LlmErrorKind` is a type
-  alias, preserving variants, display and `anyhow` downcast identity. New shared
-  failure categories belong there, not in an aggregate presentation error.
-- `utils::text_budget` owns Unicode slicing/formatting and `BudgetedText`.
-  Tool JSON-envelope budgets remain in `tools::budget`, which re-exports existing
-  text helpers for compatibility; provenance uses the neutral formatter directly.
-- `utils::bounded_file` owns bounded regular-file byte acquisition, handle
-  validation and Unix nonblocking open. Callers own symlink policy, limits,
-  UTF-8/JSON interpretation, diagnostics and completeness semantics. Prompt
-  acquisition allows regular symlink targets as before, at most 1 MiB; rejected
-  input uses the base prompt and existing error logging, never partial text or
-  a different default instruction file.
-- Provenance display history retains 256 KiB/event, 8 MiB total, 4,096 JSON inputs.
-  General acquisition uses 8 MiB/event, 128 MiB total and 65,536 directory entries
-  across all wire versions; limit failure returns Err, never the loaded subset.
-  Parse failures still produce historical warnings; consumed invalid bytes count
-  toward the shared total. No-follow checks reject symlinked event directories,
-  symlinked event files and special files.
-- `ProvenanceStore::load_complete(expected_session_id)` separates authoritative
-  reads from tolerant historical acquisition. Current application reads additionally
-  reject the session's missing-write flag. Requirements/plan state writes reject
-  incomplete history before publication. Verification keeps literal directive and
-  execution facts, withholding inferred plan/requirement/change/obligation links.
-  Mutation predecessor failure leaves the source committed and chain unlinked;
-  it marks incomplete only after successful event append so append failure is
-  still counted once by its existing caller.
-- `provenance_read` may return historical events with warnings, but incomplete
-  history returns unknown coverage and unknown current lifecycle, without inferred
-  classification IDs. Foreign-session events are omitted. Preserve source records,
-  version priority and schema; an error is not permission to delete/migrate them.
+Subscriptions (`subscription.rs`) forward `event` notifications for one agent
+or all agents. A one-agent subscription can backfill from `since_seq` before
+going live without gaps or duplicates. A client that cannot keep up gets one
+`lagged` notification and the subscription ends; it recovers with `agent.events`
+and subscribes again. `agent.events` pages are bounded by count and bytes, so
+clients page until an empty page.
 
-Remaining scope: regular-file OS I/O is synchronous; nonblocking open and byte
-bounds do not provide a cancellation deadline, FUSE/disk latency guarantee or OS
-sandbox. Optimistic acquisition does not authenticate files or make history
-atomic against concurrent edits. Full asynchronous acquisition and explicit
-history-repair UX require separate design; this cleanup does not implement them.
+## Provider adapters
 
-Large application loops, FsTools and provider clients remain intact because this
-audit did not establish an independent ownership seam warranting a full rewrite.
-Their shared request-budget ledger, borrowed tool handles and per-run cancellation
-must survive nested calls. Provider-neutral conversation schemas under `llm`
-also appear in session checkpoints: moving namespaces is not itself a reason to
-change persisted records. Job completion order, mutation receipts, frozen wire
-versions and conservative evidence classification remain separate contracts with
-existing regression coverage. Add an abstraction only when it owns a real
-responsibility or supports another consumer, never as a pass-through layer.
+`provider/mod.rs` defines `ProviderAdapter` / `ProviderSession` and the contract
+every adapter keeps (no text in errors, one `Exited`, nothing for an interrupted
+turn after `interrupt` returns, bounded calls). Adapters translate a CLI's wire
+format into normalized `ProviderEvent`s; the manager turns those into
+`AgentEvent`s and state changes.
 
-### Failure recovery milestone
+- **Claude** (`provider/claude.rs`): `claude -p` with stream-json input and
+  output and `--permission-prompt-tool stdio`, so tool permission requests
+  arrive as control requests on stdout and are answered on stdin. Claude cannot
+  steer; the manager falls back to interrupt-and-send.
+- **Codex** (`provider/codex.rs`): `codex app-server` over stdio JSON-RPC
+  (`thread/start` or `thread/resume`, `turn/start`, `turn/steer`,
+  `turn/interrupt`). Approval server requests become permission requests;
+  unknown server requests are refused with an `error` event. The `--mode` maps
+  to an approval policy and sandbox.
 
-`features/session_recovery` reads saved checkpoints through `SessionStore::open_existing`
-or receives an idle live checkpoint; it reports static bounded status categories,
-never conversation content, tool arguments, provider bindings, API calls or raw parse
-errors. `session::cli` and TUI route diagnosis to it. Session formatting presents
-recorded flags only; a false flag is not a completeness claim. Full IDs can be read
-without replaying unrelated corrupt checkpoints; prefix resolution remains bounded.
+Wire shapes come from recordings of the tested CLI versions in
+`crates/dgc-daemon/tests/fixtures/` (see its README). Tests replay recorded or
+synthetic scenarios through `dgc-fake-provider`; they never start the real CLIs.
 
-Actual Go/Rust local fixtures cover failed tests, committed edits, failed responses,
-explicit same-session resume and write-gap refusal. All endpoint responses are fixed
-loopback scripts, so this is tool/transport/recovery validation, not live model
-performance or human acceptance. New check outcomes never heal old history.
+## TUI
 
-Fresh recovery uses existing explicit new-session transitions, including idle,
-old-flush, capacity/save refusal, history reset and verification-ID invalidation.
-It adds no automatic fork, migration, retry or flag clear. Preserve raw old records
-outside managed retention before transition; checkpoint exports and evidence
-projections have their existing, distinct meanings. No atomic-store redesign or
-speculative filesystem deadline engine is part of this milestone.
+`crates/dgc-cli/src/tui/` follows a pure model/update/render split:
 
-## Common Change Patterns
+- `state.rs`: `AppState` (tree, selection, streams, drafts, dialogs,
+  connection, status). Nothing else holds UI state.
+- `update.rs`: `update(state, AppEvent) -> Vec<Effect>`; the only place state
+  changes. Key handling, history loading with generations, snapshot refresh,
+  permission dialog arming and `seen_end` live here.
+- `render.rs`: draws a frame from `&AppState` only.
+- `layout.rs`: pure geometry, wrapping and width measurement shared by render
+  and update (`permission_layout`), so what is drawn and what `a`/`s` accept
+  cannot disagree.
+- `input.rs`: key mapping and the line editor (paste handling).
+- `backend.rs`: owns the RPC and subscription connections, executes `Effect`s,
+  turns results and notifications into `AppEvent`s, reconnects after a
+  disconnect, and bounds every call (reads and mutating calls separately).
+- `mod.rs`: the runtime: terminal setup and restore (raw mode, alternate
+  screen, bracketed paste, panic hook, signals), the input thread, ticks, and
+  the loop that feeds events to `update`, hands effects to the backend and
+  draws.
 
-### Adding a new tool
+The permission-safety rules the TUI must keep are listed in
+[AGENTS.md](../../AGENTS.md#tui-permission-safety).
 
-Use the [registration checklist](../tool-output-contract.md#tool-registration) and
-[dgc-tool-dev](skills/dgc-tool-dev/SKILL.md). The output contract owns the checklist;
-keep schema, dispatch, tests, and README in sync.
+## Security boundary
 
-### Changing the system prompt
-
-Edit `resources/system_prompt.md` (Tera template: `{{ os }}`, `{{ project_dir }}`). It is embedded at compile time via rust-embed (`src/assets.rs`) — rebuild to pick up changes. Project instructions files (`AGENTS.md` / `QWEN.md` / `GEMINI.md`, or `project_instructions_file` config key) are appended at runtime (`src/features/agent_prompt.rs`).
-
-`llm::runtime_context::advisory_context_message` quotes TUI bootstrap data in
-JSON. It retains system-shaped internal messages for durable filtering;
-`RequestMessages` lowers that explicit envelope to user role on the provider
-request without mutating canonical history. The main budget estimator measures
-the projected form. Non-streaming requests, tools-free budget finalization, and
-the legacy streaming entry point apply the same projection. Runtime file/memory
-hints are user-role data overlays on the first request only. Never persist a
-projected request as canonical conversation. See [policy](instruction-policy.md)
-for trust boundaries, discovery, and limitations.
-
-### RepoMap / analysis changes
-
-Symbol extraction lives in per-language collectors under `src/analysis/` (e.g. `rust_collector.rs`). Query-side budget/density logic is in `src/tools/search_repomap/repomap/repomap_filter.rs`. Tests for analysis live in `src/analysis/tests.rs`.
-
-Bump `cache::REPOMAP_ANALYSIS_REVISION` when grammar dependencies, extension
-routing, collectors, or the persisted analysis format change. The revision is
-saved transactionally in `repomap_metadata`; missing or mismatched revisions
-force a full rebuild rather than reuse or incremental update. This table belongs
-only to rebuildable analysis state.
-
-### Inline review feedback
-
-`src/features/review_feedback/` owns immutable hunk ranges/content identities and
-typed feedback batches. Optional `Anchor.selection` derives selectable diff rows,
-old/new coordinates and exact excerpt identity from the retained full hunk;
-validation recomputes it before dispatch. Absent selection remains a whole-hunk
-comment and serializes as before. Distinct selections can share a hunk. The `l`
-modal freezes its source, consumes prompt shortcuts/paste and cancels if a new
-review arrives before editing. History displays selected coordinates read-only. `src/tui/review_feedback.rs` owns a separate modal editor,
-ephemeral draft and display projection. Comment input takes priority over normal
-prompt shortcuts; saving cannot dispatch an instruction. `FsTools` validates the
-sealed source capture non-destructively before confirmation/dispatch and again
-inside the managed workspace-write job, before model work or directive recording.
-`agent_job.rs` reuses conversation/plan and the existing loop. Generated target
-metadata is assistant evidence; exact comment text is recorded as observed user
-input. Original review context and submitted revision/job identity remain separate
-from the repair capture, so repair rollback cannot undo the source run. Terminal
-failure overrides any preliminary completion display; comments are not resolution
-records. Keep this path typed rather than passing feedback through slash/shell
-routing. `history.rs` bounds archived batch/source snapshots by count and serialized
-bytes without automatic eviction. Explicit `n` validates the current live source
-before archiving and replacing the active batch; empty source validation does not
-require a model client. The read-only `h` overlay consumes editing/submit/rollback
-keys and mouse scrolling. Delayed outcomes update archived display metadata only
-when batch, revision and producing job match, never active authority. History is
-process-local; confirmed deletion removes only the selected record.
-`feedback_comments.rs` manages only the active batch with frozen batch/revision
-identity. Exact saved anchors drive navigation/edit/delete; selectable-row indexes
-are mapped back to raw source rows while excluding newline markers. Deletion
-requires Press confirmation and revalidates the live source at that point. Stale
-navigation is view-only; busy/rollback blocks navigation and mutations. The editor
-owns input ahead of its retained list; saves replace an existing target in place,
-then refresh list revision/selection. Archive keys remain consumed by history.
-No new LLM tool or persistent wire format is introduced.
-
-### Adding a TUI slash command
-
-1. Implement the handler in `src/tui/commands/handlers/slash_commands/<name>.rs` (see existing files; `help.rs` owns the help listing).
-2. Register the command in the slash-command dispatch there (`mod.rs` wires handlers).
-3. Document it in the README slash-command table.
-
-## Known Pitfalls
-
-- Two workflow formats coexist: `.doge/workflows/*.yml` (shell `run:` steps and structured `program:`/`args:` steps, run by the `run_workflow` tool in `src/tools/workflow.rs`) and `.doge/workflows/*.md` (LLM-executed steps, run by the CLI `run` subcommand via `src/features/workflow.rs`). Keep both in mind; do not "fix" one to match the other without checking callers.
-- `fs_read` accepts both `start_line` (legacy) and `cursor` (preferred, 1-based). New code should use `cursor`. Note `search_repomap`'s cursor is 0-based — the two conventions currently differ.
-- `.doge/`, `target/`, and agent-generated files (`GEMINI.md`, `QWEN.md`, etc.) are excluded from RepoMap via `.dogeignore`.
-- Workflow files and session state under `.doge/` are project-local; never commit them.
-- `search_history` is a legacy internal dispatch route, deliberately absent from default schemas. Routing exceptions are classified in `docs/ai/tool-routing-exceptions.json`; new default tools require the full registration checklist.
-- Tests must never write fixtures to the repo root (e.g. a `temp/` directory). Use `tempdir()` and explicit project roots as described in AGENTS.md.
-- The README tool list must stay in sync with `default_tools_def` (`src/llm/tool_def.rs`); new tools require a README entry (checklist step 6).
-- `.doge/repomap.sqlite` is rebuildable analysis/cache state and may be recreated during database recovery. Never store durable session/provenance state there.
-- Legacy `action_log` is not the provenance store. Do not build new durable features on legacy `action_log`/repomap DB.
-
-## Configuration & Secrets
-
-- Config: environment variables + XDG-compliant TOML. Project overrides go in `.doge/config.toml` (top-level `model`/`base_url`/`project_instructions_file`/`resume`/`auto_compact_prompt_token_threshold`, `[llm]`, `[context_budget]`, `[subagent]`, `[agent_budget]`, `[mcp_server]` (local listener), `[watch]`, `[execution]`, `[tool_routing]`, `[reasoning]`, `[[mcp_servers]]` — the MCP servers key is an array of tables for remote/outbound endpoints). Loading is read-only and fail-closed: missing config uses runtime `Default`s without creating files, existing invalid config is a startup error without mutation, and `DOGE_CODE_CONFIG` is authoritative when set. Structured stdio uses `command`, `args`, and literal `[mcp_servers.env]`; `address` is HTTP or a deprecated stdio fallback.
-- Startup treats project settings as untrusted: new compatible API destinations require an explicit CLI/environment/global endpoint; endpoint/key/provider origins are retained. Project overrides cannot expand global process/path capabilities or enable/redirect MCP connections. See README for conservative subset rules and migration instructions. These guards run before client/credential resolution and do not implement OS isolation or a trust store.
-- Never commit API keys; use `OPENAI_API_KEY` or `--api-key` locally.
-- Tree-sitter language packs in `resources/tree-sitter-language-pack/` are vendored; update carefully and note version bumps in the PR description.
-
-## Read-only worker resource contract
-
-`[subagent]` is user/admin configuration, merged default <- user <- project per
-field and rejecting explicit zeros at startup. Each worker has an independent
-`ContextBudgetGovernor`, including provider-specific Responses measurement, even
-when main context optimization is off. The selected model's existing effective
-compaction limit supplies both the request ceiling and the automatic cumulative
-token budget. Usage snapshots attribute exactly one provider usage record;
-missing or ambiguous usage falls back to local estimates. Cached/reasoning usage
-is never discounted or added twice. Only main last-request telemetry is restored;
-session usage totals keep worker requests.
-
-Budgets are checked before starting new operations; elapsed time uses monotonic
-safe boundaries and never drops an active tool solely on expiry. Oversized tool
-batches execute no prefix and skipped calls receive paired synthetic outputs.
-Budget/context stops return partial success with typed stable reasons. One
-budget-checked, tools-free finalization may run, then bounded local evidence is
-used on failure. Cancellation and non-context research provider errors propagate.
-No worker persistence, Observation Store, or LLM compaction is introduced.
-
-Explicit local review judgments live in `src/features/human_review/` and a separate
-session-scoped `human-review/v1/decisions/` append-only store. `session review`
-is an operator CLI with TTY confirmation; it is not an LLM tool or remote approval.
-Evidence reports bind decisions to versioned snapshot tokens and recheck stale
-correspondence; command outcomes and human judgments remain independent.
+The trust boundary is the user's UID (design §9). Inside it every connection is
+equal, including agents started by dgc. Outside it the daemon refuses: no
+network listener, a 0700 socket directory and 0600 socket, and a peer UID check
+on every connection. dgc never reads provider credentials; providers inherit the
+daemon's environment. `tracing` (and so `daemon.log`) carries ids and states only;
+prompt and agent text is stored only in each agent's 0600 state files
+(`events.jsonl`, `queue.json`, the agent record's title), and
+`scripts/check-sensitive-logging.py` guards every crate source directory. dgc never
+approves on the user's behalf: requests the provider raises wait for the user,
+and only an interrupt or shutdown cancels them (answered deny or cancel). What
+runs without a request is decided by the provider's mode and the user's provider
+settings; auto-approve modes are used only when chosen explicitly and are always
+shown. Every human-readable surface escapes daemon-supplied text before display.

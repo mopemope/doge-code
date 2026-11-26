@@ -1,4 +1,4 @@
-//! `dgc-next workspace {create|ls|archive}`.
+//! `dgc workspace {create|ls|archive}`.
 
 use std::process::ExitCode;
 

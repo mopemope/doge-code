@@ -1,7 +1,9 @@
-dgc-next tui screen record (M2 acceptance, 2026-11-26)
-Captured with `tmux capture-pane -p` at 120x32 (except capture 19), real dgc-next binary in a real pty,
+dgc tui screen record (M2 acceptance, 2026-11-26)
+Captured with `tmux capture-pane -p` at 120x32 (except capture 19), real dgc binary in a real pty,
 fake provider (dgc-fake-provider replaying a hand-written SYNTHETIC scenario, not a Claude recording),
 throwaway git repository, scratch DGC_STATE_ROOT. Colors and highlights are not part of the text capture.
+The captures predate the M3 rename of the binary to `dgc`. These notes use the new name; the captured
+screens are left exactly as captured, so the status line of capture 16 still shows the old binary name.
 
 ====================================================================================================
 1. Start with no projects: empty tree, daemon ok. (`w` here only says `select a project first` in the status bar.)
@@ -508,7 +510,7 @@ daemon ok · 2 agents · 1 waiting permission
 daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  x stop
 
 ====================================================================================================
-15. After `q` (agents keep running) and a new `dgc-next tui`: tree and stream are loaded again (second agent selected, Enter opened input focus).
+15. After `q` (agents keep running) and a new `dgc tui`: tree and stream are loaded again (second agent selected, Enter opened input focus).
 ====================================================================================================
 ┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude idle Second agent: needs permission ──────────────────────────┐
 │▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
@@ -544,7 +546,7 @@ daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Enter open  i t
 daemon ok · 2 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/PgDn scroll  Esc back
 
 ====================================================================================================
-16. `dgc-next daemon stop` while the TUI is open: status bar shows the disconnect reason and that it retries every second (text is cut at 120 columns).
+16. `dgc daemon stop` while the TUI is open: status bar shows the disconnect reason and that it retries every second (text is cut at 120 columns).
 ====================================================================================================
 ┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude idle Second agent: needs permission ──────────────────────────┐
 │▾ app                             ││    echo 'step 24: preparing synthetic fixture file part 24' >> hello.txt         │
@@ -580,7 +582,7 @@ daemon ok · 2 agents · 0 waiting permission  │  Enter send  Tab mode  PgUp/P
 daemon disconnected: the daemon closed the connection — retrying every second (`dgc-next daemon start` starts it) · 2 ag
 
 ====================================================================================================
-17. `dgc-next daemon start`: the TUI reconnected by itself; both agents now show as stopped (the daemon restart ended their provider processes).
+17. `dgc daemon start`: the TUI reconnected by itself; both agents now show as stopped (the daemon restart ended their provider processes).
 ====================================================================================================
 ┌ dgc ─────────────────────────────┐┌ agt_…00a642 claude stopped Second agent: needs permission ───────────────────────┐
 │▾ app                             ││    echo 'step 25: preparing synthetic fixture file part 25' >> hello.txt         │

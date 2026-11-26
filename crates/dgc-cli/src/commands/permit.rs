@@ -1,4 +1,4 @@
-//! `dgc-next permit {ls|allow|deny}`: answer agents' permission requests.
+//! `dgc permit {ls|allow|deny}`: answer agents' permission requests.
 
 use std::process::ExitCode;
 
