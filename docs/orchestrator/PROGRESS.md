@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M2 Task 1（デーモン側の前提修正）
+- タスク: M2 Task 2（TUI の状態と更新（純粋部分））
 - 状態: 未着手
-- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）
-- 次の一手: M2 計画の Task 1 Step 1 から始める（ブランチ `feat/orchestrator-m2`）
+- 済んだこと: M0（PR #183）、M1（PR #184）マージ済み。M2 計画作成（画面構成はサイドバー + ストリームをユーザーが選択、2026-11-26）。M2 Task 1 完了（EventLog ハンドル上限、TurnStarted 記録）
+- 次の一手: M2 計画の Task 2 Step 1 から始める（ブランチ `feat/orchestrator-m2`）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -66,7 +66,7 @@
 
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
-| 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 未着手 | |
+| 1 | デーモン側の前提修正（EventLog ハンドル上限、TurnStarted 記録） | 完了 | `fix(daemon): bound event log handles and record turn starts` |
 | 2 | TUI の状態と更新（純粋部分） | 未着手 | |
 | 3 | 描画 | 未着手 | |
 | 4 | ランタイムと起動コマンド | 未着手 | |
@@ -361,6 +361,15 @@
   `git status` にも `-c` が伝わるため、判定を経ずに呼ばれても未追跡ファイルを消さない）。`status.showUntrackedFiles=no` の設定下で
   未追跡ファイルだけの worktree が消えた穴を塞ぐ。gitignore されたファイルは git 上「作業」ではないため force なしでも消える（README に記載）。
   コントローラ裁定: main へマージ済みでも base より先のコミットがあれば `--force` が必要（README に明記）。
+- 2026-11-26 (M2 Task 1): `AgentManager` の EventLog ハンドルキャッシュ（`Shared::logs`）を `LogCache` にして上限を設けた。
+  生きているエージェント（actor あり）のハンドルは常に保持し、非 live のエージェントは直近に使った最大 64 件
+  （`MAX_IDLE_LOG_HANDLES`）まで。超過分は最も古いものから閉じ、archive 時はそのエージェントのハンドルを閉じる。
+  他で使用中（`Arc::strong_count > 1`）のハンドルは追い出さない。`emit`（追記+broadcast）と `events_page`（読み出し）が
+  同じログロックを使う不変条件は、追い出しが「誰も持っていないハンドルだけ」を `logs` ロック下で外すことで保たれる。
+  テスト用に `AgentManager::open_log_handles()`（`#[doc(hidden)] pub`）を追加。
+- 2026-11-26 (M2 Task 1): `EventKind::TurnStarted` を、ターンを始める `UserMessage` の直後に 1 回記録する（初期プロンプト、
+  Idle からの送信、キュー先頭の送信（ターン完了時・resume 後）、interrupt_and_send）。steer（実行中ターンへの合流）では記録しない。
+  長文でチャンク分割された `UserMessage` は最後のチャンクの後に 1 回。
 
 ## 検証記録
 
@@ -541,6 +550,15 @@
     | `cargo test --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli`（2 回） | 2 回とも PASS（295 passed / 0 failed） |
     | `bash scripts/verify.sh guidance` | PASS（193 tests） |
   旧 `src/` の全体テストと実 CLI での手動確認（Codex の `item/permissions/requestApproval` は実機未記録）は未実施。
+- 2026-11-26 M2 Task 1（固定ツールチェーン 1.99.0）。RED: `cargo test --locked -p dgc-daemon --test agent_manager` が新規 4 テスト
+  と更新した `create_runs_initial_prompt_then_idle` で FAIL（TurnStarted 欠落、ハンドル 103 件）。GREEN 後:
+    | コマンド | 結果 |
+    |---|---|
+    | `cargo test --locked -p dgc-daemon --test agent_manager` | PASS（27 passed） |
+    | `cargo test --locked -p dgc-daemon --test server` | PASS（23 passed、変更なし） |
+    | `cargo test --locked -p dgc-cli --test agent_cli` | PASS（12 passed、変更なし） |
+    | `cargo fmt --all --check` | 差分なし |
+    | `cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings` | PASS |
 
 ## 保留中の小さな改善
 
@@ -579,7 +597,7 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Task 6: minor (deferred): test guard may miss a still-booting daemon after a failed run; VersionMismatch after spawn reported as SpawnTimeout; Client::call has no overall timeout (wedged daemon hangs CLI); dgc-cli uses tokio::sync without declaring `sync` feature (unification); missing tests (symlinked daemon.log, log 0600, id-0 error path, pending-notification overflow); pre-existing daemon.log mode not tightened; stop's lock probe can make a concurrent autostart lose
 - Task 7: minor (deferred): missing project dir leaves workspace un-archivable → project never removable (consider re-grade at final review); worktree_requires_a_git_repository can't distinguish non-repo vs subdir and manager git inherits global config/hooks in tests; git timeout kills only git not its descendants; failed branch delete only warns (no response field)
 - Task 7: minor (deferred): `git worktree list -z` needs git >= 2.36 (no fallback/doc; fails closed); locked worktree with missing dir makes archive fail permanently; lib test name says prefix but checks suffix
-- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
+- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth; M2 Task 1 で解消); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
 - Task 8: minor (deferred): biased select can starve commands under a flooding provider (fairness cap suggested); drain loop has no yield/bound (use len snapshot); no test for Exited during drain; caller gets timeout error before stored state flips (≤5s)
 - Task 9: minor (deferred): Codex command deny never recorded — Deny mapping on commands unexercised (ruling: cancel when decline not offered)
 - Task 10: minor (deferred): tests hard-code sorted-key output (preserve_order unification risk); uncaptured ${name} in expect matches literally (should exit 2); capture line extra keys ignored; stdin read error treated as EOF; lossy UTF-8 on input
@@ -589,10 +607,10 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Task 12: minor (deferred): steer fallback logs only debug (could hide a malformed steer); per-turn usage correlation untested
 - Task 13: minor (deferred): lagged next_seq imprecise for live-only subscriptions; concurrent resume can leave an agent running in an archived workspace; --version probe buffers unbounded stdout and kills only direct child (reuse process-group kill); missing tests (unsubscribe stops delivery, all-agents subscription, follow exit 1 on Failed / WaitingPermission continues); resolve.rs ETXTBSY flake risk; idle subscription connections accumulate after lag
 - Task 13: minor (deferred): non-autostart CLI calls during daemon startup block up to 15s then HelloTimeout; connect_or_spawn worst case can exceed SPAWN_WAIT; bind→chmod umask window (mitigated by 0700 dir; umask(0o177) around bind would harden)
-- Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it; idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
-- Task 14: minor (deferred): README lists `turn started` (never emitted) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
+- Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it (M2 Task 1 で解消); idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
+- Task 14: minor (deferred): README lists `turn started` (never emitted; M2 Task 1 で emit するようになった) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
 - Task 14: minor (deferred): README "does not log prompt text" true for daemon.log but events.jsonl stores prompts too — wording should say so
-- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (fix before M4); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
+- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (M2 Task 1 で解消); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
 - Final: minor (deferred): create_workspace rollback uses branch -d (fresh branch can be left behind with --base other); structural test only matches os("--force")/os("-D") form; second archive check after agents archived can refuse (no loss); discard_queue save failure only warns; ToolCall.name / usage unbounded at source; pre-fix oversized legacy events end logs with an error; gitignored files removed by non-force archive (documented)
 
 ### コントローラの判断（Ruling）

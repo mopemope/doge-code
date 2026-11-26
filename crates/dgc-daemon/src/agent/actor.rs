@@ -240,8 +240,16 @@ impl Actor {
         debug!(agent_id = %self.agent.id, ?state, "agent state changed");
     }
 
+    /// Record a message merged into the running turn.
     fn record_user(&self, text: String, behavior: SendBehavior) {
         if let Err(err) = self.shared.emit_user(&self.agent.id, &text, behavior) {
+            warn!(agent_id = %self.agent.id, error = %err, "could not record agent event");
+        }
+    }
+
+    /// Record a message that starts a turn: the message, then `TurnStarted`.
+    fn record_turn_start(&self, text: String, behavior: SendBehavior) {
+        if let Err(err) = self.shared.emit_turn_start(&self.agent.id, &text, behavior) {
             warn!(agent_id = %self.agent.id, error = %err, "could not record agent event");
         }
     }
@@ -315,7 +323,7 @@ impl Actor {
         if let Err(err) = save_queue(&self.queue_path, &self.queue) {
             warn!(agent_id = %self.agent.id, error = %err, "could not persist agent queue");
         }
-        self.record_user(item.text, item.behavior);
+        self.record_turn_start(item.text, item.behavior);
         Ok(true)
     }
 
@@ -397,7 +405,7 @@ impl Actor {
                 )
                 .await;
                 self.note(sent).map_err(provider)?;
-                self.record_user(text, behavior);
+                self.record_turn_start(text, behavior);
                 self.set_state(AgentState::Running);
                 Ok(SendOutcome::Sent)
             }
@@ -448,7 +456,7 @@ impl Actor {
             self.set_state(AgentState::Idle);
             return Err(provider(err));
         }
-        self.record_user(text, behavior);
+        self.record_turn_start(text, behavior);
         self.set_state(AgentState::Running);
         Ok(SendOutcome::InterruptedAndSent)
     }
