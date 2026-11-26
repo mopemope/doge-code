@@ -8,7 +8,7 @@ use dgc_protocol::methods::{
     WorkspaceCreateParams,
 };
 use dgc_protocol::model::{
-    Agent, AgentState, Decision, Isolation, PendingPermission, SendBehavior, Workspace,
+    Agent, AgentState, Decision, Isolation, PendingPermission, SendBehavior, SendOutcome, Workspace,
 };
 
 use super::input::{Key, KeyInput};
@@ -177,7 +177,7 @@ fn on_tick(state: &mut AppState) {
     {
         *ticks_until_armed = ticks_until_armed.saturating_sub(1);
     }
-    if state.status.error.is_some() {
+    if state.status.error.is_some() || state.status.notice.is_some() {
         state.status.error_ticks += 1;
         if state.status.error_ticks >= ERROR_TICKS {
             state.clear_error();
@@ -326,7 +326,14 @@ fn on_rpc_ok(
 ) {
     state.clear_error();
     match request {
-        RequestTag::Send { .. } => state.unsent = None,
+        RequestTag::Send { .. } => {
+            state.unsent = None;
+            // A queued message shows in the stream only once delivered:
+            // say it was accepted, or the user may send it again.
+            if let Ok(outcome) = serde_json::from_value::<SendOutcome>(value["outcome"].clone()) {
+                state.set_notice(outcome_notice(outcome));
+            }
+        }
         RequestTag::Respond { permission_id } => remove_permission(state, &permission_id),
         RequestTag::CreateAgent => {
             if matches!(state.dialog, Some(Dialog::NewAgent(_))) {
@@ -363,6 +370,16 @@ fn on_rpc_ok(
         | RequestTag::Resume { .. }
         | RequestTag::Archive { .. }
         | RequestTag::LoadHistory { .. } => {}
+    }
+}
+
+/// The status line's word on how `agent.send` delivered a message.
+fn outcome_notice(outcome: SendOutcome) -> &'static str {
+    match outcome {
+        SendOutcome::Queued => "queued \u{2014} delivered when the turn ends",
+        SendOutcome::Sent => "sent",
+        SendOutcome::Steered => "steered",
+        SendOutcome::InterruptedAndSent => "interrupted and sent",
     }
 }
 
@@ -2916,5 +2933,59 @@ mod tests {
         assert_eq!(form.isolation, Isolation::Worktree);
         assert_eq!(form.branch.text(), "feat/x ");
         assert!(!form.submitting);
+    }
+
+    // ---- send outcome ----
+
+    #[test]
+    fn a_send_reports_its_outcome_in_the_status_line() {
+        for (outcome, notice) in [
+            ("queued", "queued \u{2014} delivered when the turn ends"),
+            ("sent", "sent"),
+            ("steered", "steered"),
+            ("interrupted_and_sent", "interrupted and sent"),
+        ] {
+            let mut f = Fixture::new();
+            f.select_a1();
+            press(&mut f.state, 'i');
+            type_text(&mut f.state, "hello");
+            press_key(&mut f.state, Key::Enter);
+            assert_eq!(f.state.status.notice, None, "nothing before the answer");
+            update(
+                &mut f.state,
+                AppEvent::RpcDone {
+                    request: RequestTag::Send {
+                        agent_id: f.a1.id.clone(),
+                    },
+                    result: Ok(json!({ "outcome": outcome })),
+                },
+            );
+            assert_eq!(f.state.status.notice.as_deref(), Some(notice), "{outcome}");
+            assert_eq!(f.state.status.error, None);
+            // Cleared like the other status messages.
+            tick(&mut f.state, ERROR_TICKS as usize - 1);
+            assert_eq!(f.state.status.notice.as_deref(), Some(notice), "{outcome}");
+            tick(&mut f.state, 1);
+            assert_eq!(f.state.status.notice, None, "{outcome}");
+        }
+    }
+
+    #[test]
+    fn an_error_replaces_the_send_notice_and_an_unknown_outcome_shows_none() {
+        let mut f = Fixture::new();
+        let done = |result| AppEvent::RpcDone {
+            request: RequestTag::Send {
+                agent_id: f.a1.id.clone(),
+            },
+            result,
+        };
+        update(&mut f.state, done(Ok(json!({"outcome": "queued"}))));
+        assert!(f.state.status.notice.is_some());
+        update(&mut f.state, done(Err("daemon said no".to_owned())));
+        assert_eq!(f.state.status.notice, None);
+        assert_eq!(f.state.status.error.as_deref(), Some("daemon said no"));
+        update(&mut f.state, done(Ok(json!({"outcome": "teleported"}))));
+        assert_eq!(f.state.status.notice, None);
+        assert_eq!(f.state.status.error, None);
     }
 }

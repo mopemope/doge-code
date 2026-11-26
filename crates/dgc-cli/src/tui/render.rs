@@ -386,6 +386,10 @@ fn render_status(state: &AppState, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw(" \u{b7} "));
         spans.push(Span::styled(error.clone(), Style::default().fg(DANGER)));
     }
+    if let Some(notice) = &state.status.notice {
+        spans.push(Span::raw(" \u{b7} "));
+        spans.push(Span::styled(notice.clone(), Style::default().fg(ACCENT)));
+    }
     let hints = match state.focus {
         Focus::Tree => {
             "\u{2191}\u{2193} move  Enter open  i type  n agent  w workspace  p permission  \
@@ -1777,5 +1781,24 @@ mod tests {
         assert!(text.contains("daemon disconnected"), "{text}");
         assert!(text.contains("socket closed"), "{text}");
         assert!(text.contains("boom"), "{text}");
+    }
+
+    #[test]
+    fn a_queued_send_shows_in_the_status_line() {
+        let mut f = Fx::new();
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request: RequestTag::Send {
+                    agent_id: AgentId::generate(),
+                },
+                result: Ok(serde_json::json!({"outcome": "queued"})),
+            },
+        );
+        let text = screen(&draw(&f.state, 120, 30));
+        assert!(
+            text.contains("queued \u{2014} delivered when the turn ends"),
+            "{text}"
+        );
     }
 }

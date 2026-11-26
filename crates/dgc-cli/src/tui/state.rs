@@ -655,10 +655,13 @@ pub struct Status {
     /// The last error (escaped), shown until the next successful action or
     /// [`ERROR_TICKS`] ticks.
     pub error: Option<String>,
+    /// What the last action did (fixed text, e.g. how a send was
+    /// delivered); cleared like `error`, and replaced by an error.
+    pub notice: Option<String>,
     pub(super) error_ticks: u32,
 }
 
-/// Ticks an error stays in the status line.
+/// Ticks an error or a notice stays in the status line.
 pub const ERROR_TICKS: u32 = 10;
 
 /// Ticks after a permission dialog opens (or its permission changes) during
@@ -722,6 +725,7 @@ impl Default for AppState {
             status: Status {
                 connection: ConnectionState::Reconnecting,
                 error: None,
+                notice: None,
                 error_ticks: 0,
             },
             permissions: Vec::new(),
@@ -852,11 +856,20 @@ impl AppState {
 
     pub(super) fn set_error(&mut self, message: String) {
         self.status.error = Some(message);
+        self.status.notice = None;
         self.status.error_ticks = 0;
     }
 
+    pub(super) fn set_notice(&mut self, message: &str) {
+        self.status.error = None;
+        self.status.notice = Some(message.to_owned());
+        self.status.error_ticks = 0;
+    }
+
+    /// Clear the error and the notice.
     pub(super) fn clear_error(&mut self) {
         self.status.error = None;
+        self.status.notice = None;
         self.status.error_ticks = 0;
     }
 

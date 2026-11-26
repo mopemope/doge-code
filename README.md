@@ -173,10 +173,11 @@ never sends, never changes the mode and never submits a form. A paste in the
 tree, the permission dialog or the archive confirmation is ignored. The modes
 are the `dgc-next send` behaviors: `queue` (default; sent when the current turn
 ends), `steer` and `interrupt`. Claude agents cannot steer, so
-there `steer` interrupts and then sends, which also discards the queue. A
-queued message appears in the stream only when it is delivered (or shown as
-discarded); the TUI does not confirm a queued send otherwise. If the send
-fails, the text returns to an empty input and the error shows in the status
+there `steer` interrupts and then sends, which also discards the queue. When
+the daemon accepts a message the status bar says what happened to it for a few
+seconds: `queued — delivered when the turn ends`, `sent`, `steered` or
+`interrupted and sent`. A queued message appears in the stream only when it is
+delivered (or shown as discarded). If the send fails, the text returns to an empty input and the error shows in the status
 bar. If the agent you were typing to is archived or disappears, the input keeps
 its text and shows `no target — select an agent`; leave with `Esc` and pick
 another agent. The text stays with that removed agent and is not shown again.
