@@ -691,6 +691,8 @@
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
 
+- 2026-11-27 M5 Linux CI（62c6dfd）: 子が親から継承した TERM ハンドラを解除する前に TERM を受け、親が `wait` 中に猶予切れで SIGKILL された。子自身が `exec` 後に改行付き PID を公開するようテストを修正。dash の負荷試験で shutdown と stop は各 2/200 → 0/200、archive と SIGKILL の検証は各 0/200 → 0/200。トレース付きでは archive も 1/200 → 0/200。Rust 1.99.0 の `verify.sh rust`（732件）と `verify.sh guidance`（Python 40件）が PASS。macOS 実機は未検証。
+
 - 2026-11-27 M5 macOS PTY 修正（Linux、Rust 1.99.0）: `cargo test --locked -p dgc-cli --test script_cli`（11件）、`cargo fmt --all`、`bash scripts/verify.sh rust`（732件）、`bash scripts/verify.sh guidance`（Python 40件）、`cargo check --locked --workspace --all-targets --target aarch64-apple-darwin` が PASS。macOS 実機のテストは未実行。
 
 - 2026-11-27 M5 最終修正（Linux、Rust 1.99.0）

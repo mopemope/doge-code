@@ -156,9 +156,12 @@ impl Env {
 
     async fn child_pid(&self, root: &Path) -> i32 {
         timeout(WAIT, async {
+            let path = root.join("child.pid");
             loop {
-                if let Ok(pid) = fs::read_to_string(root.join("child.pid"))
-                    && let Ok(pid) = pid.trim().parse()
+                if let Ok(contents) = fs::read_to_string(&path)
+                    && let Some(line) = contents.strip_suffix('\n')
+                    && let Ok(pid) = line.parse::<i32>()
+                    && pid > 0
                 {
                     return pid;
                 }
@@ -697,13 +700,18 @@ async fn script_env_has_workspace_vars() {
     assert_eq!(fs::read_to_string(env.log_path()).expect("log"), expected);
 }
 
-const GROUP_COMMAND: &str =
-    r#"trap 'wait; exit 0' TERM; sleep 60 & printf '%s\n' "$!" > child.pid; wait"#;
+fn term_handling_group(on_term: &str) -> String {
+    // A forked child can still catch TERM with the parent's handler. The
+    // child's new shell writes its PID after exec has reset that handler.
+    format!(
+        r#"trap '{on_term}' TERM; /bin/sh -c 'printf "%s\n" "$$" > child.pid; exec sleep 60' & wait; exit 1"#
+    )
+}
 
 #[tokio::test]
 async fn stop_kills_the_process_group() {
     let env = Env::new().await;
-    env.start(GROUP_COMMAND).await;
+    env.start(&term_handling_group("wait; exit 0")).await;
     let child = env.child_pid(&env.ws.path).await;
     let running = env
         .scripts
@@ -719,8 +727,8 @@ async fn stop_kills_the_process_group() {
         .await
         .expect("stop process group");
     let status = env.exited().await;
-    // The shell's TERM handler reaps the child if the signal reached it.
-    assert_eq!(status.exit_code, Some(0));
+    // The shell's TERM handler waits for the group member to die from TERM.
+    assert_eq!((status.exit_code, status.signal), (Some(0), None));
     // SAFETY: signal 0 only tests the PID's existence.
     assert_eq!(unsafe { libc::kill(child, 0) }, -1);
 }
@@ -728,6 +736,7 @@ async fn stop_kills_the_process_group() {
 #[tokio::test]
 async fn shutdown_sigkills_term_ignoring_script_group_after_grace() {
     let env = Env::new().await;
+    // The ignored TERM disposition is in effect before readiness and survives exec.
     env.start(r#"trap '' TERM; printf '%s\n' "$$" > child.pid; exec sleep 60"#)
         .await;
     let pgid = env.child_pid(&env.ws.path).await;
@@ -839,9 +848,7 @@ async fn archive_stops_running_scripts() {
     git(&env.ws.path, &["commit", "-q", "-m", "ignore readiness"]);
     let ws = env.worktree().await;
     // The TERM trap leaves an untracked file, so only a safety check after stopping sees it.
-    let body = content(
-        r#"trap 'wait; touch dirty; exit 0' TERM; sleep 60 & printf '%s\n' "$!" > child.pid; wait"#,
-    );
+    let body = content(&term_handling_group("wait; touch dirty; exit 0"));
     write(&ws.path, &body);
     env.scripts.trust(&ws.id, &body).await.expect("trust");
     env.scripts.start(&ws.id, "demo").await.expect("start");
@@ -887,10 +894,11 @@ async fn archive_stops_running_scripts() {
 #[tokio::test]
 async fn shutdown_stops_scripts() {
     let env = Env::new().await;
-    env.start(GROUP_COMMAND).await;
+    env.start(&term_handling_group("wait; exit 0")).await;
     let child = env.child_pid(&env.ws.path).await;
     env.scripts.shutdown_all(Duration::from_millis(500)).await;
-    assert_eq!(env.exited().await.exit_code, Some(0));
+    let status = env.exited().await;
+    assert_eq!((status.exit_code, status.signal), (Some(0), None));
     // SAFETY: signal 0 only tests the PID's existence.
     assert_eq!(unsafe { libc::kill(child, 0) }, -1);
     assert_eq!(
