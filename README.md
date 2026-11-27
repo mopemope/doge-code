@@ -53,6 +53,12 @@ cargo install --locked --path crates/dgc-cli    # installs ~/.cargo/bin/dgc
 cargo build --locked --release -p dgc-cli       # builds target/release/dgc
 ```
 
+### Upgrading
+
+After installing a new `dgc`, run `dgc daemon stop`. The next command starts
+the new daemon. If a daemon with an incompatible protocol is still running,
+`dgc` reports that it is from another version and shows the stop command.
+
 ## Quick start
 
 ```sh
@@ -246,6 +252,8 @@ dgc handoff ID --to codex --follow
   current state and sends no expected preview, even after a separate dry run.
   With `--json`, the first result contains `prompt` and `agent` (`null` for
   a dry run).
+- Review the `--dry-run` output or TUI preview before sending. Prior instructions,
+  the last answer, and Git status and diff stat are forwarded to the target provider.
 - `run --follow` and `logs --follow` print one handoff suggestion when they
   encounter a rate limit. In JSON mode they emit the event as usual.
 
@@ -264,8 +272,9 @@ capped at 32 KiB. If the title and log path leave too little space for the
 required headings and preface, handoff returns an error.
 
 dgc records at most one `rate limited` event per turn. Claude Code triggers
-it on a rejected or unknown `rate_limit_event` status string or an HTTP 429 in a
-result or assistant error. It ignores `allowed` and `allowed_warning`.
+it on a rejected or unknown `rate_limit_event` status string, or on an HTTP 429
+in a result or assistant row. It ignores a `rate_limit_event` if `status` or
+`overageStatus` is `allowed` or `allowed_warning`, or if `isUsingOverage` is true.
 Codex triggers it when `account/rateLimits/updated` reports a non-null
 `rateLimitReachedType`, or when an error reports `usageLimitExceeded` or
 `rateLimitExceeded` with `willRetry` false or absent. The event carries the
@@ -331,8 +340,10 @@ after `Esc` it is still created, but the cursor stays where you left it.
 
 When the TUI receives a usage-limit event live or loads it from the selected
 agent's history, it marks that agent with `⇄` in the tree and shows a handoff
-hint above its stream. The hint clears after the agent completes a later turn
-without a limit, or is archived. Select any agent in the tree and press `H` for a
+hint above its stream. For a limit hit while the TUI was closed, the marker
+appears only after you select that agent and its history loads. The hint clears
+after the agent completes a later turn without a limit, or is archived. Select
+any agent in the tree and press `H` for a
 handoff. In the dialog, use `↑`/`↓` to select the target, profile or mode
 field. `Tab` switches the target on the target field, and `Tab`/`Shift-Tab`
 cycle profiles on the profile field. The mode field accepts text or paste
@@ -340,7 +351,9 @@ and shows a red warning for auto-approve modes. Use `PgUp`/`PgDn` to scroll
 the escaped dry-run preview. Once the preview is visible and the brief
 confirmation delay has passed, press `Enter` to start or `Esc` to cancel.
 The daemon compares the rebuilt prompt with the preview. If they differ,
-the TUI displays a fresh preview and asks you to confirm again. Pending
+the TUI displays a fresh preview and asks you to confirm again. If the source
+agent or another agent keeps changing the checkout, confirmation can keep
+reporting “the state changed”. Interrupt or stop the source agent first. Pending
 permission dialogs wait while the handoff dialog is open.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was

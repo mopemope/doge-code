@@ -243,16 +243,18 @@ async fn hello_returns_protocol_version_and_pid() {
 #[tokio::test]
 async fn version_mismatch_is_rejected() {
     let daemon = start().await;
-    let mut client = Client::connect(&daemon.paths.socket).await;
-    let response = client
-        .request(
-            1,
-            "hello",
-            json!({"protocol_version": PROTOCOL_VERSION + 1, "client": "test"}),
-        )
-        .await;
-    assert_eq!(error_code(&response), i64::from(rpc::VERSION_MISMATCH));
-    client.assert_closed_silently().await;
+    for version in [1, PROTOCOL_VERSION + 1] {
+        let mut client = Client::connect(&daemon.paths.socket).await;
+        let response = client
+            .request(
+                1,
+                "hello",
+                json!({"protocol_version": version, "client": "test"}),
+            )
+            .await;
+        assert_eq!(error_code(&response), i64::from(rpc::VERSION_MISMATCH));
+        client.assert_closed_silently().await;
+    }
     daemon.stop().await.expect("clean stop");
 }
 

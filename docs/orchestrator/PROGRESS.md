@@ -19,7 +19,7 @@
 
 - タスク: M5 の計画作成
 - 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 の実装と受け入れが完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 の実装、受け入れ、最終レビュー修正が完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
 - 次の一手: M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
 - 未コミットの変更: なし
 
@@ -90,10 +90,16 @@
 | 3 | プロファイル | 完了 | `feat: launch agents from named profiles` |
 | 4 | 引き継ぎ（デーモン、CLI、TUI） | 完了 | `feat: suggest and run a handoff to another provider` |
 | 5 | M4 受け入れ | 完了 | `docs(orchestrator): complete M4 acceptance` |
+| 6 | M4 最終レビュー修正 | 完了 | `fix: stop treating Claude overage as a limit and refuse mismatched daemons` |
 
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M4 最終レビュー決定): Claude の `rate_limit_event` は `status` / `overageStatus` が `allowed` / `allowed_warning`、または `isUsingOverage` が `true` のとき通知を抑止する。HTTP 429 は引き続き検知する。
+- 2026-11-26 (M4 最終レビュー決定): プロトコルを 2 に更新する。バージョン不一致は `dgc daemon stop` を案内し、停止コマンドはインスタンスロックの保持と有効な PID を確認して `SIGTERM` を送る。
+- 2026-11-26 (M4 最終レビュー決定): Claude の assistant 行は `is_api_error_message: true`、またはモデルが `<synthetic>` かつ `error` が非 null の場合に `Error` とする。
+- 2026-11-26 (M4 最終レビュー決定): 引き継ぎ文の回答抽出では、完了したターンの `TurnCompleted` までを評価し、その後の `RateLimited` や `Error` で回答を除外しない。
 
 - 2026-11-26 (M4 Task 4 レビュー決定): TUI の起動 RPC は確認時の原文を `expected_prompt` として送る。デーモンが再生成した文と異なる場合は `INVALID_STATE`（`handoff_changed`）で作成を止め、TUI は新しいプレビューを取得して再確認を待つ。CLI は `expected_prompt` を省略する。
 - 2026-11-26 (M4 Task 4 レビュー決定): 冒頭の指示は先頭 16 KiB と省略表示に収める。引き継ぎ文の回答は上限到達やエラーのないターンから取る。Claude の API エラー行と合成エラー行は、4 KiB 以下の `Error` として記録する。
@@ -619,6 +625,15 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M4 最終レビュー修正（Linux、Rust 1.99.0）
+  - RED で Claude の追加使用の誤検知と合成回答の誤分類、両方の hello 不一致、旧デーモンの停止エラー、完了済み回答の欠落、
+    アダプタ確認前のログ読み取りを再現した。GREEN で偽デーモンへの `SIGTERM` による停止と、空きロックの古い PID への送信拒否を確認した。
+  - 偽プロバイダをビルドし、`cargo test --locked` で `claude_adapter` 22 件、`agent_manager` 45 件、`server` 28 件、
+    `dgc-client` 14 件、`daemon_cli` 10 件、`agent_cli` 17 件、`tui_backend` 158 件が PASS。
+    `verify.sh test` の名前フィルタは `server` が 7 件で、残り 5 名は 0 件で終了コード 2。対象の全件は上記の直接指定で検証した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 649 件）、`guidance`（Python 40 件）、
+    `tui-deps`、`msrv`（Rust 1.94.0）が PASS。実プロバイダで追加使用したターンと macOS は未検証。
 
 - 2026-11-26 M4 Task 5 受け入れ（Linux、Rust 1.99.0）:
   - 合成シナリオ PASS。`profile ls`、CLI と TUI の通常・自動承認プロファイル起動、警告、上限時の提案と読み取り専用プレビューを確認。

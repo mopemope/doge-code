@@ -25,8 +25,9 @@
 //!   - `control_request` `can_use_tool` → `PermissionRequested` (`Bash` →
 //!     Command, `Edit|Write|MultiEdit|NotebookEdit` → FileChange, others →
 //!     Tool); other control requests are answered with an error response.
-//!   - `rate_limit_event` with `rejected` or an unknown status, or HTTP 429
-//!     in an `assistant` or `result` row, → `RateLimited` once per turn.
+//!   - `rate_limit_event` with `rejected` or an unknown status when overage is
+//!     neither available nor in use, or HTTP 429 in an `assistant` or `result`
+//!     row, → `RateLimited` once per turn.
 //!   - An oversized stdout line → `Error` and the session continues.
 //!   - Anything else (hook and thinking-token `system` lines, unknown types)
 //!     is ignored with a debug log of its type.
@@ -705,7 +706,14 @@ async fn handle_line(shared: &Shared, text: &str) -> Vec<ProviderEvent> {
         "rate_limit_event" => {
             let info = &message["rate_limit_info"];
             match info["status"].as_str() {
-                Some("allowed" | "allowed_warning") => {
+                status
+                    if matches!(status, Some("allowed" | "allowed_warning"))
+                        || info["isUsingOverage"].as_bool() == Some(true)
+                        || matches!(
+                            info["overageStatus"].as_str(),
+                            Some("allowed" | "allowed_warning")
+                        ) =>
+                {
                     debug!("dropped routine claude rate limit update");
                     Vec::new()
                 }
@@ -850,7 +858,8 @@ fn content_blocks(message: &Value) -> &[Value] {
 /// last are `final_: false`.
 fn assistant_events(message: &Value) -> Vec<ProviderEvent> {
     if message["is_api_error_message"].as_bool() == Some(true)
-        || message["message"]["model"].as_str() == Some("<synthetic>")
+        || (message["message"]["model"].as_str() == Some("<synthetic>")
+            && !message["error"].is_null())
     {
         let error = content_blocks(message)
             .iter()

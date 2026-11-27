@@ -72,6 +72,11 @@ fn instructions(events: &[AgentEvent]) -> Vec<Instruction> {
 fn last_answer(events: &[AgentEvent]) -> String {
     let Some(turn) = events
         .rsplit(|event| matches!(event.kind, EventKind::TurnStarted))
+        .filter_map(|turn| {
+            // Events between turns do not change an already completed answer.
+            turn.split_inclusive(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+                .next()
+        })
         .find(|turn| {
             !turn.iter().any(|event| matches!(event.kind, EventKind::RateLimited { .. } | EventKind::Error { .. }))
                 && turn.iter().any(|event| matches!(&event.kind, EventKind::AssistantText { text, .. } if !text.is_empty()))

@@ -208,12 +208,13 @@ initialize → user を送る。`system/init` と `result` の `session_id` は*
 ```
 
 制限に達していなくても API 呼び出しごとに出る。観測した `status` は `"allowed"` のみで、上限到達時の実際の
-`rate_limit_event`、`assistant`、`result` は**未観測**。dgc は `rate_limit_info.status` が `"rejected"` または
-未知の文字列の場合に、その値を正規化して `rate_limited` の理由とする。`"allowed"` と上限に近づいたことを示す
-`"allowed_warning"` はデバッグログのみ。 [Claude Agent SDK の型定義](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py)
+`rate_limit_event`、`assistant`、`result` は**未観測**。dgc は `rate_limit_info.status` または `overageStatus` が
+`"allowed"` / `"allowed_warning"`、あるいは `isUsingOverage` が `true` の更新をデバッグログだけに記録する。
+それ以外で `status` が `"rejected"` または未知の文字列の場合は、その値を正規化して `rate_limited` の理由とする。
+[Claude Agent SDK の型定義](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py)
 
 `rate_limit_info.resetsAt` が整数ならリセット時刻も記録する。記録した API エラー行の形式に基づき、`assistant` または
-`result` 行で `api_error_status` が整数の `429` の場合は、理由を `http_429` とする。到達ケースは
+`result` 行で `api_error_status` が整数の `429` の場合は、理由を `http_429` とする。到達ケースと追加使用で継続するケースは
 `claude/scenarios/rate_limited_*.jsonl` の合成シナリオで検証する。
 
 ### その他の出力（無視してよいもの）

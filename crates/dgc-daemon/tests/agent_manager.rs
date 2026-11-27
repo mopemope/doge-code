@@ -1761,7 +1761,7 @@ async fn handoff_prompt_is_bounded_and_strips_control_chars() {
         answer(format!("OLD_ANSWER{}", "文".repeat(4000)), false),
         answer("END_ANSWER\u{1b}", true),
     ]);
-    let id = stored_handoff_source(&h, ProviderKind::Codex, events);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, events);
     let prompt = handoff_preview(&h, &id).await;
     assert!(prompt.len() <= 32 * 1024, "{}", prompt.len());
     assert!(prompt.contains("FIRST\t\n"));
@@ -1786,7 +1786,7 @@ async fn handoff_prompt_excludes_env_and_account_data() {
         .expect("untracked credentials file");
     let id = stored_handoff_source(
         &h,
-        ProviderKind::Codex,
+        ProviderKind::Claude,
         vec![
             instruction("first"),
             EventKind::TurnStarted,
@@ -1842,6 +1842,36 @@ async fn handoff_dry_run_creates_nothing() {
     assert!(h.sessions.try_recv().is_err());
     session.assert_no_call();
     h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_dry_run_checks_target_availability_before_reading_logs() {
+    let h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Codex, vec![instruction("first")]);
+    let path = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(id.as_str())
+        .join("events.jsonl");
+    std::fs::remove_file(&path).expect("remove source log");
+    std::fs::create_dir(&path).expect("make source log unreadable as a file");
+
+    let expected = dgc_daemon::handlers::agent_create(
+        &h.manager,
+        serde_json::json!({
+            "workspace_id": h.workspace.id, "provider": "claude",
+            "title": "test", "initial_prompt": "test"
+        }),
+    )
+    .await
+    .expect_err("target adapter is unavailable");
+    assert_eq!(expected.code, dgc_protocol::rpc::INVALID_PARAMS);
+
+    let error = handoff_rpc(&h, serde_json::json!({"agent_id": id, "dry_run": true}))
+        .await
+        .expect_err("preview must fail for the same unavailable adapter");
+    assert_eq!(error, expected);
 }
 
 #[tokio::test]
@@ -2021,6 +2051,38 @@ async fn handoff_keeps_last_answer_before_a_failed_or_limited_turn() {
         "synthetic plan error text",
     ] {
         assert!(!prompt.contains(excluded), "{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn handoff_keeps_a_completed_answer_after_a_late_failure() {
+    let h = Harness::new(DEFAULT);
+    for late_failure in [
+        EventKind::RateLimited {
+            detail: serde_json::json!({"reason": "rejected"}),
+        },
+        EventKind::Error {
+            message: "late error".to_owned(),
+        },
+    ] {
+        let id = stored_handoff_source(
+            &h,
+            ProviderKind::Claude,
+            vec![
+                instruction("initial"),
+                EventKind::TurnStarted,
+                answer("completed answer", true),
+                EventKind::TurnCompleted { usage: None },
+                late_failure,
+                instruction("next"),
+                EventKind::TurnStarted,
+            ],
+        );
+        let prompt = handoff_preview(&h, &id).await;
+        assert!(
+            prompt.contains("Last assistant answer\ncompleted answer"),
+            "{prompt}"
+        );
     }
 }
 

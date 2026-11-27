@@ -217,6 +217,43 @@ async fn claude_allowed_warning_status_is_ignored() {
 }
 
 #[tokio::test]
+async fn claude_overage_turns_complete_without_rate_limits() {
+    let turns = rate_limit_turns("rate_limited_overage", 2).await;
+    for (turn, reply) in turns.iter().zip(["active overage", "allowed overage"]) {
+        assert!(turn.contains(&text(reply)), "{turn:?}");
+        assert!(matches!(
+            turn.last(),
+            Some(ProviderEvent::TurnCompleted { .. })
+        ));
+    }
+    let limits: Vec<_> = turns
+        .iter()
+        .map(|turn| rate_limited_details(turn))
+        .collect();
+    assert!(limits.iter().all(Vec::is_empty), "{limits:?}");
+}
+
+#[tokio::test]
+async fn claude_synthetic_assistant_rows_require_an_error_marker() {
+    let turns = rate_limit_turns("synthetic_assistant", 1).await;
+    let turn = &turns[0];
+    assert!(turn.contains(&text("synthetic reply")), "{turn:?}");
+    assert!(
+        turn.contains(&text("synthetic reply with null error")),
+        "{turn:?}"
+    );
+    for message in ["synthetic failure", "flagged API failure"] {
+        assert!(
+            turn.contains(&ProviderEvent::Event(EventKind::Error {
+                message: message.to_owned(),
+            })),
+            "{turn:?}"
+        );
+        assert!(!turn.contains(&text(message)), "{turn:?}");
+    }
+}
+
+#[tokio::test]
 async fn claude_unknown_status_reason_is_bounded_safe_token() {
     let turns = rate_limit_turns("rate_limited_status", 3).await;
     assert_eq!(

@@ -748,7 +748,7 @@ fn slow_provider_probe_does_not_break_autostart() {
 
 #[test]
 fn handoff_dry_run_prints_prompt() {
-    let a = AgentEnv::new("claude_turn", None).with_workspace(None);
+    let a = AgentEnv::new("claude_turn", Some("codex_untrusted")).with_workspace(None);
     let id = created_id(&a.run_agent("claude", &["--follow", "Say pong"]));
     let output = a.run(&["handoff", &id, "--dry-run"]);
     assert_success(&output);

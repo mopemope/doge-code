@@ -5,9 +5,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::Subcommand;
-use dgc_client::Client;
+use dgc_client::{Client, ClientError};
 use dgc_daemon::config::DaemonConfig;
-use dgc_daemon::lock::{InstanceLock, LockError};
+use dgc_daemon::lock::{InstanceLock, LockError, terminate_running_daemon};
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::run_daemon;
 use dgc_protocol::methods::{DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus};
@@ -114,16 +114,17 @@ async fn status(paths: &DaemonPaths, json: bool) -> CliResult<ExitCode> {
 }
 
 async fn stop(paths: &DaemonPaths) -> CliResult<ExitCode> {
-    let mut client = match Client::connect(paths).await {
-        Ok(client) => client,
+    match Client::connect(paths).await {
+        Ok(mut client) => {
+            let _: serde_json::Value = client.call(DAEMON_SHUTDOWN, &serde_json::json!({})).await?;
+        }
+        Err(ClientError::VersionMismatch { .. }) => terminate_running_daemon(&paths.state_dir)?,
         Err(err) if err.is_not_running() => {
             println!("daemon is not running");
             return Ok(ExitCode::SUCCESS);
         }
         Err(err) => return Err(err.into()),
-    };
-    let _: serde_json::Value = client.call(DAEMON_SHUTDOWN, &serde_json::json!({})).await?;
-    drop(client);
+    }
 
     // The daemon removes the socket first and releases the instance lock last.
     // Waiting for both means a following autostart cannot lose the lock race

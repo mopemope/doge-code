@@ -16,12 +16,15 @@ mod output;
 mod tui;
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant};
 
-use common::{CLAUDE_VERSION, TestEnv, assert_success, scenario, stdout, write_wrapper};
+use common::{
+    CLAUDE_VERSION, CODEX_VERSION, TestEnv, assert_success, scenario, stdout, write_wrapper,
+};
 use dgc_client::Client;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_protocol::PROTOCOL_VERSION;
@@ -1031,6 +1034,17 @@ async fn backend_rate_limit_suggests_handoff_from_history() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../dgc-daemon/tests/fixtures/claude/scenarios/rate_limited_429.jsonl");
     let h = Harness::new(&fixture);
+    let codex = write_wrapper(
+        &h.env.dir.path().join("bin"),
+        "codex",
+        CODEX_VERSION,
+        &scenario("codex_untrusted"),
+    );
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(&h.env.paths.config_file)
+        .expect("open daemon config");
+    writeln!(config, "codex_path = \"{}\"", codex.display()).expect("configure fake Codex");
     let workspace = h.add_workspace();
     let output = h.run(&[
         "run",

@@ -627,7 +627,8 @@ impl AgentManager {
             parent_id: None,
         };
         let provider = self.resolve_profile(&mut create)?;
-        crate::provider::validate_mode(provider, create.mode.as_deref())
+        self.adapter(provider)?
+            .validate_mode(create.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
         let dir = self.shared.agent_dir(&source.id);
         let log_path =
