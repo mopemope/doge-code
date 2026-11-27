@@ -108,7 +108,7 @@
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
 
 - 2026-11-27 (M5 Task 1): `LocalClock` は `Send + Sync`。検索上限はローカル時刻の 5 暦年後の同じ分とし、2 月 29 日の上限は平年の 2 月末に丸める。
-  日と曜日の OR 条件では、フィールド全体が `*` の場合をワイルドカードとして扱う。
+  Vixie cron と同様に、日または曜日のフィールドが `*` で始まる場合は両方の一致を要求する。どちらも `*` で始まらない場合は、日か曜日のいずれかの一致で発火する。
   `SystemClock` は既存の `libc` を使う。glibc の繰り返し時刻の選択が直前の変換に左右されるため、ロック内で 1970-01-02 の正午を変換した後、`tm_isdst = -1` で対象の時刻を変換する。
   変換できない Unix 秒は `to_local` で月 0 を返す。cron の探索はそこで終了し、表示には元の Unix 秒を含むエラー文を出す。
 
@@ -641,6 +641,10 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 1 レビュー修正（Linux、Rust 1.99.0）
+  - `bash scripts/verify.sh test schedule::` は RED で日・曜日の `*/2` の2件が FAIL、既存10件が PASS。修正後は12件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 661 件）、`bash scripts/verify.sh guidance`（Python 40 件）が PASS。macOS は未検証。
 
 - 2026-11-27 M5 Task 1（Linux、Rust 1.99.0）
   - RED の `bash scripts/verify.sh test schedule::` は未実装の型と関数でコンパイルエラー。GREEN は新規 10 件 PASS。

@@ -66,8 +66,9 @@ impl CronExpr {
             days,
             months,
             weekdays,
-            day_wildcard: day == "*",
-            weekday_wildcard: weekday == "*",
+            // Vixie cron sets the day flags from each field's first character.
+            day_wildcard: day.starts_with('*'),
+            weekday_wildcard: weekday.starts_with('*'),
         })
     }
 
@@ -354,6 +355,35 @@ mod tests {
         assert_eq!(
             expr.next_after(weekday, &clock),
             Some(utc(2026, 11, 9, 0, 0))
+        );
+    }
+
+    #[test]
+    fn dom_step_star_is_wildcard_and_combines_with_dow() {
+        let clock = FixedOffsetClock(0);
+        let expr = CronExpr::parse("0 9 */2 * 1-5").expect("odd-numbered weekdays");
+        let tuesday = utc(2026, 11, 3, 9, 0);
+        let thursday = utc(2026, 11, 5, 9, 0);
+        assert_eq!(
+            expr.next_after(utc(2026, 11, 1, 8, 59), &clock),
+            Some(tuesday)
+        );
+        assert_eq!(expr.next_after(tuesday, &clock), Some(thursday));
+        assert_eq!(
+            expr.next_after(thursday, &clock),
+            Some(utc(2026, 11, 9, 9, 0))
+        );
+    }
+
+    #[test]
+    fn dow_step_star_is_wildcard_and_combines_with_dom() {
+        let clock = FixedOffsetClock(0);
+        let expr = CronExpr::parse("0 9 1,2 * */2").expect("first or second on even weekdays");
+        let sunday = utc(2026, 11, 1, 9, 0);
+        assert_eq!(expr.next_after(sunday - 1, &clock), Some(sunday));
+        assert_eq!(
+            expr.next_after(sunday, &clock),
+            Some(utc(2026, 12, 1, 9, 0))
         );
     }
 
