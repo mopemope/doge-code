@@ -358,6 +358,70 @@ on unattended runs.
 Prompts and names are stored in the schedule's `0600`
 `schedules/<id>.json` record under the daemon's state directory.
 
+## ワークスペーススクリプト
+
+Put a `dgc.json` file in the root of the workspace. For example, this defines a
+script named `check` that runs from the workspace root.
+
+```json
+{
+  "version": 1,
+  "scripts": {
+    "check": { "command": "cargo test --locked", "cwd": "." }
+  }
+}
+```
+
+`dgc.json` must be a regular UTF-8 file of at most 64 KiB. Symlinks, unknown
+keys, duplicate script names, and versions other than `1` are rejected. The
+file may define up to 32 scripts with names matching `[A-Za-z0-9_-]{1,32}`.
+Each `command` must have 1 to 4096 bytes and contain no NUL. The optional
+`cwd` defaults to the workspace root. If set, it must be a relative path to
+an existing directory within the workspace, with no `..` components or
+symlinks that resolve outside the workspace.
+
+- `dgc script ls --workspace WS [--json]` shows trust, script names, working
+  directories, commands, and execution states. Runs whose definition has
+  been removed remain visible as `(not in dgc.json)` and can still be stopped.
+- `dgc script trust --workspace WS [--yes]` shows the project, file path, and
+  parsed definitions before asking for confirmation. With non-terminal
+  input, explicitly pass `--yes` to trust the displayed configuration.
+- `dgc script start NAME --workspace WS` runs the named script from a trusted
+  configuration. `dgc script stop NAME --workspace WS` stops it.
+- `dgc script logs NAME --workspace WS [--follow]` reads the last 64 KiB of
+  combined output by default. With `--follow`, it reads from the start of
+  the retained output and polls every 500 ms until the script exits and its
+  output is drained. It marks output skipped due to rotation. A daemon
+  disconnect or a reset of the log offsets ends the follow with a nonzero
+  exit status.
+
+Trust applies to the exact bytes of `dgc.json` across all worktrees of the
+same project. dgc keeps the 16 most recently trusted contents for each
+project. Any byte change requires confirmation again unless that exact
+content is still in the project's trust history. If the file changes while
+you review it, the trust command asks you to review the new content. dgc
+fetches no external code. It runs only commands from your repository's
+`dgc.json` that you have trusted.
+
+The daemon launches `/bin/sh -c` in a dedicated process group with standard
+input redirected from `/dev/null`. Scripts inherit the daemon's environment
+plus `DGC_WORKSPACE_ID`, `DGC_WORKSPACE_PATH`, and `DGC_SCRIPT_NAME`. The
+daemon appends stdout and stderr to `scripts/<workspace_id>/<name>.log`
+under the state directory and rotates the file at 8 MiB, keeping one `.log.1`
+generation. The daemon stores script output only in these `0600` logs and
+stores trusted `dgc.json` contents only in `0600`
+`script-trust/<project_id>.json` records. Neither appears in `daemon.log`.
+
+`script stop`, workspace archive, and normal daemon shutdown send SIGTERM
+to the script's process group, then SIGKILL if needed after 5 seconds.
+`ChildProcess` also kills group members left after the script's leader exits,
+so background jobs in that group end with the script. Descendants that
+leave the process group (for example through `setsid` or a double fork that
+detaches) escape stop, archive, and shutdown. If they hold an output pipe
+open, the daemon stops reading from it after at most 1 second once the
+leader exits. A daemon crash can leave scripts running. Execution state is
+kept in memory and scripts are not restarted when the daemon restarts.
+
 ## Terminal UI
 
 `dgc tui` (or `dgc` with no arguments) opens a full-screen terminal UI for all

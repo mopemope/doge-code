@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M5 Task 5（ワークスペーススクリプトの CLI）
+- タスク: M5 Task 6（M5 受け入れ）
 - 状態: 未着手
-- 済んだこと: Task 4 の `script.*` RPC、信頼の保存、プロセスグループの監督とログ、テストを追加し、レビュー指摘 5 件を反映。
-- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 5 に従い、`dgc script` と README を追加する。
+- 済んだこと: Task 5 の `dgc script`、CLI 統合テスト、README のワークスペーススクリプト節を追加。
+- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 6 に従い、一時リポジトリと偽プロバイダで受け入れ確認を始める。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -100,12 +100,17 @@
 | 2 | スケジュールと heartbeat（デーモン） | 完了 | `feat(daemon): run schedules and heartbeats` |
 | 3 | スケジュールと heartbeat の CLI | 完了 | `feat(cli): manage schedules and heartbeats` |
 | 4 | ワークスペーススクリプト（デーモン） | 完了 | `feat(daemon): run trusted workspace scripts from dgc.json` |
-| 5 | スクリプトの CLI | 未着手 | `feat(cli): trust, run and follow workspace scripts` |
+| 5 | スクリプトの CLI | 完了 | `feat(cli): trust, run and follow workspace scripts` |
 | 6 | M5 受け入れ | 未着手 | `docs(orchestrator): complete M5 acceptance` |
 
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 Task 5): 信頼確認は `script.list` の解析済みの定義と `workspace.list` のパスを表示し、取得済みの原文をそのまま `expected_content` に渡す。
+  確認は端末の標準入力から読み、端末以外では明示の `--yes` が必要。JSON 出力は `script ls` が対応し、原文は含めない。
+- 2026-11-27 (M5 Task 5): `script logs` は末尾 64 KiB、`--follow` は保持中のログの先頭から 500 ms 間隔で読む。
+  回転で失われた範囲を表示し、オフセットの後退や RPC の失敗時は 1 行のエラーで終了する。ログ出力は改行とタブを保持し、ほかの制御文字と bidi 文字をエスケープする。
 
 - 2026-11-27 (M5 Task 4 レビュー修正): `script.logs` は生バイトの `start_offset` を返す。要求位置より後ろなら、ログ回転などで読み飛ばしたデータがある。
   ページ末尾の未完の UTF-8 文字は次回の読み取りに回し、プロセス終了後の EOF では不正なバイトとして置換する。
@@ -672,6 +677,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 5（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-cli --test script_cli` は `script` サブコマンド未登録で 7 件 FAIL、実装後は 7 件 PASS。`bash scripts/verify.sh test script_` は 18 件 PASS。
+  - 擬似端末で確認プロンプト、既定の拒否、確認中にファイルが変わった場合の拒否、明示の承認を確認。デーモン切断時の `--follow` は 1 行を表示し非 0 で終了した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 723 件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40 件）は PASS。macOS と実プロバイダは未検証。
 
 - 2026-11-27 M5 Task 4 レビュー修正（Linux、Rust 1.99.0）
   - RED は `cargo test --locked -p dgc-daemon --test script --test server` で script 7 件、`cargo test --locked -p dgc-daemon --test server script_rpcs_round_trip` で RPC 1 件が期待どおり FAIL。

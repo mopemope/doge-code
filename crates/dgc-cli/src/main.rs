@@ -57,6 +57,11 @@ enum Command {
         #[command(subcommand)]
         command: commands::schedule::HeartbeatCommand,
     },
+    /// List, trust and run workspace scripts.
+    Script {
+        #[command(subcommand)]
+        command: commands::script::ScriptCommand,
+    },
     /// List and answer agents' permission requests.
     Permit {
         #[command(subcommand)]
@@ -79,6 +84,7 @@ async fn main() -> ExitCode {
         Some(Command::Heartbeat { command }) => {
             commands::schedule::heartbeat(command, cli.json).await
         }
+        Some(Command::Script { command }) => commands::script::run(command, cli.json).await,
         Some(Command::Permit { command }) => commands::permit::run(command, cli.json).await,
     };
     match result {

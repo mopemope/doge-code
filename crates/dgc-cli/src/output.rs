@@ -3,7 +3,8 @@
 use dgc_daemon::schedule::localtime::format_local;
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::methods::{
-    DaemonStatus, ProviderStatus, ScheduleListEntry, WorkspaceArchiveResult,
+    DaemonStatus, ProviderStatus, ScheduleListEntry, ScriptState, ScriptStatus,
+    WorkspaceArchiveResult,
 };
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PendingPermission, PermissionKind, Project,
@@ -17,13 +18,18 @@ use dgc_protocol::model::{
 /// permission summaries, errors) cannot move the cursor, erase or recolor
 /// what the terminal shows, or reorder it.
 pub fn escape_text(text: &str) -> String {
-    escape(text, true)
+    escape(text, true, false)
 }
 
 /// Like [`escape_text`] but also escapes `\n`: for fields that must stay on
 /// one line (a newline there could imitate another list row).
 pub fn escape_line(text: &str) -> String {
-    escape(text, false)
+    escape(text, false, false)
+}
+
+/// Preserve newlines and tabs in a script log while escaping other controls.
+pub fn escape_script_log(text: &str) -> String {
+    escape(text, true, true)
 }
 
 /// Escape additional terminal control characters in a serialized JSON line
@@ -40,13 +46,14 @@ pub fn escape_json_line(json: &str) -> String {
     out
 }
 
-fn escape(text: &str, keep_newline: bool) -> String {
+fn escape(text: &str, keep_newline: bool, keep_tab: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
             '\n' if keep_newline => out.push('\n'),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
+            '\t' if keep_tab => out.push('\t'),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 || c == '\u{7f}' => {
                 out.push_str(&format!("\\x{:02x}", c as u32));
@@ -58,6 +65,38 @@ fn escape(text: &str, keep_newline: bool) -> String {
         }
     }
     out
+}
+
+pub fn script_definition(script: &ScriptStatus) -> String {
+    let cwd = script.cwd.as_deref().map_or_else(
+        || ".".to_owned(),
+        |path| escape_line(&path.to_string_lossy()),
+    );
+    format!(
+        "{}  cwd: {cwd}  command: {}",
+        escape_line(&script.name),
+        escape_line(&script.command)
+    )
+}
+
+pub fn script_line(script: &ScriptStatus) -> String {
+    let state = match script.state {
+        ScriptState::NotRunning => "not_running".to_owned(),
+        ScriptState::Running => script.pid.map_or_else(
+            || "running".to_owned(),
+            |pid| format!("running (pid {pid})"),
+        ),
+        ScriptState::Exited => match (script.exit_code, script.signal) {
+            (Some(code), _) => format!("exited (code {code})"),
+            (_, Some(signal)) => format!("exited (signal {signal})"),
+            _ => "exited".to_owned(),
+        },
+    };
+    if script.in_file {
+        format!("{state}  {}", script_definition(script))
+    } else {
+        format!("{state}  {} (not in dgc.json)", escape_line(&script.name))
+    }
 }
 
 /// Unicode bidirectional formatting characters (embeddings, overrides,
