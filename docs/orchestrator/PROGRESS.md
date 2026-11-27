@@ -19,7 +19,7 @@
 ## 現在の作業
 
 - タスク: M6 の PR 作成とマージ待ち、その後フェーズ A の総括（残りの保留指摘の整理）とフェーズ B の設計準備
-- 済んだこと: M6 Task 5 で Codex の MCP ツール承認を中継した。実機では試験用の親に MCP の起動必須と都度承認を指定し、`create_agent` と `wait_agent` を個別に許可して子の `OK` を確認した。
+- 済んだこと: M6 Task 5 で Codex の MCP ツール承認を中継し、レビュー対応で MCP の起動必須と都度承認を本番の起動引数に追加した。実機でも本番の起動引数で `create_agent` と `wait_agent` を個別に許可し、子の `OK` を確認した。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
@@ -32,7 +32,7 @@
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
 | M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
 | M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188 マージ済み） | m5-schedules-scripts |
-| M6 | エージェント向け MCP（サブエージェント） | 完了（PR 未作成） | m6-mcp-subagents |
+| M6 | エージェント向け MCP（サブエージェント） | 完了（Codex 本番起動を検証済み、PR 未作成） | m6-mcp-subagents |
 
 ## タスク
 
@@ -111,12 +111,14 @@
 | 2 | `dgc mcp`（MCP サーバー） | 完了 | `feat(cli): serve sub-agent tools over MCP` |
 | 3 | CLI と TUI での表示と有効化 | 完了 | `feat(cli): enable MCP per agent and show sub-agent trees` |
 | 4 | M6 受け入れ | 完了（Codex の追加対応は Task 5） | `docs(orchestrator): complete M6 acceptance` |
-| 5 | Codex の MCP elicitation を権限要求として中継 | 完了 | `feat(daemon): relay Codex MCP elicitations as permission requests` |
+| 5 | Codex の MCP elicitation を権限要求として中継 | 完了 | `feat(daemon): relay Codex MCP elicitations as permission requests`、`fix(daemon): require the dgc MCP server and prompt for its tools under Codex` |
 
 ## 決定事項
 
 - 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M6 Task 5 レビュー裁定): Codex の MCP 有効時は、起動引数に `-c mcp_servers.dgc.required=true` を加える。サーバーの起動失敗は `thread/start` または再開の失敗になる。ユーザー承認モードでは `-c mcp_servers.dgc.default_tools_approval_mode="prompt"` も加え、ツールごとに許可を求める。`full-access` の承認ポリシーは `never` のため、都度承認の追加はユーザー承認モードに限る。両設定の適用範囲は起動した Codex プロセス。2026-11-27 参照。[Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [Codex App Server](https://learn.chatgpt.com/docs/app-server#mcp-servers) [Codex 0.172.0 の承認処理](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L1919-L1933)
 
 - 2026-11-27 (M6 Task 5): Codex CLI 0.172.0 の `codex app-server generate-json-schema` で `McpServerElicitationRequestParams` と `McpServerElicitationRequestResponse` を確認した。要求は `threadId`、`serverName` とフォーム（`form`、`openai/form`、`openaiForm`）または `url` を持つ。`turnId` は省略または null にできる。応答は `action` に `accept`、`decline`、`cancel` のいずれかを指定し、入力を送らない場合は `content: null`。2026-11-27 参照。[Codex App Server の MCP elicitation](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests)
 - 2026-11-27 (M6 Task 5): 公式の Codex 0.172.0 は、通常フォームに空のオブジェクトスキーマと `_meta.codex_approval_kind = "mcp_tool_call"` を付けてツール承認を識別する。`serverName`、`_meta.tool_name`、任意の `_meta.tool_params` を要約に使用する。入力を求めるフラグ、フィールド付きフォーム、未分類のフォーム、URL 型は本文を含まないエラーと `decline` を返す。`turnId` がなければ現在のターンに結び付け、対象のターンが動作中でなければ `cancel` を返す。セッション許可は単発の `accept` として扱う。中断と終了では `cancel` を返す。2026-11-27 参照。[承認要求の生成](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L2391-L2426) [承認応答の解釈](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L2559-L2593) [承認メタデータの定義](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/protocol/src/mcp_approval_meta.rs) [合成フィクスチャ](../../crates/dgc-daemon/tests/fixtures/README.md)
@@ -742,6 +744,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 5 レビュー対応（Linux、Rust 1.99.0）
+  - RED は起動引数の不足と必須 MCP が欠けた状態での `Idle` 到達を検出した。GREEN は `cargo test --locked -p dgc-daemon --test codex_adapter --test agent_manager` で 90 件 PASS。`full-access` と通常モード、MCP 無効時の引数、必須サーバー失敗時の `Failed` と Error、フォームの拒否、および次ターン中に届いた旧ターン要求の取り消しを確認した。セッション許可の単体テストも PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 785 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）が PASS。作業フォルダに `task-5-fix1-*.log` を保存。
+  - Codex CLI 0.172.0 と `gpt-6-luna` の親子で実機検証。Task 4 と同じ隔離手順で、既定の `workspace-write` による `dgc run --mcp` を本番の起動引数で実行した。親の `create_agent` と `wait_agent` の 2 件を `dgc permit allow` で個別に許可した。子 1 件が完了し、`wait_agent` は `last_answer="OK"`、`timed_out=false` を返した。親の最終回答も `OK`。デーモン停止と一時ディレクトリの削除を確認した。
 
 - 2026-11-27 M6 Task 5（Linux、Rust 1.99.0）
   - `bash scripts/verify.sh test elicitation` は実装前に 5 件失敗、実装後に 5 件 PASS。許可と拒否、中断と停止、フォーム拒否、要約と元データの上限を確認した。既存の CLI と TUI のエスケープテストも PASS。

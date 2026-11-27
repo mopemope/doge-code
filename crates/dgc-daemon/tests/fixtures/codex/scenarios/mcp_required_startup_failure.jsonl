@@ -1,0 +1,11 @@
+// SYNTHETIC: Codex rejects thread/start when its required MCP command cannot be started.
+// Based on Codex App Server documentation for required MCP servers.
+{"expect_args":["-c","mcp_servers.dgc.required=true","app-server"]}
+{"expect":{"method":"initialize","id":"${ANY}"}}
+{"capture":"init","path":"/id"}
+{"send":{"id":"${init}","result":{"userAgent":"codex/0.172.0"}}}
+{"expect":{"method":"initialized"}}
+{"expect":{"method":"thread/start","id":"${ANY}"}}
+{"capture":"thread","path":"/id"}
+{"send":{"id":"${thread}","error":{"code":-32603,"message":"required MCP server dgc failed to start"}}}
+{"expect_eof":true}

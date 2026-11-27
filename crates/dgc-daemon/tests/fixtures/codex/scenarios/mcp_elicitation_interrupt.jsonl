@@ -1,4 +1,4 @@
-// SYNTHETIC: An uncorrelated approval in an active turn, then a late approval for the interrupted turn.
+// SYNTHETIC: An uncorrelated approval, then late approvals while the next turn runs.
 // Derived from the Codex CLI 0.172.0 generated app-server schema and upstream approval metadata.
 {"expect_args":["app-server"]}
 {"expect":{"method":"initialize","id":"${ANY}"}}
@@ -19,9 +19,11 @@
 {"send":{"id":"${interrupt}","result":{}}}
 {"expect":{"method":"turn/start","id":"${ANY}","params":{"threadId":"thread-1"}}}
 {"capture":"next_turn","path":"/id"}
+{"send":{"id":"${next_turn}","result":{"turn":{"id":"turn-2","status":"inProgress"}}}}
 {"send":{"method":"mcpServer/elicitation/request","id":1,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"dgc","environmentId":null,"mode":"form","message":"Allow the MCP tool call?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent"}}}}
 {"expect":{"id":1,"result":{"action":"cancel","content":null}}}
 {"send":{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}}}
-{"send":{"id":"${next_turn}","result":{"turn":{"id":"turn-2","status":"inProgress"}}}}
+{"send":{"method":"mcpServer/elicitation/request","id":2,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"dgc","environmentId":null,"mode":"form","message":"Allow the MCP tool call?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent"}}}}
+{"expect":{"id":2,"result":{"action":"cancel","content":null}}}
 {"send":{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-2","status":"completed"}}}}
 {"expect_eof":true}

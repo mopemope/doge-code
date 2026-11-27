@@ -14,7 +14,9 @@ use dgc_daemon::agent::AgentManager;
 use dgc_daemon::config::DaemonConfig;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::codex::CodexAdapter;
-use dgc_daemon::provider::{AgentSpec, McpLaunch, ProviderAdapter, ProviderEvent, ProviderSession};
+use dgc_daemon::provider::{
+    AgentSpec, BoxFut, McpLaunch, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
+};
 use dgc_daemon::store::Store;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
@@ -67,14 +69,27 @@ fn spec(dir: &TempDir, mode: Option<&str>, resume: Option<&str>) -> AgentSpec {
 }
 
 async fn launch_args(dir: &TempDir, mcp: Option<McpLaunch>) -> Vec<String> {
+    launch_args_in_mode(dir, mcp, None).await
+}
+
+async fn launch_args_in_mode(
+    dir: &TempDir,
+    mcp: Option<McpLaunch>,
+    mode: Option<&str>,
+) -> Vec<String> {
     let capture = dir.path().join("codex.argv");
-    let (program, prefix) = capture_args(&capture, &scenario("simple_turn"));
+    let fixture = if mode == Some("full-access") {
+        "mcp_launch_full_access"
+    } else {
+        "simple_turn"
+    };
+    let (program, prefix) = capture_args(&capture, &scenario(fixture));
     let adapter = CodexAdapter::with_program(program, prefix);
     let session = start(
         &adapter,
         AgentSpec {
             mcp,
-            ..spec(dir, None, None)
+            ..spec(dir, mode, None)
         },
     )
     .await;
@@ -92,44 +107,40 @@ async fn codex_launch_args_include_mcp_overrides_only_when_enabled() {
         "test-agent".to_owned(),
     ];
     let state_root = "/tmp/dgc state\nwith a newline\u{7f}";
-    let argv = launch_args(
-        &dir,
-        Some(McpLaunch {
-            command: command.clone(),
-            args: args.clone(),
-            env: vec![
-                ("HOME".to_owned(), "/tmp/dgc home".to_owned()),
-                ("DGC_STATE_ROOT".to_owned(), state_root.to_owned()),
-            ],
-        }),
-    )
-    .await;
-    let (app_server, overrides) = argv.split_last().expect("app-server argument");
-    assert_eq!(app_server, "app-server");
-    assert_eq!(overrides.len(), 8);
-    let (pairs, _) = overrides.as_chunks::<2>();
-    let mut settings = String::new();
-    for (pair, key) in pairs
-        .iter()
-        .zip(["command", "args", "env", "tool_timeout_sec"])
-    {
-        assert_eq!(pair[0], "-c");
-        assert!(
-            pair[1].starts_with(&format!("mcp_servers.dgc.{key}=")),
-            "{pair:?}"
+    let mcp = McpLaunch {
+        command: command.clone(),
+        args: args.clone(),
+        env: vec![
+            ("HOME".to_owned(), "/tmp/dgc home".to_owned()),
+            ("DGC_STATE_ROOT".to_owned(), state_root.to_owned()),
+        ],
+    };
+    let required = json!({
+        "mcp_servers": {"dgc": {"command": command, "args": args,
+                               "env": {"HOME": "/tmp/dgc home", "DGC_STATE_ROOT": state_root},
+                               "tool_timeout_sec": 360, "required": true}}
+    });
+    let mut prompted = required.clone();
+    prompted["mcp_servers"]["dgc"]["default_tools_approval_mode"] = json!("prompt");
+    for (mode, expected) in [(None, prompted), (Some("full-access"), required)] {
+        let argv = launch_args_in_mode(&dir, Some(mcp.clone()), mode).await;
+        let (app_server, overrides) = argv.split_last().expect("app-server argument");
+        assert_eq!(app_server, "app-server");
+        let (pairs, remainder) = overrides.as_chunks::<2>();
+        assert!(remainder.is_empty(), "{argv:?}");
+        let mut settings = String::new();
+        for pair in pairs {
+            assert_eq!(pair[0], "-c");
+            assert!(pair[1].starts_with("mcp_servers.dgc."), "{pair:?}");
+            settings.push_str(&pair[1]);
+            settings.push('\n');
+        }
+        let parsed: toml::Value = toml::from_str(&settings).expect("inline MCP TOML");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("MCP settings"),
+            expected
         );
-        settings.push_str(&pair[1]);
-        settings.push('\n');
     }
-    let parsed: toml::Value = toml::from_str(&settings).expect("inline MCP TOML");
-    assert_eq!(
-        serde_json::to_value(parsed).expect("MCP settings"),
-        json!({
-            "mcp_servers": {"dgc": {"command": command, "args": args,
-                                   "env": {"HOME": "/tmp/dgc home", "DGC_STATE_ROOT": state_root},
-                                   "tool_timeout_sec": 360}}
-        })
-    );
     assert_eq!(launch_args(&dir, None).await, ["app-server"]);
 }
 
@@ -827,11 +838,17 @@ async fn codex_mcp_elicitation_cancelled_on_interrupt() {
             .is_err()
     );
     session.send_user(PONG).await.expect("send next turn");
-    let events = turn_events(&mut session).await;
-    assert!(matches!(
-        events.as_slice(),
-        [ProviderEvent::TurnCompleted { .. }]
-    ));
+    let events = events_until(&mut session, |event| {
+        matches!(
+            event,
+            ProviderEvent::PermissionRequested { .. } | ProviderEvent::TurnCompleted { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(events.as_slice(), [ProviderEvent::TurnCompleted { .. }]),
+        "{events:?}"
+    );
     shutdown_quietly(session).await;
 }
 
@@ -867,9 +884,24 @@ async fn codex_form_elicitation_is_declined_with_error() {
     let adapter = fake_adapter("mcp_elicitation_form");
     let mut session = start(&adapter, spec(&dir, None, None)).await;
     session.send_user(PONG).await.expect("send_user");
-    let events = turn_events(&mut session).await;
-    assert!(matches!(events[0], ProviderEvent::SessionStarted { .. }));
-    for event in &events[1..6] {
+    let events = events_until(&mut session, |event| {
+        matches!(
+            event,
+            ProviderEvent::PermissionRequested { .. } | ProviderEvent::TurnCompleted { .. }
+        )
+    })
+    .await;
+    let [
+        ProviderEvent::SessionStarted { .. },
+        forms @ ..,
+        answer,
+        ProviderEvent::TurnCompleted { .. },
+    ] = events.as_slice()
+    else {
+        panic!("expected form errors and a completed turn, got {events:?}");
+    };
+    assert_eq!(forms.len(), 10);
+    for event in forms {
         assert_eq!(
             *event,
             ProviderEvent::Event(EventKind::Error {
@@ -877,13 +909,12 @@ async fn codex_form_elicitation_is_declined_with_error() {
             })
         );
     }
-    assert_eq!(events[6], text("pong", true), "{events:?}");
-    assert!(matches!(events[7], ProviderEvent::TurnCompleted { .. }));
+    assert_eq!(*answer, text("pong", true), "{events:?}");
     shutdown_quietly(session).await;
 }
 
 #[tokio::test]
-async fn codex_elicitation_summary_is_bounded_and_escaped() {
+async fn codex_elicitation_payload_is_bounded_with_json_escaped_arguments() {
     let dir = tempdir().expect("tempdir");
     let fixture = std::fs::read_to_string(scenario("mcp_elicitation_bounds")).expect("scenario");
     let path = dir.path().join("mcp_elicitation_bounds.jsonl");
@@ -1058,7 +1089,7 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(adapter: CodexAdapter) -> Self {
+    fn new(adapter: impl ProviderAdapter + 'static) -> Self {
         let dir = tempdir().expect("tempdir");
         let paths = DaemonPaths::under(dir.path());
         let store = Arc::new(Store::open(&paths.state_dir).expect("store"));
@@ -1088,6 +1119,10 @@ impl Harness {
     }
 
     async fn create(&self, model: Option<&str>, prompt: &str) -> Agent {
+        self.create_with_mcp(model, prompt, false).await
+    }
+
+    async fn create_with_mcp(&self, model: Option<&str>, prompt: &str, mcp: bool) -> Agent {
         self.manager
             .create(AgentCreateParams {
                 workspace_id: self.workspace.id.clone(),
@@ -1099,7 +1134,7 @@ impl Harness {
                 initial_prompt: prompt.to_owned(),
                 labels: BTreeMap::new(),
                 parent_id: None,
-                mcp: false,
+                mcp,
             })
             .await
             .expect("create")
@@ -1150,6 +1185,103 @@ impl Harness {
             })
             .collect()
     }
+}
+
+/// Use the real Codex adapter with a dgc MCP command that cannot be executed.
+struct MissingMcpCommand {
+    adapter: CodexAdapter,
+    command: PathBuf,
+}
+
+impl ProviderAdapter for MissingMcpCommand {
+    fn kind(&self) -> ProviderKind {
+        self.adapter.kind()
+    }
+
+    fn validate_mode(&self, mode: Option<&str>) -> Result<bool, String> {
+        self.adapter.validate_mode(mode)
+    }
+
+    fn start(
+        &self,
+        mut spec: AgentSpec,
+    ) -> BoxFut<'_, Result<Box<dyn ProviderSession>, ProviderError>> {
+        spec.mcp.as_mut().expect("MCP enabled").command = self.command.clone();
+        self.adapter.start(spec)
+    }
+}
+
+#[tokio::test]
+async fn codex_required_mcp_startup_failure_fails_agent() {
+    let dir = tempdir().expect("tempdir");
+    let command = dir.path().join("missing-dgc");
+    let command_override = format!(
+        "mcp_servers.dgc.command={}",
+        toml::Value::String(command.to_str().expect("MCP command path").to_owned())
+    );
+    // Mimic app-server's required-server behavior. The optional case can
+    // still run a turn. Check the missing executable as well as the flag.
+    let adapter = CodexAdapter::with_program(
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_owned(),
+            r#"
+required=$1; optional=$2; command=$3; expected=$4; shift 4
+scenario=$optional
+attached=false
+for arg do
+    case "$arg" in
+        "$expected") attached=true ;;
+        mcp_servers.dgc.required=true) scenario=$required ;;
+    esac
+done
+test "$attached" = true && test ! -e "$command" || exit 1
+exec "$0" "$scenario" "$@"
+"#
+            .to_owned(),
+            env!("CARGO_BIN_EXE_dgc-fake-provider").to_owned(),
+            scenario("mcp_required_startup_failure")
+                .display()
+                .to_string(),
+            scenario("simple_turn").display().to_string(),
+            command.display().to_string(),
+            command_override,
+        ],
+    );
+    let h = Harness::new(MissingMcpCommand { adapter, command });
+    let agent = h.create_with_mcp(Some(MODEL), PONG, true).await;
+    let settled = timeout(EVENT_WAIT, async {
+        loop {
+            let current = h.manager.get(&agent.id).expect("get");
+            if matches!(current.state, AgentState::Idle | AgentState::Failed) {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("agent reached a terminal state for the turn");
+    h.manager.shutdown_all(EVENT_WAIT).await;
+    assert_eq!(settled.state, AgentState::Failed);
+    assert!(settled.provider_session_id.is_none());
+    let events = h.events(&agent.id);
+    assert!(
+        events.iter().any(|kind| matches!(
+            kind,
+            EventKind::Error { message } if message.contains("required MCP server dgc")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|kind| matches!(
+            kind,
+            EventKind::TurnCompleted { .. }
+                | EventKind::StateChanged {
+                    state: AgentState::Running
+                }
+        )),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

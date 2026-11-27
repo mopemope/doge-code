@@ -212,6 +212,12 @@ archived, its children keep their state and can continue independently.
 Every tool other than `create_agent` operates only on descendants of the
 calling agent.
 
+For each MCP-enabled Codex launch, dgc sets `mcp_servers.dgc.required=true`.
+Codex waits for the server to initialize and the agent fails at startup if
+it cannot connect. In modes with user approval, dgc also sets
+`mcp_servers.dgc.default_tools_approval_mode="prompt"` so Codex asks before
+each dgc MCP tool call. Both settings are passed as launch arguments.
+
 MCP calls follow the provider's normal approval flow. dgc relays supported
 approval requests from parents and children through the usual CLI and TUI
 permission controls. Codex MCP tool approvals show the server, tool and

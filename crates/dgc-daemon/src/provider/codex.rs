@@ -23,6 +23,8 @@
 //!   show (in the 0.172.0 schema, not recorded). The thread id is reported as
 //!   `SessionStarted`. If the server
 //!   exits during startup the error carries its stderr tail.
+//!   MCP-enabled launches require the dgc server to start. Modes with user
+//!   approval also prompt for dgc MCP tool calls.
 //! - Requests: dgc's ids increase from 1. Every request waits for its
 //!   response for at most [`RPC_TIMEOUT`]. Incoming lines are classified by
 //!   shape, since server requests use their own ids from 0: `method` + `id` →
@@ -46,6 +48,8 @@
 //!     error -32600 "no active turn" when the turn ended first), that turn's
 //!     `turn/completed`, notifications and approvals are dropped (approvals
 //!     answered as above) — by turn id, so other turns are unaffected.
+//!   - `shutdown` answers pending MCP elicitations with `cancel` before
+//!     closing stdin.
 //! - Event mapping (server → [`ProviderEvent`]):
 //!   - `item/agentMessage/delta` text is aggregated per `itemId` and emitted
 //!     on `item/completed` as `AssistantText { final_: true }` (the item's
@@ -277,8 +281,15 @@ impl ProviderAdapter for CodexAdapter {
                     ("args", argv),
                     ("env", env),
                     ("tool_timeout_sec", Toml::Integer(360)),
+                    ("required", Toml::Boolean(true)),
                 ] {
                     args.extend(["-c".to_owned(), format!("mcp_servers.dgc.{key}={value}")]);
+                }
+                if !policy.auto_approve {
+                    args.extend([
+                        "-c".to_owned(),
+                        r#"mcp_servers.dgc.default_tools_approval_mode="prompt""#.to_owned(),
+                    ]);
                 }
             }
             args.push(wire::APP_SERVER.to_owned());
@@ -1514,6 +1525,19 @@ mod tests {
         assert_eq!(
             approval.answer(Decision::Deny),
             serde_json::json!({"id": 7, "result": {"permissions": {}, "scope": "turn"}})
+        );
+    }
+
+    #[test]
+    fn codex_elicitation_allow_for_session_accepts_once() {
+        let approval = Approval {
+            server_id: json!(7),
+            turn_id: "turn-1".to_owned(),
+            request: ApprovalRequest::Elicitation,
+        };
+        assert_eq!(
+            approval.answer(Decision::AllowForSession),
+            json!({"id": 7, "result": {"action": "accept", "content": null}})
         );
     }
 
