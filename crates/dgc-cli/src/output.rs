@@ -1,10 +1,14 @@
 //! Rendering shared by subcommands.
 
+use dgc_daemon::schedule::localtime::format_local;
 use dgc_protocol::event::{AgentEvent, EventKind};
-use dgc_protocol::methods::{DaemonStatus, ProviderStatus, WorkspaceArchiveResult};
+use dgc_protocol::methods::{
+    DaemonStatus, ProviderStatus, ScheduleListEntry, WorkspaceArchiveResult,
+};
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PendingPermission, PermissionKind, Project,
-    ProviderKind, Resolution, SendBehavior, SendOutcome, Workspace, WorkspaceState,
+    ProviderKind, Resolution, RunOutcome, Schedule, ScheduleRun, ScheduleState, ScheduleTarget,
+    SendBehavior, SendOutcome, Workspace, WorkspaceState,
 };
 
 /// `text` with every control character except `\n` written as a visible
@@ -191,6 +195,103 @@ pub fn agent_details(agent: &Agent) -> String {
         text.push_str(&format!("\nlast_error: {}", escape_line(error)));
     }
     text
+}
+
+pub fn schedule_state_name(state: ScheduleState) -> &'static str {
+    match state {
+        ScheduleState::Active => "active",
+        ScheduleState::Paused => "paused",
+        ScheduleState::Ended => "ended",
+    }
+}
+
+fn schedule_target_label(target: &ScheduleTarget, auto_approve: bool) -> String {
+    let mut label = match target {
+        ScheduleTarget::NewAgent {
+            workspace_id,
+            provider,
+            ..
+        } => format!("{workspace_id}  {}", provider_name(*provider)),
+        ScheduleTarget::Agent { agent_id } => agent_id.to_string(),
+    };
+    if auto_approve {
+        label.push_str("  auto-approve");
+    }
+    label
+}
+
+fn schedule_run_count(runs: u32, max_runs: Option<u32>) -> String {
+    let max = max_runs.map_or_else(|| "-".to_owned(), |n| n.to_string());
+    format!("{runs}/{max}")
+}
+
+fn optional_local_time(time: Option<i64>) -> String {
+    time.map_or_else(|| "-".to_owned(), format_local)
+}
+
+/// `<id>  <name>  <cron>  <state>  <next run>  <runs/max>  <target>`
+pub fn schedule_line(entry: &ScheduleListEntry, auto_approve: bool) -> String {
+    format!(
+        "{}  {}  {}  {}  {}  {}  {}",
+        entry.id,
+        escape_line(entry.name.as_deref().unwrap_or("-")),
+        escape_line(&entry.cron),
+        schedule_state_name(entry.state),
+        optional_local_time(entry.next_run_at),
+        schedule_run_count(entry.runs, entry.max_runs),
+        schedule_target_label(&entry.target, auto_approve),
+    )
+}
+
+pub fn schedule_details(schedule: &Schedule, auto_approve: bool) -> String {
+    let optional = |value: &Option<String>| escape_line(value.as_deref().unwrap_or("-"));
+    let mut text = format!(
+        "id: {}\nname: {}\ncron: {}\nstate: {}\nnext_run_at: {}\nruns: {}\nexpires_at: {}\ntarget: {}",
+        schedule.id,
+        optional(&schedule.name),
+        escape_line(&schedule.cron),
+        schedule_state_name(schedule.state),
+        optional_local_time(schedule.next_run_at),
+        schedule_run_count(schedule.runs, schedule.max_runs),
+        optional_local_time(schedule.expires_at),
+        schedule_target_label(&schedule.target, auto_approve),
+    );
+    if let ScheduleTarget::NewAgent { model, mode, .. } = &schedule.target {
+        text.push_str(&format!(
+            "\nmodel: {}\nmode: {}",
+            optional(model),
+            optional(mode)
+        ));
+    }
+    if let Some(reason) = &schedule.end_reason {
+        text.push_str(&format!("\nend_reason: {}", escape_line(reason)));
+    }
+    if let Some(agent_id) = &schedule.last_agent_id {
+        text.push_str(&format!("\nlast_agent_id: {agent_id}"));
+    }
+    text.push_str("\nprompt:\n  ");
+    text.push_str(&escape_text(&schedule.prompt).replace('\n', "\n  "));
+    text.push_str("\nrecent_runs:");
+    if schedule.recent_runs.is_empty() {
+        text.push_str(" -");
+    }
+    for run in &schedule.recent_runs {
+        text.push_str(&format!("\n  {}", schedule_run_line(run)));
+    }
+    text
+}
+
+pub fn schedule_run_line(run: &ScheduleRun) -> String {
+    let outcome = match &run.outcome {
+        RunOutcome::Started { agent_id } => format!("started  {agent_id}"),
+        RunOutcome::Sent { agent_id, outcome } => {
+            format!("{}  {agent_id}", outcome_name(*outcome))
+        }
+        RunOutcome::Skipped { reason } => format!("skipped  {}", escape_line(reason)),
+        RunOutcome::Missed => "missed".to_owned(),
+        RunOutcome::Failed { error_kind } => format!("failed  {}", escape_line(error_kind)),
+    };
+    format!("{}  {outcome}", format_local(run.at))
 }
 
 /// `<permission id>  <agent id>  <kind>  <summary>`

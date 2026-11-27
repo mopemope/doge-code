@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M5 Task 3（スケジュールと heartbeat の CLI）
+- タスク: M5 Task 4（ワークスペーススクリプトのデーモン）
 - 状態: 未着手
-- 済んだこと: Task 2 のデーモン側スケジューラー、heartbeat、永続化、プロトコル v3 の RPC を実装。
-- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 3 に従い、CLI と README を追加する。
+- 済んだこと: Task 3 の `dgc schedule` と `dgc heartbeat`、CLI 統合テスト、README を追加。
+- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 4 に従い、ワークスペーススクリプトのデーモン処理を追加する。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -98,7 +98,7 @@
 |---|---|---|---|
 | 1 | cron とローカル時刻 | 完了 | `feat(daemon): parse cron expressions in local time` |
 | 2 | スケジュールと heartbeat（デーモン） | 完了 | `feat(daemon): run schedules and heartbeats` |
-| 3 | スケジュールと heartbeat の CLI | 未着手 | `feat(cli): manage schedules and heartbeats` |
+| 3 | スケジュールと heartbeat の CLI | 完了 | `feat(cli): manage schedules and heartbeats` |
 | 4 | ワークスペーススクリプト（デーモン） | 未着手 | `feat(daemon): run trusted workspace scripts from dgc.json` |
 | 5 | スクリプトの CLI | 未着手 | `feat(cli): trust, run and follow workspace scripts` |
 | 6 | M5 受け入れ | 未着手 | `docs(orchestrator): complete M5 acceptance` |
@@ -106,6 +106,10 @@
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 Task 3): `heartbeat ls` と `heartbeat show` のテキスト出力は `agent.get` で `auto_approve` を確認する。
+  対象が見つからない場合はエージェント ID を表示する。JSON は既存 RPC の構造を使う。
+  CLI の時刻表示は `format_local` で行う。デーモンが独自の `TZ` で動く場合は CLI に同じ設定が必要。
 
 - 2026-11-27 (M5 Task 2): 新しい RPC と `stop_when_idle` を追加し、プロトコルを v3 に更新する。v2 の hello は `VERSION_MISMATCH`。
   `schedule.list` は `ScheduleListResult` を返す。本文と履歴は `schedule.get` で取得する。`pause` と `resume` は更新後の `Schedule`、`remove` は空オブジェクトを返す。
@@ -655,6 +659,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 3（Linux、Rust 1.99.0）
+  - `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` は PASS。続く `cargo test --locked -p dgc-cli --test schedule_cli` は未登録の CLI で 6 件 FAIL、実装後は 6 件 PASS。
+  - `bash scripts/verify.sh test schedule` は 28 件 PASS。`cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 695 件）、`bash scripts/verify.sh guidance`（Python 40 件）は PASS。
+  - ヘルプの全サブコマンドと `--provider` / `--profile` の排他を確認。実プロバイダと macOS は未検証。
 
 - 2026-11-27 M5 Task 2 レビュー修正（Linux、Rust 1.99.0）
   - RED は `cargo test --locked -p dgc-daemon --test schedule` で 7 件 FAIL、対応するアクターの送信テストも `stopped` で FAIL。

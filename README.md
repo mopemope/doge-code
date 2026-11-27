@@ -285,6 +285,79 @@ schemas and are tested with synthetic scenarios. The real-provider handoff
 was tested with Claude Haiku and Codex GPT-6 Luna. Real usage-limit exhaustion
 remains unobserved.
 
+## Schedules and heartbeats
+
+A schedule launches a new agent in a workspace on each run. A heartbeat sends
+the same prompt to an existing agent when it is idle.
+
+- `dgc schedule create --cron EXPR --workspace WS (--provider P | --profile N)
+  [--model M] [--mode MODE] [--name NAME] [--max-runs N] [--expires-in DUR]
+  PROMPT` registers a schedule and prints its id. Choose exactly one of
+  `--provider` and `--profile`. As with `dgc run`, pass the prompt as one
+  positional argument and use shell quoting for spaces or line breaks.
+- `dgc heartbeat create AGENT --cron EXPR [--name NAME] [--max-runs N]
+  [--expires-in DUR] PROMPT` registers a heartbeat for that agent. Use the
+  returned schedule id to show or remove the heartbeat.
+- `dgc schedule ls [--json]` and `dgc heartbeat ls [--json]` list the id, name,
+  cron expression, state, next run, run count and limit, and target.
+  `dgc schedule show ID [--json]` and `dgc heartbeat show ID [--json]` show the
+  settings, prompt, and up to 20 recent runs.
+- `dgc schedule pause ID` pauses timed runs, and `dgc schedule resume ID`
+  recalculates the next run and resumes them. `dgc schedule run ID` triggers
+  a run immediately, including while paused. A manual run leaves the next
+  scheduled time in place unless the schedule ends. `dgc schedule rm ID` and
+  `dgc heartbeat rm ID` remove the registration.
+
+```sh
+dgc schedule create --cron '0 9 * * mon-fri' --workspace "$ws" --profile review \
+  --name 'Weekday review' --expires-in 7d 'Review the latest changes'
+dgc heartbeat create "$agent" --cron '*/30 * * * *' --max-runs 4 'Check for updates'
+```
+
+Quote cron expressions so the shell passes them as one argument. The five
+fields are minute, hour, day of month, month, and day of week. They accept
+`*`, numbers, ranges (`a-b`), lists (`a,b`), and steps (`*/n`, `a-b/n`).
+Month and weekday names (`jan`–`dec` and `sun`–`sat`) are case-insensitive.
+Both `0` and `7` mean Sunday. When neither the day-of-month nor the weekday
+field begins with `*`, either field can match. Otherwise both must match.
+The supported macros are `@hourly`, `@daily`, `@weekly`, `@monthly`,
+`@yearly`, and `@annually`. An expression must have a match within five years.
+
+The daemon evaluates cron in its local time. Restart it after changing its
+`TZ`. Run the CLI with the same timezone as the daemon to see corresponding
+local timestamps (`YYYY-MM-DD HH:MM ±hhmm`). At the start of daylight saving
+time, a skipped clock minute never fires. At the end, a repeated minute
+fires once.
+
+`--expires-in` takes a positive integer followed by `m`, `h`, or `d`
+(minutes, hours, or 24-hour days). The schedule ends when the expiry or the
+run limit is reached, and ended schedules have no next run. The run limit
+counts successful launches and sends, including manual runs. When the daemon
+finds a timed run more than 120 seconds overdue, it records one `missed` entry
+and computes the next run. A `skipped` entry means the previous scheduled
+agent is still starting, running, or waiting for permission, or a heartbeat's
+agent is busy or stopped. A failed agent also causes a heartbeat to skip.
+Timed runs are at-most-once. A daemon crash just after a launch or send can
+leave that run absent from the history and count.
+
+A scheduled agent stops when it goes idle with an empty queue. If you start it
+again with `dgc resume AGENT`, that agent stays live when idle. A heartbeat
+ends if its agent is archived or disappears. Either registration ends if
+its workspace is archived or disappears.
+
+The daemon resolves and saves the provider, model, permission mode, and
+auto-approve setting when you create a schedule. Later profile edits do not
+change it. When you leave the mode unspecified, the daemon saves `manual`
+for Claude or `workspace-write` for Codex. Creating a schedule with an
+auto-approve mode prints a `warning:` line on stderr, including with
+`--json`. The text list and details mark auto-approve schedules and
+heartbeats whose target agent uses auto-approve. A missing heartbeat target
+appears by id alone. Provider permission requests wait for the user, including
+on unattended runs.
+
+Prompts and names are stored in the schedule's `0600`
+`schedules/<id>.json` record under the daemon's state directory.
+
 ## Terminal UI
 
 `dgc tui` (or `dgc` with no arguments) opens a full-screen terminal UI for all
@@ -435,7 +508,7 @@ experiments).
 | What | Location |
 |---|---|
 | Socket | `$XDG_RUNTIME_DIR/dgc/daemon.sock`, else `~/.local/state/dgc/run/daemon.sock` |
-| Projects, workspaces, agents, events, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
+| Projects, workspaces, agents, events, schedules, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
 | Config (`claude_path`, `codex_path`, `events_max_bytes`, `profiles`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
 | Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
 

@@ -47,6 +47,16 @@ enum Command {
         #[command(subcommand)]
         command: commands::profile::ProfileCommand,
     },
+    /// Schedule new agents to run on a cron expression.
+    Schedule {
+        #[command(subcommand)]
+        command: commands::schedule::ScheduleCommand,
+    },
+    /// Send periodic prompts to existing agents.
+    Heartbeat {
+        #[command(subcommand)]
+        command: commands::schedule::HeartbeatCommand,
+    },
     /// List and answer agents' permission requests.
     Permit {
         #[command(subcommand)]
@@ -65,6 +75,10 @@ async fn main() -> ExitCode {
         Some(Command::Handoff(command)) => commands::handoff::run(command, cli.json).await,
         Some(Command::Agent(command)) => commands::agent::run(command, cli.json).await,
         Some(Command::Profile { command }) => commands::profile::run(command, cli.json).await,
+        Some(Command::Schedule { command }) => commands::schedule::run(command, cli.json).await,
+        Some(Command::Heartbeat { command }) => {
+            commands::schedule::heartbeat(command, cli.json).await
+        }
         Some(Command::Permit { command }) => commands::permit::run(command, cli.json).await,
     };
     match result {
