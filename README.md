@@ -72,9 +72,11 @@ dgc send AGENT --behavior queue "Then update the changelog"
 dgc                                        # the terminal UI
 ```
 
-With the global `--json` flag the commands print machine-readable JSON (except
-`daemon start` / `stop`; the TUI refuses it). The CLI starts the daemon on demand, so you rarely need the daemon
-commands.
+Use the global `--json` flag for machine-readable output. Among workspace
+script commands, `dgc script ls` is the only one that accepts `--json`.
+`daemon start` and `daemon stop` always print text, and the TUI requires
+interactive terminal output. The CLI starts the daemon on demand, so you rarely
+need the daemon commands.
 
 ## Daemon
 

@@ -5,6 +5,7 @@
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
 - 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md) / [M4](../superpowers/plans/2026-11-26-orchestrator-m4-profiles-handoff.md)
+  / [M5](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,10 +18,10 @@
 
 ## 現在の作業
 
-- タスク: M5 Task 6（M5 受け入れ）
-- 状態: 未着手
-- 済んだこと: Task 5 の `dgc script`、CLI 統合テスト、README のワークスペーススクリプト節を追加。
-- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 6 に従い、一時リポジトリと偽プロバイダで受け入れ確認を始める。
+- タスク: M5 の PR 作成とマージ待ち、その後 M6（エージェント向け MCP）の計画作成
+- 状態: 未着手（M5 の PR は未作成）
+- 済んだこと: M5 Task 6 の偽プロバイダ、実 Claude Haiku、固定ツールチェーンでの受け入れ検証。
+- 次の一手: M5 の変更と検証結果を PR にまとめる。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -32,7 +33,7 @@
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
 | M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
-| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 作業中 | m5-schedules-scripts |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR 未作成） | m5-schedules-scripts |
 | M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
 ## タスク
@@ -101,7 +102,7 @@
 | 3 | スケジュールと heartbeat の CLI | 完了 | `feat(cli): manage schedules and heartbeats` |
 | 4 | ワークスペーススクリプト（デーモン） | 完了 | `feat(daemon): run trusted workspace scripts from dgc.json` |
 | 5 | スクリプトの CLI | 完了 | `feat(cli): trust, run and follow workspace scripts` |
-| 6 | M5 受け入れ | 未着手 | `docs(orchestrator): complete M5 acceptance` |
+| 6 | M5 受け入れ | 完了 | `docs(orchestrator): complete M5 acceptance` |
 
 ## 決定事項
 
@@ -677,6 +678,28 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 6（Linux、Rust 1.99.0、手動確認の時刻は JST）
+  - `cargo build --locked -p dgc-cli -p dgc-daemon --bins` は PASS。偽プロバイダと実 Claude は別々の一時 git リポジトリと `DGC_STATE_ROOT`、作業用 `config.toml` で実施。
+  - `dgc schedule create --cron '* * * * *' … --max-runs 1` は 16:37:06 に `started` が1件。`dgc schedule show` は `runs: 1/1`、`state: ended`。
+    `dgc logs --json` で `turn_completed` 1件と `idle` → `stopped` を確認。
+  - 権限要求を返す偽シナリオの初回実行は 16:37:06 に `waiting_permission` となり、`dgc permit ls` に要求が表示された。
+    次回の 16:38:06 に `dgc schedule show` は `skipped previous_run_active` を表示し、実行回数は1、同じエージェントの権限待ちが続いた。
+  - `dgc daemon stop` で 16:38:07.027 に停止し、174.973秒待って 16:41:02 に同じ状態から `dgc daemon run` で再起動。
+    16:39:00 の予定時刻から122秒経過しており、`dgc schedule show --json` は `missed` 1件、`runs: 0`、`last_agent_id: null`、次回 16:42 を返した。
+  - idle の偽エージェントに `dgc heartbeat create AGENT --cron '* * * * *' --max-runs 1 heartbeat` を登録。
+    16:37:06 に `dgc heartbeat show` が `sent` を表示し、対象ログの `user_message`（`queue`）、2回目の `turn_completed`、`idle` を確認。
+  - 16:36:06 に `dgc script trust --workspace WS --yes` → `dgc script start tick --workspace WS`。
+    `dgc script logs tick --workspace WS --follow` は `m5 script boot`、`m5 tick 1`、`m5 tick 2` を配信し、16:36:08 に `dgc script stop tick --workspace WS` 後、終了コード0。
+    `dgc.json` の整形だけを変えると `script ls` は `trust: changed`、再度の `script start` は `script_untrusted` と終了コード1。
+  - 実 Claude Code 2.1.332 は `claude auth status` が `loggedIn: true`。
+    `dgc schedule create --cron '0 0 1 1 *' --workspace WS --provider claude --model haiku --max-runs 1 'Reply with the single word OK.'` で 2027-01-01 00:00 を指定し、既定の `manual` と `auto_approve: false` を確認。
+    16:37:12 に `dgc schedule run ID` を1回実行し、16:37:13 に `OK`、`turn_completed` 1件、`idle` → `stopped` を観測。作業用ラッパーは Claude のカスタマイズ、会話保存と組み込みツールを無効にした。
+  - `script trust`、`start`、`stop`、`logs --follow` の `--json` がいずれも終了コード1で拒否されたため、README の Quick start を修正し、スクリプト系で `--json` を受け付けるのは `script ls` と記載した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 723件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40件）、
+    `bash scripts/verify.sh msrv`（Rust 1.94.0）、`bash scripts/verify.sh tui-deps` はすべて PASS。
+  - `dgc daemon stop` と `script stop` で停止し、試験用プロセスの残存0件と一時ディレクトリの削除を確認した。
+    コマンド、タイムスタンプ、出力は作業フォルダの `task-6-manual-*.log`、自動検証は `task-6-verify-*.log` に保存。必須検証のブロックは0件。macOS は未実行。
 
 - 2026-11-27 M5 Task 5（Linux、Rust 1.99.0）
   - `cargo test --locked -p dgc-cli --test script_cli` は `script` サブコマンド未登録で 7 件 FAIL、実装後は 7 件 PASS。`bash scripts/verify.sh test script_` は 18 件 PASS。
