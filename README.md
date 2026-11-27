@@ -212,11 +212,13 @@ archived, its children keep their state and can continue independently.
 Every tool other than `create_agent` operates only on descendants of the
 calling agent.
 
-MCP calls follow the provider's normal approval flow. When the provider asks
-for approval, dgc relays the request to the user through the usual CLI and TUI
-permission controls. The same flow applies to requests from children. The
-local socket's peer UID is the security boundary. The parent/child and
-descendant rules are guardrails within that UID.
+MCP calls follow the provider's normal approval flow. dgc relays supported
+approval requests from parents and children through the usual CLI and TUI
+permission controls. In the acceptance run with Codex CLI 0.172.0 in default
+`workspace-write` mode, MCP tool discovery succeeded. dgc rejected an
+unsupported `mcpServer/elicitation/request`, and the turn ended without calling
+a dgc MCP tool. The local socket's peer UID is the security boundary. The
+parent/child and descendant rules are guardrails within that UID.
 
 ### Launch profiles
 

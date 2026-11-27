@@ -18,10 +18,8 @@
 
 ## 現在の作業
 
-- タスク: M6 Task 4（M6 受け入れ）
-- 状態: 未着手
-- 済んだこと: Task 3 で `dgc run --mcp`、プロファイルの MCP 表示と TUI での適用、CLI/TUI の親子ツリーを実装。レビュー対応でタイトルを親注記より優先し、合成データで [TUI 画面](m6-tui-screen.txt)を再記録した。
-- 次の一手: Task 3 のコントローラーレビュー後、Task 4 で偽プロバイダと実プロバイダの受け入れ確認を行う。
+- タスク: M6 の PR 作成とマージ待ち、その後フェーズ A の総括（残りの保留指摘の整理）とフェーズ B の設計準備
+- 済んだこと: M6 Task 4 の受け入れ結果を記録した。偽プロバイダと Claude は子が `OK` を返した。Codex はツール一覧の取得後、未対応の `mcpServer/elicitation/request` が発生し、子の作成まで進まなかった。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
@@ -34,7 +32,7 @@
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
 | M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
 | M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188 マージ済み） | m5-schedules-scripts |
-| M6 | エージェント向け MCP（サブエージェント） | 作業中 | m6-mcp-subagents |
+| M6 | エージェント向け MCP（サブエージェント） | 完了（PR 未作成、Codex 実機に保留事項あり） | m6-mcp-subagents |
 
 ## タスク
 
@@ -112,13 +110,15 @@
 | 1 | 親子の規則と MCP の付与（デーモン） | 完了 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
 | 2 | `dgc mcp`（MCP サーバー） | 完了 | `feat(cli): serve sub-agent tools over MCP` |
 | 3 | CLI と TUI での表示と有効化 | 完了 | `feat(cli): enable MCP per agent and show sub-agent trees` |
-| 4 | M6 受け入れ | 未着手 | `docs(orchestrator): complete M6 acceptance` |
+| 4 | M6 受け入れ | 完了（Codex 実機に保留事項あり） | `docs(orchestrator): complete M6 acceptance` |
 
 ## 決定事項
 
 - 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
 
+- 2026-11-27 (M6 Task 4): Claude は `haiku`、Codex は `gpt-6-luna` を親子に指定した。Codex CLI の `model/list` に載る通常モデルのうち、公式の Codex 標準レートで最低のモデルを選んだ。2026-11-27 参照。[Claude Code モデル設定](https://code.claude.com/docs/en/model-config) [OpenAI の Codex レート表](https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing) [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+- 2026-11-27 (M6 Task 4): 実クライアントの初期化を [MCP フィクスチャ](../../crates/dgc-cli/tests/fixtures/mcp/README.md) に記録した。Codex の `mcpServer/elicitation/request` は現行アダプタが `-32601` で拒否する。実機で観測した制約を README に反映し、対応は保留とした。2026-11-27 参照。[Codex の MCP elicitation](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests) [MCP の版の互換性](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) [MCP のキャンセル](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation)
 - 2026-11-27 (M6 Task 3): `--mcp` は有効化専用。CLI の起動単位で `mcp = true` のプロファイルを無効化する指定は設けない。TUI 作成フォームは `profile.list` の有効値を送る。RPC の `ProfileInfo.mcp` は省略時 false として読む。
 - 2026-11-27 (M6 Task 3): 親子は同じワークスペース内で親を先に表示し、兄弟は従来の一覧順。非表示の親を持つ子はワークスペース配下で深さを保ち、`↳ parent <short id>` を付ける。TUI の列幅が足りない場合は短い ID の固定接頭辞から省く。TUI の上下移動と `p` は描画順に従い、子からの `←` は表示されている親、親が非表示ならワークスペースを選ぶ。
 - 2026-11-27 (M6 Task 3): MCP ツールの承認はプロバイダの設定と通常の権限要求経路に従うことを README に記載。公式資料を同日参照した。[Claude Code の権限](https://code.claude.com/docs/en/permissions) [Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [MCP のツール仕様](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#user-interaction-model)
@@ -738,6 +738,14 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 4（Linux、Rust 1.99.0、DONE_WITH_CONCERNS）
+  - `cargo build --locked -p dgc-cli --bin dgc` と `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` が PASS。`mktemp -d` 配下の個別の絶対 `DGC_STATE_ROOT`、設定、使い捨て Git リポジトリで手動検証した。実クライアントは既存の認証ファイルを読み取り専用で参照した。
+  - 偽プロバイダの stdio クライアントから `dgc mcp --agent ID` を呼び、子の作成、待機、`last_answer = "OK"`、アーカイブを確認。深さ上限を 2 に設定し、上限での MCP 有効化と深さ 3 の作成、通常モードの親からの `bypassPermissions` 指定はいずれも `INVALID_PARAMS`（`-32602`）で拒否された。
+  - Claude Code 2.1.332（`dgc run --provider claude --model haiku --mcp`、既定モード）: `server/discover` の `-32601` を受けて `initialize` に切り替わり、要求した `2025-11-25` が受理された。`tools/list`、`tools/call` の `create_agent` と `wait_agent` が成功し、子と親の回答は `OK`。`dgc permit ls` に出た `mcp__dgc__create_agent` 1 件と `mcp__dgc__wait_agent` 2 件を `dgc permit allow` で個別に許可した。3 件目の許可後、MCP のツール応答を一時ラッパーで保留して `dgc interrupt` を実行し、同じ要求 ID への `notifications/cancelled` を確認した。
+  - Codex CLI 0.172.0（`dgc run --provider codex --model gpt-6-luna --mcp`、既定の `workspace-write`）: 最初から `initialize` で、要求した `2025-06-18` が受理された。`tools/list` は成功。ターン中に未対応の `mcpServer/elicitation/request` が 1 件発生し、`dgc permit ls` は 0 件、MCP 側の `tools/call` は 0 件、子の作成は 0 件だった。ツール承認の要否は未確認。親の終了後に `dgc interrupt` を 1 回試し終了コード 1。処理中の MCP 呼び出しがなく、キャンセル通知は未捕捉。
+  - 全デーモンを停止し、ソケット消滅と子孫プロセス 0 件を確認。一時ディレクトリを削除し、対象プロセスの残存がないことを確認した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 778 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh msrv`（Rust 1.94.0）、`bash scripts/verify.sh tui-deps` が PASS。作業フォルダに `task-4-verify-*.log` を保存。macOS 実機は未検証。
 
 - 2026-11-27 M6 Task 3 レビュー対応（Linux、Rust 1.99.0）
   - 120 列の TUI で `[auto]` と `[mcp]` が付いた子のタイトルと親 ID が欠けるケース、および `ls` の行末が `depth=N` にならないケースを RED/GREEN で確認した。不正な親リンクと最大深さの回帰テストは、修正前から 2 件 PASS。
