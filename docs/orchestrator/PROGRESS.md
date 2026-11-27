@@ -19,7 +19,7 @@
 
 - タスク: M5 Task 5（ワークスペーススクリプトの CLI）
 - 状態: 未着手
-- 済んだこと: Task 4 の `script.*` RPC、信頼の保存、プロセスグループの監督とログ、テストを追加。
+- 済んだこと: Task 4 の `script.*` RPC、信頼の保存、プロセスグループの監督とログ、テストを追加し、レビュー指摘 5 件を反映。
 - 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 5 に従い、`dgc script` と README を追加する。
 - 未コミットの変更: なし
 
@@ -106,6 +106,11 @@
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 Task 4 レビュー修正): `script.logs` は生バイトの `start_offset` を返す。要求位置より後ろなら、ログ回転などで読み飛ばしたデータがある。
+  ページ末尾の未完の UTF-8 文字は次回の読み取りに回し、プロセス終了後の EOF では不正なバイトとして置換する。
+  `script.list` は有効なファイルに存在しない実行履歴も `in_file: false`、空の `command`、`cwd: null` で返す。
+  重複したスクリプト名は無効。信頼時のファイルエラーは `INVALID_PARAMS` とエラー種別を返し、バイト不一致は `script_file_changed` を返す。
 
 - 2026-11-27 (M5 Task 4): 信頼はプロジェクトごとに直近 16 件の UTF-8 原文を保存し、ファイルのバイト列を比較する。
   `script.start` は信頼確認と起動に同じスナップショットを使う。`script.list` は CLI の信頼確認用に `project_name` を返す。
@@ -667,6 +672,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 4 レビュー修正（Linux、Rust 1.99.0）
+  - RED は `cargo test --locked -p dgc-daemon --test script --test server` で script 7 件、`cargo test --locked -p dgc-daemon --test server script_rpcs_round_trip` で RPC 1 件が期待どおり FAIL。
+  - GREEN は `cargo test --locked -p dgc-daemon --test script --test server` で 51 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 716 件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40 件）は PASS。macOS と実プロバイダは未検証。
 
 - 2026-11-27 M5 Task 4（Linux、Rust 1.99.0）
   - RED は `cargo test --locked -p dgc-daemon --test script` でスクリプトモジュールと RPC 型の未定義によるコンパイルエラー。

@@ -396,6 +396,9 @@ pub enum ScriptState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptStatus {
     pub name: String,
+    /// True when the current valid script file defines this name. For a run
+    /// absent from that file, `command` is empty and `cwd` is absent.
+    pub in_file: bool,
     pub command: String,
     pub cwd: Option<PathBuf>,
     pub state: ScriptState,
@@ -421,6 +424,11 @@ pub struct ScriptListResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptLogsResult {
     pub data: String,
+    /// Raw byte offset where the returned data starts. A higher offset than
+    /// requested indicates skipped bytes, such as output lost to rotation.
+    pub start_offset: u64,
+    /// Raw byte offset to request next. A page can hold back a partial UTF-8
+    /// character. A caller using a small byte limit can retry with a larger one.
     pub next_offset: u64,
     pub running: bool,
 }

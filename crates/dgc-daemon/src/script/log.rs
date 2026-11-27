@@ -49,30 +49,87 @@ impl LogFiles {
         oldest: u64,
         offset: Option<u64>,
         max_bytes: u32,
+        running: bool,
     ) -> io::Result<ScriptLogsResult> {
         let (mut previous, previous_len) = open_for_read(&self.dir, &self.previous)?;
         let (mut active, active_len) = open_for_read(&self.dir, &self.active)?;
         let boundary = oldest + previous_len;
         let end = boundary + active_len;
+        let limit = u64::from(max_bytes);
         let start = offset
-            .unwrap_or_else(|| end.saturating_sub(u64::from(max_bytes)))
+            .unwrap_or_else(|| end.saturating_sub(limit))
             .clamp(oldest, end);
+        // Look back far enough to identify a character crossing the tail's
+        // start while keeping genuine invalid continuation bytes lossy.
+        let prefix = if offset.is_none() && limit > 0 {
+            (start - oldest).min(3)
+        } else {
+            0
+        };
+        let read_start = start - prefix;
+        let read_limit = limit + prefix;
         let mut bytes = Vec::new();
-        let previous_bytes = boundary.saturating_sub(start).min(u64::from(max_bytes));
+        let previous_bytes = boundary.saturating_sub(read_start).min(read_limit);
         if let Some(file) = previous.as_mut().filter(|_| previous_bytes > 0) {
-            file.seek(SeekFrom::Start(start - oldest))?;
+            file.seek(SeekFrom::Start(read_start - oldest))?;
             file.take(previous_bytes).read_to_end(&mut bytes)?;
         }
         if let Some(file) = active.as_mut() {
-            file.seek(SeekFrom::Start(start.saturating_sub(boundary)))?;
-            file.take(u64::from(max_bytes) - bytes.len() as u64)
+            file.seek(SeekFrom::Start(read_start.saturating_sub(boundary)))?;
+            file.take(read_limit - bytes.len() as u64)
                 .read_to_end(&mut bytes)?;
         }
+        let from = align_tail_start(&bytes, (prefix as usize).min(bytes.len()), running);
+        let mut to = bytes.len();
+        if running || read_start + (to as u64) < end {
+            to -= incomplete_suffix_len(&bytes[from..]);
+        }
         Ok(ScriptLogsResult {
-            data: String::from_utf8_lossy(&bytes).into_owned(),
-            next_offset: start + bytes.len() as u64,
-            running: false,
+            data: String::from_utf8_lossy(&bytes[from..to]).into_owned(),
+            start_offset: read_start + from as u64,
+            next_offset: read_start + to as u64,
+            running,
         })
+    }
+}
+
+fn continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
+}
+
+fn align_tail_start(bytes: &[u8], start: usize, running: bool) -> usize {
+    let Some(lead) = bytes[..start].iter().rposition(|&byte| !continuation(byte)) else {
+        return start;
+    };
+    let candidate = &bytes[lead..bytes.len().min(lead + 4)];
+    if let Some(character) = candidate
+        .utf8_chunks()
+        .next()
+        .and_then(|chunk| chunk.valid().chars().next())
+    {
+        return start.max(lead + character.len_utf8());
+    }
+    if running && incomplete_suffix_len(candidate) == candidate.len() {
+        // A live tail can begin inside a character still being written.
+        // Keep its leading byte available for the next request.
+        return lead;
+    }
+    start
+}
+
+fn incomplete_suffix_len(bytes: &[u8]) -> usize {
+    let Some(back) = bytes
+        .iter()
+        .rev()
+        .take(3)
+        .position(|&byte| !continuation(byte))
+    else {
+        return 0;
+    };
+    let len = back + 1;
+    match std::str::from_utf8(&bytes[bytes.len() - len..]) {
+        Err(err) if err.error_len().is_none() => len,
+        _ => 0,
     }
 }
 

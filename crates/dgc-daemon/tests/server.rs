@@ -1236,7 +1236,11 @@ async fn script_rpcs_round_trip() {
             sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("log data");
-    assert_eq!(page, json!({"data":"bc", "next_offset":3, "running":true}));
+    assert_eq!(
+        page,
+        json!({"data":"bc", "start_offset":1, "next_offset":3, "running":true})
+    );
+    assert_eq!(running["scripts"][0]["in_file"], true);
     assert_eq!(client.call_ok("script.stop", demo.clone()).await, json!({}));
     let stopped = client.call_ok("script.list", ws.clone()).await;
     assert_eq!(stopped["scripts"][0]["state"], "exited");

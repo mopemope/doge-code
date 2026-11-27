@@ -4,7 +4,7 @@ pub mod file;
 mod log;
 pub(crate) mod trust;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
@@ -190,7 +190,7 @@ impl ScriptManager {
             content: None,
             scripts: Vec::new(),
         };
-        match ScriptFile::read(&workspace.path) {
+        let definitions = match ScriptFile::read(&workspace.path) {
             Ok(file) => {
                 result.trust = history.state(Some(&file.bytes));
                 result.content =
@@ -199,30 +199,48 @@ impl ScriptManager {
                             reason: "dgc.json must be UTF-8",
                         })?,
                     );
-                let runs = self.runs();
-                for (name, def) in file.scripts {
-                    let mut status = ScriptStatus {
-                        name,
-                        command: def.command,
-                        cwd: def.cwd,
-                        state: ScriptState::NotRunning,
-                        pid: None,
-                        exit_code: None,
-                        signal: None,
-                        started_at: None,
-                        ended_at: None,
-                    };
-                    if let Some(run) = runs.get(id).and_then(|runs| runs.get(&status.name)) {
-                        run.fill(&mut status);
-                    }
-                    result.scripts.push(status);
-                }
+                file.scripts
             }
-            Err(ScriptFileError::Missing) => result.file = ScriptFileState::Missing,
+            Err(ScriptFileError::Missing) => {
+                result.file = ScriptFileState::Missing;
+                BTreeMap::new()
+            }
             Err(err) => {
                 result.file = ScriptFileState::Invalid;
                 result.error = Some(err.to_string());
+                BTreeMap::new()
             }
+        };
+        let all_runs = self.runs();
+        let runs = all_runs.get(id);
+        let mut entries: BTreeMap<_, _> = definitions
+            .into_iter()
+            .map(|(name, def)| (name, Some(def)))
+            .collect();
+        if let Some(runs) = runs {
+            for name in runs.keys() {
+                entries.entry(name.clone()).or_default();
+            }
+        }
+        for (name, def) in entries {
+            let in_file = def.is_some();
+            let (command, cwd) = def.map(|def| (def.command, def.cwd)).unwrap_or_default();
+            let mut status = ScriptStatus {
+                name,
+                in_file,
+                command,
+                cwd,
+                state: ScriptState::NotRunning,
+                pid: None,
+                exit_code: None,
+                signal: None,
+                started_at: None,
+                ended_at: None,
+            };
+            if let Some(run) = runs.and_then(|runs| runs.get(&status.name)) {
+                run.fill(&mut status);
+            }
+            result.scripts.push(status);
         }
         Ok(result)
     }
@@ -232,7 +250,7 @@ impl ScriptManager {
         let workspace = self.active_workspace(id)?;
         let _write = lock(&self.trust_writes);
         let file = ScriptFile::read(&workspace.path)
-            .map_err(|_| ScriptError::InvalidState("script_file_changed"))?;
+            .map_err(|err| ScriptError::InvalidParams(err.kind()))?;
         if file.bytes != expected_content.as_bytes() {
             return Err(ScriptError::InvalidState("script_file_changed"));
         }
@@ -348,20 +366,20 @@ impl ScriptManager {
         let max_bytes = max_bytes
             .unwrap_or(MAX_SCRIPT_LOG_BYTES)
             .min(MAX_SCRIPT_LOG_BYTES);
-        let mut page = match LogFiles::open(&self.state_dir, id, name, false)? {
+        Ok(match LogFiles::open(&self.state_dir, id, name, false)? {
             Some(files) => files.page(
                 oldest.as_deref().copied().unwrap_or_default(),
                 offset,
                 max_bytes,
+                running,
             )?,
             None => ScriptLogsResult {
                 data: String::new(),
+                start_offset: 0,
                 next_offset: 0,
                 running,
             },
-        };
-        page.running = running;
-        Ok(page)
+        })
     }
 
     pub(crate) async fn exclude_starts(&self) -> RwLockWriteGuard<'_, bool> {

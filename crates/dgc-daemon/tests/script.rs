@@ -13,7 +13,9 @@ use dgc_daemon::script::ScriptManager;
 use dgc_daemon::script::file::{ScriptFile, ScriptFileError};
 use dgc_daemon::store::Store;
 use dgc_daemon::workspace::WorkspaceManager;
-use dgc_protocol::methods::{ScriptState, ScriptStatus, ScriptTrustState, WorkspaceCreateParams};
+use dgc_protocol::methods::{
+    ScriptFileState, ScriptState, ScriptStatus, ScriptTrustState, WorkspaceCreateParams,
+};
 use dgc_protocol::model::{Isolation, Project, Workspace};
 use dgc_protocol::rpc::{INVALID_PARAMS, INVALID_STATE};
 use serde_json::{Value, json};
@@ -213,6 +215,21 @@ fn script_file_parses_and_rejects_unknown_keys_bad_names_and_limits() {
     assert!(matches!(
         ScriptFile::read(root.path()),
         Err(ScriptFileError::Invalid { .. })
+    ));
+    // The second spelling decodes to the same key and is far below the first
+    // definition in the source a user sees.
+    let duplicate = [
+        r#"{"version":1,"scripts":{"test":{"command":"printf first"},"#,
+        &"\n".repeat(60 * 1024),
+        r#""\u0074est":{"command":"printf second"}}}"#,
+    ]
+    .concat();
+    write(root.path(), duplicate);
+    assert!(matches!(
+        ScriptFile::read(root.path()),
+        Err(ScriptFileError::Invalid {
+            reason: "duplicate script name"
+        })
     ));
     let padded = format!("{}{}", CONTENT, " ".repeat(65_536 - CONTENT.len()));
     write(root.path(), &padded);
@@ -478,6 +495,180 @@ async fn script_output_goes_to_private_log_and_logs_pages_by_offset() {
 }
 
 #[tokio::test]
+async fn script_logs_preserves_utf8_across_pages() {
+    let mut env = Env::new().await;
+    env.scripts = env.scripts.with_log_limit(3);
+    env.start(r#"printf 'A\343\201\202Z'"#).await;
+    env.exited().await;
+    let first = env
+        .scripts
+        .logs(&env.ws.id, "demo", Some(0), Some(2))
+        .await
+        .expect("first page");
+    let second = env
+        .scripts
+        .logs(&env.ws.id, "demo", Some(first.next_offset), Some(4))
+        .await
+        .expect("next page");
+    assert_eq!((first.data.as_str(), first.next_offset), ("A", 1));
+    assert_eq!((second.data.as_str(), second.next_offset), ("あZ", 5));
+    assert_eq!(first.data + &second.data, "AあZ");
+}
+
+#[tokio::test]
+async fn script_logs_tail_starts_at_utf8_boundary() {
+    let env = Env::new().await;
+    env.start(r#"printf 'A\343\201\202Z\200!'"#).await;
+    env.exited().await;
+    let tail = env
+        .scripts
+        .logs(&env.ws.id, "demo", None, Some(5))
+        .await
+        .expect("tail");
+    let invalid = env
+        .scripts
+        .logs(&env.ws.id, "demo", None, Some(2))
+        .await
+        .expect("invalid tail");
+    assert_eq!((tail.data.as_str(), tail.next_offset), ("Z�!", 7));
+    assert_eq!(
+        serde_json::to_value(&tail).expect("result")["start_offset"],
+        4
+    );
+    assert_eq!((invalid.data.as_str(), invalid.next_offset), ("�!", 7));
+}
+
+#[tokio::test]
+async fn script_logs_waits_for_complete_utf8_at_live_eof() {
+    let env = Env::new().await;
+    env.start(r#"printf '\377A\343\201'; while [ ! -f ready ]; do sleep 0.01; done; printf '\202Z\343\201'"#).await;
+    timeout(WAIT, async {
+        while fs::read(env.log_path()).expect("log").len() < 4 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("partial output");
+    let first = env
+        .scripts
+        .logs(&env.ws.id, "demo", Some(0), None)
+        .await
+        .expect("live page");
+    let tail = env
+        .scripts
+        .logs(&env.ws.id, "demo", None, Some(1))
+        .await
+        .expect("live tail starts in partial character");
+    fs::write(env.ws.path.join("ready"), []).expect("let script finish");
+    env.exited().await;
+    let last = env
+        .scripts
+        .logs(&env.ws.id, "demo", Some(first.next_offset), None)
+        .await
+        .expect("final page");
+    assert!(first.running);
+    assert_eq!((first.data.as_str(), first.next_offset), ("�A", 2));
+    assert_eq!((tail.data.as_str(), tail.next_offset), ("", 2));
+    assert_eq!(
+        serde_json::to_value(&tail).expect("result")["start_offset"],
+        2
+    );
+    assert!(!last.running);
+    assert_eq!((last.data.as_str(), last.next_offset), ("あZ�", 8));
+}
+
+#[tokio::test]
+async fn script_list_keeps_runs_when_script_file_changes_or_disappears() {
+    let env = Env::new().await;
+    env.start("exec sleep 60").await;
+    write(&env.ws.path, r#"{"version":1,"scripts":{}}"#);
+    let absent = env
+        .scripts
+        .list(&env.ws.id)
+        .await
+        .expect("valid file without demo");
+    fs::remove_file(env.ws.path.join("dgc.json")).expect("remove config");
+    let missing = env.scripts.list(&env.ws.id).await.expect("missing file");
+    write(&env.ws.path, b"invalid");
+    let invalid = env.scripts.list(&env.ws.id).await.expect("invalid file");
+    env.scripts
+        .stop(&env.ws.id, "demo")
+        .await
+        .expect("stop without definition");
+    let exited = env.scripts.list(&env.ws.id).await.expect("exited run");
+
+    for (listing, file_state) in [
+        (absent, ScriptFileState::Ok),
+        (missing, ScriptFileState::Missing),
+        (invalid, ScriptFileState::Invalid),
+    ] {
+        assert_eq!(listing.file, file_state);
+        let [status] = listing.scripts.as_slice() else {
+            panic!("expected one run while file is {file_state:?}");
+        };
+        assert_eq!(status.name, "demo");
+        assert_eq!(status.state, ScriptState::Running);
+        assert!(status.pid.is_some());
+        assert_eq!(status.command, "");
+        assert!(status.cwd.is_none());
+        assert_eq!(
+            serde_json::to_value(status).expect("status")["in_file"],
+            false
+        );
+    }
+    assert_eq!(exited.scripts[0].state, ScriptState::Exited);
+}
+
+#[tokio::test]
+async fn script_trust_reports_file_errors_by_kind() {
+    let env = Env::new().await;
+    let mut errors = Vec::new();
+    let error = env
+        .scripts
+        .trust(&env.ws.id, CONTENT)
+        .await
+        .expect_err("missing");
+    errors.push((error.code(), error.to_string()));
+    let path = env.ws.path.join("dgc.json");
+    fs::create_dir(&path).expect("directory in place of file");
+    let error = env
+        .scripts
+        .trust(&env.ws.id, CONTENT)
+        .await
+        .expect_err("not regular");
+    errors.push((error.code(), error.to_string()));
+    fs::remove_dir(&path).expect("remove directory");
+    write(&env.ws.path, " ".repeat(65_537));
+    let error = env
+        .scripts
+        .trust(&env.ws.id, CONTENT)
+        .await
+        .expect_err("too large");
+    errors.push((error.code(), error.to_string()));
+    write(
+        &env.ws.path,
+        r#"{"version":1,"scripts":{"demo":{"command":"private","unexpected":true}}}"#,
+    );
+    let error = env
+        .scripts
+        .trust(&env.ws.id, CONTENT)
+        .await
+        .expect_err("invalid");
+    errors.push((error.code(), error.to_string()));
+
+    assert_eq!(
+        errors,
+        ["missing", "not_regular", "too_large", "invalid"]
+            .map(|kind| (INVALID_PARAMS, kind.to_owned()))
+    );
+    write(&env.ws.path, CONTENT);
+    assert_eq!(
+        env.scripts.list(&env.ws.id).await.expect("list").trust,
+        ScriptTrustState::Untrusted
+    );
+}
+
+#[tokio::test]
 async fn script_env_has_workspace_vars() {
     let env = Env::new().await;
     fs::create_dir(env.ws.path.join("sub")).expect("subdir");
@@ -576,6 +767,14 @@ async fn log_rotates_once_past_limit() {
         .expect("retained data only");
     assert_eq!(expired.data, "9abcdefghi");
     assert_eq!(expired.next_offset, 18);
+    assert_eq!(
+        serde_json::to_value(&page).expect("result")["start_offset"],
+        13
+    );
+    assert_eq!(
+        serde_json::to_value(&expired).expect("result")["start_offset"],
+        8
+    );
     assert_eq!(
         fs::read_dir(path.parent().expect("log dir"))
             .expect("directory")

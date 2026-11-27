@@ -1,7 +1,8 @@
 //! Load and validate one workspace script configuration snapshot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::ffi::CString;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -9,6 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
@@ -25,6 +27,17 @@ pub enum ScriptFileError {
     TooLarge,
     #[error("invalid: {reason}")]
     Invalid { reason: &'static str },
+}
+
+impl ScriptFileError {
+    pub(super) fn kind(&self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::NotRegular => "not_regular",
+            Self::TooLarge => "too_large",
+            Self::Invalid { .. } => "invalid",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +62,48 @@ pub struct ScriptFile {
 #[serde(deny_unknown_fields)]
 struct Format {
     version: u32,
-    scripts: BTreeMap<String, ScriptDef>,
+    #[serde(deserialize_with = "deserialize_scripts")]
+    scripts: ScriptDefinitions,
+}
+
+enum ScriptDefinitions {
+    Unique(BTreeMap<String, ScriptDef>),
+    Duplicate,
+}
+
+fn deserialize_scripts<'de, D: Deserializer<'de>>(de: D) -> Result<ScriptDefinitions, D::Error> {
+    struct ScriptsVisitor;
+
+    impl<'de> Visitor<'de> for ScriptsVisitor {
+        type Value = ScriptDefinitions;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map of script names to definitions")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut scripts = BTreeMap::new();
+            let mut duplicate = false;
+            while let Some(name) = map.next_key()? {
+                match scripts.entry(name) {
+                    Entry::Occupied(_) => {
+                        duplicate = true;
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(map.next_value()?);
+                    }
+                }
+            }
+            Ok(if duplicate {
+                ScriptDefinitions::Duplicate
+            } else {
+                ScriptDefinitions::Unique(scripts)
+            })
+        }
+    }
+
+    de.deserialize_map(ScriptsVisitor)
 }
 
 fn invalid(reason: &'static str) -> ScriptFileError {
@@ -101,10 +155,13 @@ impl ScriptFile {
         if format.version != 1 {
             return Err(invalid("unsupported dgc.json version"));
         }
-        if format.scripts.len() > MAX_SCRIPTS {
+        let ScriptDefinitions::Unique(scripts) = format.scripts else {
+            return Err(invalid("duplicate script name"));
+        };
+        if scripts.len() > MAX_SCRIPTS {
             return Err(invalid("dgc.json has more than 32 scripts"));
         }
-        for (name, def) in &format.scripts {
+        for (name, def) in &scripts {
             if !valid_name(name) {
                 return Err(invalid("invalid script name"));
             }
@@ -118,10 +175,7 @@ impl ScriptFile {
                 resolve_cwd(workspace_root, cwd)?;
             }
         }
-        Ok(Self {
-            bytes,
-            scripts: format.scripts,
-        })
+        Ok(Self { bytes, scripts })
     }
 }
 
