@@ -213,7 +213,7 @@ impl AgentTreeEntry<'_> {
 }
 
 /// Parent-first traversal, preserving input order among siblings. An agent
-/// with a hidden parent starts a subtree at its recorded depth.
+/// with a hidden parent or an invalid link starts a subtree at its recorded depth.
 pub fn agent_tree<'a>(agents: impl IntoIterator<Item = &'a Agent>) -> Vec<AgentTreeEntry<'a>> {
     let agents: Vec<_> = agents.into_iter().collect();
     let by_id: HashMap<_, _> = agents.iter().map(|&agent| (&agent.id, agent)).collect();
@@ -269,7 +269,7 @@ pub fn missing_parent_note(id: &AgentId) -> String {
 pub fn agent_tree_line(entry: &AgentTreeEntry<'_>) -> String {
     let agent = entry.agent;
     let indent = "  ".repeat(entry.indent_depth());
-    let mut line = format!("{indent}{}  depth={}", agent_line(agent), agent.depth);
+    let mut line = format!("{indent}{}", agent_line(agent));
     if agent.mcp {
         line.push_str("  mcp");
     }
@@ -277,6 +277,7 @@ pub fn agent_tree_line(entry: &AgentTreeEntry<'_>) -> String {
         line.push_str("  ");
         line.push_str(&missing_parent_note(parent));
     }
+    line.push_str(&format!("  depth={}", agent.depth));
     line
 }
 
@@ -621,12 +622,11 @@ mod tests {
         assert_eq!(event_line(&event), "[9] queued message discarded: later");
     }
 
-    #[test]
-    fn single_line_fields_escape_newlines_too() {
-        let agent = Agent {
-            id: dgc_protocol::ids::AgentId::generate(),
+    fn idle_agent() -> Agent {
+        Agent {
+            id: AgentId::generate(),
             workspace_id: WorkspaceId::generate(),
-            title: "t\nfake\x1b".into(),
+            title: "agent".into(),
             provider: ProviderKind::Claude,
             model: None,
             mode: None,
@@ -639,7 +639,67 @@ mod tests {
             depth: 0,
             labels: Default::default(),
             created_at: String::new(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn agent_tree_keeps_each_record_with_corrupt_parent_links() {
+        let mut agents: [Agent; 7] = std::array::from_fn(|_| idle_agent());
+        let [
+            self_parent,
+            cycle_a,
+            cycle_b,
+            other_ws,
+            cross_workspace,
+            max_depth,
+            overflow,
+        ] = &mut agents;
+        self_parent.parent_id = Some(self_parent.id.clone());
+        cycle_a.depth = 4;
+        cycle_b.workspace_id = cycle_a.workspace_id.clone();
+        cycle_b.depth = 5;
+        cycle_a.parent_id = Some(cycle_b.id.clone());
+        cycle_b.parent_id = Some(cycle_a.id.clone());
+        cross_workspace.parent_id = Some(other_ws.id.clone());
+        cross_workspace.depth = 1;
+        max_depth.depth = u32::MAX;
+        overflow.workspace_id = max_depth.workspace_id.clone();
+        overflow.parent_id = Some(max_depth.id.clone());
+
+        let entries = agent_tree(&agents);
+        assert_eq!(entries.len(), agents.len());
+        for agent in &agents {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.agent.id == agent.id)
+                    .count(),
+                1,
+                "agent {} must appear once",
+                agent.id
+            );
+        }
+        let entry = |index: usize| {
+            entries
+                .iter()
+                .find(|entry| entry.agent.id == agents[index].id)
+                .expect("entry")
+        };
+        assert_eq!(entry(0).missing_parent, Some(&agents[0].id));
+        assert_eq!(entry(1).missing_parent, Some(&agents[2].id));
+        assert_eq!(entry(2).missing_parent, None);
+        assert_eq!(entry(4).missing_parent, Some(&agents[3].id));
+        assert_eq!(entry(5).indent_depth(), 8);
+        assert_eq!(entry(6).missing_parent, Some(&agents[5].id));
+    }
+
+    #[test]
+    fn single_line_fields_escape_newlines_too() {
+        let agent = Agent {
+            title: "t\nfake\x1b".into(),
             last_error: Some("e\r".into()),
+            ..idle_agent()
         };
         assert!(agent_line(&agent).ends_with("idle  t\\nfake\\x1b"));
         let details = agent_details(&agent);

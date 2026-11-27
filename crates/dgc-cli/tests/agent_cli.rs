@@ -350,17 +350,15 @@ fn ls_nests_children_under_parent() {
     let rows: Vec<_> = listed.lines().collect();
     assert_eq!(rows.len(), 4, "{listed}");
     assert!(
-        rows[0].starts_with(&parent) && rows[0].contains("depth=0"),
+        rows[0].starts_with(&parent) && rows[0].ends_with("depth=0"),
         "{listed}"
     );
     assert!(
-        rows[1].starts_with(&format!("  {child_id}"))
-            && rows[1].contains("depth=1")
-            && rows[1].contains("mcp"),
+        rows[1].starts_with(&format!("  {child_id}")) && rows[1].ends_with("  mcp  depth=1"),
         "{listed}"
     );
     assert!(
-        rows[2].starts_with(&format!("    {grandchild_id}")) && rows[2].contains("depth=2"),
+        rows[2].starts_with(&format!("    {grandchild_id}")) && rows[2].ends_with("depth=2"),
         "{listed}"
     );
     assert!(rows[3].starts_with(&sibling), "{listed}");
@@ -375,7 +373,11 @@ fn ls_nests_children_under_parent() {
         .find(|line| line.contains(child_id))
         .expect("child survives a hidden parent");
     let short = &parent[parent.len() - 6..];
-    assert!(orphan.starts_with("  agt_") && orphan.contains(&format!("↳ parent agt_…{short}")));
+    assert!(
+        orphan.starts_with("  agt_")
+            && orphan.ends_with(&format!("↳ parent agt_…{short}  depth=1")),
+        "{orphan}"
+    );
     let including_archived = stdout(&a.run(&["ls", "--all"]));
     assert!(
         !including_archived.contains("↳ parent"),

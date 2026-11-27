@@ -5,7 +5,7 @@ The plain-text capture omits colors and selection highlighting.
 
 Parent and descendants
 
-┌ dgc ─────────────────────────────┐┌ agt_…6adf14 claude idle Child agent ─────────────────────────────────────────────┐
+┌ dgc ─────────────────────────────┐┌ agt_…5bd8e6 claude idle Child agent ─────────────────────────────────────────────┐
 │▾ synthetic-project               ││[1] state: starting                                                               │
 │  ▾ ws local                      ││[2] user (queue): Say pong                                                        │
 │    ○ claude Parent agent         ││[3] turn started                                                                  │
@@ -19,17 +19,19 @@ Parent and descendants
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  │└──────────────────────────────────────────────────────────────────────────────────┘
-│                                  │┌ send: queue│steer│interrupt → agt_…6adf14 Child agent ───────────────────────────┐
+│                                  │┌ send: queue│steer│interrupt → agt_…5bd8e6 Child agent ───────────────────────────┐
 │                                  ││> press i to type to the selected agent                                           │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 daemon ok · 3 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H hando
 
 After archiving the parent
 
-┌ dgc ─────────────────────────────┐┌ agt_…6adf14 claude idle Child agent ─────────────────────────────────────────────┐
+The child keeps its title and [mcp] marker. The complete parent note does not fit.
+
+┌ dgc ─────────────────────────────┐┌ agt_…5bd8e6 claude idle Child agent ─────────────────────────────────────────────┐
 │▾ synthetic-project               ││[1] state: starting                                                               │
 │  ▾ ws local                      ││[2] user (queue): Say pong                                                        │
-│      ○ Ch… [mcp] ↳ parent …2aa5b6││[3] turn started                                                                  │
+│      ○ claude Child agent [mcp]  ││[3] turn started                                                                  │
 │        ○ claude Grandchild agent ││[4] state: running                                                                │
 │                                  ││[5] assistant: pong                                                               │
 │                                  ││[6] turn completed                                                                │
@@ -40,7 +42,7 @@ After archiving the parent
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  │└──────────────────────────────────────────────────────────────────────────────────┘
-│                                  │┌ send: queue│steer│interrupt → agt_…6adf14 Child agent ───────────────────────────┐
+│                                  │┌ send: queue│steer│interrupt → agt_…5bd8e6 Child agent ───────────────────────────┐
 │                                  ││> press i to type to the selected agent                                           │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H hando

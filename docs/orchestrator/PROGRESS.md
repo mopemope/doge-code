@@ -20,7 +20,7 @@
 
 - タスク: M6 Task 4（M6 受け入れ）
 - 状態: 未着手
-- 済んだこと: Task 3 で `dgc run --mcp`、プロファイルの MCP 表示と TUI での適用、CLI/TUI の親子ツリーを実装。合成データで [TUI 画面](m6-tui-screen.txt)を記録した。
+- 済んだこと: Task 3 で `dgc run --mcp`、プロファイルの MCP 表示と TUI での適用、CLI/TUI の親子ツリーを実装。レビュー対応でタイトルを親注記より優先し、合成データで [TUI 画面](m6-tui-screen.txt)を再記録した。
 - 次の一手: Task 3 のコントローラーレビュー後、Task 4 で偽プロバイダと実プロバイダの受け入れ確認を行う。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
@@ -122,6 +122,7 @@
 - 2026-11-27 (M6 Task 3): `--mcp` は有効化専用。CLI の起動単位で `mcp = true` のプロファイルを無効化する指定は設けない。TUI 作成フォームは `profile.list` の有効値を送る。RPC の `ProfileInfo.mcp` は省略時 false として読む。
 - 2026-11-27 (M6 Task 3): 親子は同じワークスペース内で親を先に表示し、兄弟は従来の一覧順。非表示の親を持つ子はワークスペース配下で深さを保ち、`↳ parent <short id>` を付ける。TUI の列幅が足りない場合は短い ID の固定接頭辞から省く。TUI の上下移動と `p` は描画順に従い、子からの `←` は表示されている親、親が非表示ならワークスペースを選ぶ。
 - 2026-11-27 (M6 Task 3): MCP ツールの承認はプロバイダの設定と通常の権限要求経路に従うことを README に記載。公式資料を同日参照した。[Claude Code の権限](https://code.claude.com/docs/en/permissions) [Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [MCP のツール仕様](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#user-interaction-model)
+- 2026-11-27 (M6 Task 3 レビュー対応): TUI で親が非表示または親リンクが不正な行は、状態と `[auto]`、`[mcp]` を差し引いてからタイトルに 4–8 セルを確保する。完全な親注記が入る場合に表示し、幅に応じて ID の固定接頭辞を省く。人間向けの `dgc ls` は行末を `depth=N` にそろえ、README ではスクリプト向けに `dgc ls --json` を案内する。
 
 - 2026-11-27 (M6 Task 2): `initialize` で交渉する版は `2025-11-25`、`2025-06-18`。未対応版の要求には `2025-11-25` を返す。
   公式仕様の現行版 `2026-07-28` ではハンドシェイクが廃止された。対応する両版で JSON-RPC バッチは廃止済みのため拒否する。stdio は UTF-8 の 1 行 1 メッセージとする。
@@ -738,10 +739,16 @@
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
 
+- 2026-11-27 M6 Task 3 レビュー対応（Linux、Rust 1.99.0）
+  - 120 列の TUI で `[auto]` と `[mcp]` が付いた子のタイトルと親 ID が欠けるケース、および `ls` の行末が `depth=N` にならないケースを RED/GREEN で確認した。不正な親リンクと最大深さの回帰テストは、修正前から 2 件 PASS。
+  - `bash scripts/verify.sh test tui::` 282 件、`cargo test --locked -p dgc-cli --test agent_cli` 21 件、`cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 778 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
+  - 一時状態ルートと偽 Claude で 120×18 の tmux 画面を再記録し、親をアーカイブした後も子のタイトル、`[mcp]`、選択を確認した。[画面記録](m6-tui-screen.txt)
+  - 作業フォルダに `task-3-fix1-{red,green,verify}-*.log` を保存。実プロバイダでの MCP 通信と macOS 実機は未検証。
+
 - 2026-11-27 M6 Task 3（Linux、Rust 1.99.0）
   - `bash scripts/verify.sh test <テスト名>` で指定 6 テストと TUI のプロファイル選択テストの RED/GREEN を確認した。親のアーカイブ後に TUI で ID の末尾が切れるケースを追加し、表示幅 120 列と 136 列で再検証した。
   - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 774 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
-  - 偽 Claude と一時状態ルートで `tmux capture-pane -p`（120×18）を実行し、親・子・孫、子の `[mcp]`、親のアーカイブ後の ID 注記と子の選択保持を記録した。[画面記録](m6-tui-screen.txt)
+  - 偽 Claude と一時状態ルートで `tmux capture-pane -p`（120×18）を実行し、親・子・孫、子の `[mcp]`、親のアーカイブ後の ID 注記と子の選択保持を記録した。初回の画面は作業フォルダの `task-3-verify-tmux.log` を参照。
   - 実プロバイダでの MCP 通信と macOS 実機は未検証。作業フォルダに `task-3-{red,green,verify}-*.log` を保存。
 
 - 2026-11-27 M6 Task 2 レビュー対応（Linux、Rust 1.99.0）

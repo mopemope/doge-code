@@ -164,10 +164,12 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   failed agent, reusing its provider session when available). If the provider
   failed to start, resume sends the original prompt from the queue. A resumed
   agent created by a schedule stays available for follow-up input.
-  In `ls`, children are indented under their parent, with `depth=N` on each
-  row and `mcp` on enabled agents. If a parent is hidden, its child keeps
-  its indentation and shows `↳ parent <short id>`. The JSON includes
-  `parent_id`, `depth`, and `mcp`. `show` prints the full parent ID.
+  In the human-readable `ls` output, children are indented under their
+  parent and `mcp` marks enabled agents. If a parent is hidden, its child
+  keeps its indentation and shows `↳ parent <short id>`. Each row now
+  ends with `depth=N`. For scripts, `dgc ls --json` is the stable
+  interface and includes `parent_id`, `depth`, and `mcp`.
+  `show` prints the full parent ID.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An
@@ -506,9 +508,11 @@ running; the next `dgc tui` shows them again. Recorded sessions cover the
 Layout: on the left the tree (project, workspace, agent) with a state symbol per
 agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
 failed, `■` stopped). `[auto]` marks an auto-approve mode, and `[mcp]`
-marks MCP. Children are indented under their parent. When a parent is
-archived or absent from the current list, its children keep their depth
-under the workspace and show `↳ parent <short id>` as space permits.
+marks MCP. Children are indented under their parent. If a parent is
+archived or absent from the current list, or the stored parent link is
+invalid, the child keeps its depth under the workspace. The tree adds
+`↳ parent <short id>` if the complete note fits alongside the title and
+markers.
 On the right is the selected agent's stream (a tail page on selection, then
 live events, with the last 2000 displayed lines kept),
 below it the input line, and at the bottom a status bar (connection, agent

@@ -110,15 +110,16 @@ fn state_symbol(row: &Row) -> (char, Color) {
     }
 }
 
-fn tree_parent_note(id: &AgentId, room: usize) -> String {
+fn tree_parent_note(id: &AgentId, room: usize) -> Option<String> {
     let note = format!(" {}", missing_parent_note(id));
     if text_width(&note) <= room {
-        return note;
+        return Some(note);
     }
     // Drop the constant prefix first so the identifying suffix fits.
     let short = short_id(id);
     let short = short.trim_start_matches(AgentId::PREFIX);
-    truncate_cols(&format!(" ↳ parent {short}"), room)
+    let note = format!(" ↳ parent {short}");
+    (text_width(&note) <= room).then_some(note)
 }
 
 fn tree_line(
@@ -144,15 +145,21 @@ fn tree_line(
                 + text_width(limit_marker);
             let indent = indent.min(width.saturating_sub(markers + 1));
             let room = width.saturating_sub(indent + markers);
-            let note = row.missing_parent.as_ref().map_or_else(String::new, |id| {
-                tree_parent_note(id, room.saturating_sub(1))
-            });
-            let room = room.saturating_sub(text_width(&note));
-            // Keep the provider name when at least four columns of the title fit.
+            // Leave room for the title before the optional note or provider.
+            // Orphan rows need enough title to identify them without the parent.
+            let title_reserve = row
+                .missing_parent
+                .as_ref()
+                .map_or(4, |_| text_width(&row.label).clamp(4, 8));
+            let note = row
+                .missing_parent
+                .as_ref()
+                .and_then(|id| tree_parent_note(id, room.saturating_sub(title_reserve)));
+            let room = room.saturating_sub(note.as_deref().map_or(0, text_width));
             let provider = row
                 .provider
                 .map(|p| format!("{} ", provider_name(p)))
-                .filter(|p| room.saturating_sub(text_width(p)) >= 4)
+                .filter(|p| room.saturating_sub(text_width(p)) >= title_reserve)
                 .unwrap_or_default();
             let room = room.saturating_sub(text_width(&provider));
             spans.push(Span::raw(" ".repeat(indent)));
@@ -165,7 +172,9 @@ fn tree_line(
                 spans.push(Span::styled(auto, Style::default().fg(WARN)));
             }
             spans.push(Span::raw(mcp));
-            spans.push(Span::styled(note, dim()));
+            if let Some(note) = note {
+                spans.push(Span::styled(note, dim()));
+            }
         }
         None => {
             let marker = if row.expanded == Some(true) {
@@ -1304,7 +1313,6 @@ mod tests {
         let missing_parent = AgentId::generate();
         orphan.parent_id = Some(missing_parent.clone());
         orphan.depth = 1;
-        orphan.mcp = true;
         update(
             &mut f.state,
             AppEvent::Snapshot {
@@ -1330,7 +1338,7 @@ mod tests {
             find(&buffer, &note).expect("orphan note").1,
             grandchild.1 + 2
         );
-        assert_eq!(screen(&buffer).matches("[mcp]").count(), 2);
+        assert_eq!(screen(&buffer).matches("[mcp]").count(), 1);
         assert_no_control_chars(&buffer);
         let wide = draw(&f.state, 136, 30);
         assert!(find(&wide, &format!("↳ parent {short}")).is_some());
@@ -1338,6 +1346,35 @@ mod tests {
         let narrow = draw(&f.state, 60, 15);
         assert!(find(&narrow, "[mcp]").is_some(), "{}", screen(&narrow));
         assert_no_control_chars(&narrow);
+    }
+
+    #[test]
+    fn orphan_with_both_markers_keeps_its_title_at_120_columns() {
+        let mut f = Fx::new();
+        let mut orphan = f.a2.clone();
+        orphan.title = "Review child workspace".to_owned();
+        orphan.state = AgentState::Idle;
+        orphan.parent_id = Some(f.a1.id.clone());
+        orphan.depth = 1;
+        orphan.auto_approve = true;
+        orphan.mcp = true;
+        update(
+            &mut f.state,
+            AppEvent::Snapshot {
+                projects: vec![f.project.clone()],
+                workspaces: vec![f.workspace.clone()],
+                agents: vec![orphan],
+                permissions: Vec::new(),
+            },
+        );
+
+        let buffer = draw(&f.state, 120, 30);
+        let row = rows(&buffer)
+            .into_iter()
+            .find(|row| row.contains("[auto] [mcp]"))
+            .expect("both markers should be visible");
+        assert!(row.contains("Review c"), "title was clipped: {row}");
+        assert!(!row.contains('↳'), "truncated parent note: {row}");
     }
 
     #[test]
