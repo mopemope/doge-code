@@ -24,6 +24,7 @@ use crate::time::format_rfc3339;
 use crate::workspace::{WorkspaceError, WorkspaceManager};
 
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_FIELD_BYTES: usize = 256;
 const MAX_SCHEDULES: usize = 256;
 const MAX_RECENT_RUNS: usize = 20;
 const MISSED_AFTER_SECS: i64 = 120;
@@ -132,6 +133,8 @@ impl ScheduleManager {
         if params.expires_at.is_some_and(|expires| expires <= now) {
             return Err(invalid("expires_at must be in the future"));
         }
+        validate_field_len("name", params.name.as_deref().unwrap_or_default())?;
+        validate_field_len("cron", &params.cron)?;
         let next_run_at = Some(self.next_run(&params.cron, now)?);
         let _gate = self.run_gate.read().await;
         let target = self.resolve_target(params.target)?;
@@ -188,7 +191,13 @@ impl ScheduleManager {
                 id: schedule.id,
                 name: schedule.name,
                 target: schedule.target,
-                cron: schedule.cron,
+                // Cron separators can expand to six bytes each in JSON.
+                // A single space per separator keeps the whole list bounded.
+                cron: schedule
+                    .cron
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 state: schedule.state,
                 next_run_at: schedule.next_run_at,
                 max_runs: schedule.max_runs,
@@ -374,34 +383,40 @@ impl ScheduleManager {
         }
         if let Some(reason) = limit_reached(schedule, now) {
             end(schedule, reason);
-            schedule.next_run_at = None;
             return self.persist(&mut entry);
         }
         let target = self.target_status(&schedule.target)?;
         if let TargetStatus::Unavailable(reason) = target {
             end(schedule, reason);
-            schedule.next_run_at = None;
             return self.persist(&mut entry);
         }
         if schedule.state != ScheduleState::Active {
             return Ok(());
         }
-        let Some(due) = schedule.next_run_at.filter(|due| *due <= now) else {
-            return Ok(());
+        let Some(due) = schedule.next_run_at else {
+            end(schedule, "no_next_run");
+            return self.persist(&mut entry);
         };
-        let next = self.next_run(&schedule.cron, now).ok();
+        if due > now {
+            return Ok(());
+        }
+        schedule.next_run_at = self.next_run(&schedule.cron, now).ok();
         let outcome = if now.saturating_sub(due) > MISSED_AFTER_SECS {
             RunOutcome::Missed
         } else {
+            // Consume the due time on disk before sending anything to a
+            // provider, so a restart cannot repeat this timed occurrence.
+            if let Err(err) = self.store.put_schedule(schedule) {
+                // No side effect started. A later tick may retry the write.
+                schedule.next_run_at = Some(due);
+                return Err(err.into());
+            }
             self.try_run(schedule, target, false).await?
         };
         record(schedule, due, now, outcome);
-        if schedule.state == ScheduleState::Active && next.is_none() {
+        if schedule.state == ScheduleState::Active && schedule.next_run_at.is_none() {
             end(schedule, "no_next_run");
         }
-        schedule.next_run_at = (schedule.state == ScheduleState::Active)
-            .then_some(next)
-            .flatten();
         self.persist(&mut entry)
     }
 
@@ -442,6 +457,8 @@ impl ScheduleManager {
             .agents
             .resolve_profile(&mut params)
             .map_err(|err| invalid(err.to_string()))?;
+        validate_field_len("model", params.model.as_deref().unwrap_or_default())?;
+        validate_field_len("mode", params.mode.as_deref().unwrap_or_default())?;
         // Fix the safe default explicitly as well as profile overrides.
         // Otherwise a provider setting could supply a different mode at launch.
         params.mode.get_or_insert_with(|| match provider {
@@ -670,6 +687,7 @@ fn limit_reached(schedule: &Schedule, now: i64) -> Option<&'static str> {
 fn end(schedule: &mut Schedule, reason: &'static str) {
     schedule.state = ScheduleState::Ended;
     schedule.end_reason = Some(reason.to_owned());
+    schedule.next_run_at = None;
 }
 
 fn busy(state: AgentState) -> bool {
@@ -677,6 +695,15 @@ fn busy(state: AgentState) -> bool {
         state,
         AgentState::Starting | AgentState::Running | AgentState::WaitingPermission
     )
+}
+
+fn validate_field_len(field: &str, value: &str) -> Result<(), ScheduleError> {
+    if value.len() > MAX_FIELD_BYTES {
+        return Err(invalid(format!(
+            "schedule {field} must be at most {MAX_FIELD_BYTES} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn invalid(message: impl Into<String>) -> ScheduleError {

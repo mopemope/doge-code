@@ -713,6 +713,7 @@ impl AgentManager {
 
     /// Restart a stopped or failed agent from its provider session. The first
     /// queued message, if any, is sent; otherwise the agent becomes idle.
+    /// A manual resume keeps the session available for follow-up input.
     pub async fn resume(&self, id: &AgentId) -> Result<Agent, AgentError> {
         let (agent, cwd, adapter, queue, commands) = {
             let mut live = lock(&self.shared.live);
@@ -726,6 +727,7 @@ impl AgentManager {
             let adapter = self.adapter(agent.provider)?;
             let queue = load_queue(&self.shared.queue_path(id))?;
             agent.last_error = None;
+            agent.stop_when_idle = false;
             self.shared.store_state(&mut agent, AgentState::Starting)?;
             let commands = self.shared.register_live(&mut live, id);
             (agent, workspace.path, adapter, queue, commands)

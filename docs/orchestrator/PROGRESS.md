@@ -110,13 +110,16 @@
 - 2026-11-27 (M5 Task 2): 新しい RPC と `stop_when_idle` を追加し、プロトコルを v3 に更新する。v2 の hello は `VERSION_MISMATCH`。
   `schedule.list` は `ScheduleListResult` を返す。本文と履歴は `schedule.get` で取得する。`pause` と `resume` は更新後の `Schedule`、`remove` は空オブジェクトを返す。
 - 2026-11-27 (M5 Task 2): scheduled agent は初回プロンプトの送信に成功してから実行回数に加える。
-  `stop_when_idle` は再開後も有効で、idle かつ待ち行列と権限要求が空ならプロバイダを閉じて stopped にする。中断で idle に戻る場合も同じ。
+  `stop_when_idle` が有効なら、idle かつ待ち行列、アクターの受信コマンド、権限要求が空のときにプロバイダを閉じて stopped にする。中断で idle に戻る場合も同じ。
+  ユーザーの `agent.resume` は起動前に `stop_when_idle = false` を保存する。再開後は idle で入力を待てる。
   heartbeat の idle 判定はアクターでも行う。停止時はスケジューラーと進行中の手動実行が終わってからエージェントを止める。
 - 2026-11-27 (M5 Task 2): 作成時にプロファイルを展開して設定を保存する。モードを省略した場合は Claude を `manual`、Codex を `workspace-write` に固定する。
   対象のプロバイダが利用できない場合も登録でき、発火時は失敗種別を記録する。heartbeat は対象が存在し、archived 以外であることを登録時に確認する。
 - 2026-11-27 (M5 Task 2): 次回時刻は Task 1 の `LocalClock` と `CronExpr::next_after` で求める。DST で飛ぶ分は発火せず、繰り返す分は `mktime` が選ぶ一方だけで発火する。
   停止中などに保存時刻を 120 秒より多く過ぎた場合は `missed` を 1 件記録し、その時点から次回時刻を求める。
-  pause は自動実行を止める。手動実行は paused でも可能で、実行回数が上限に達した場合も既存の `next_run_at` を保持する。
+  pause は自動実行を止める。手動実行は paused でも可能で、終了するまでは既存の `next_run_at` を保持する。`ended` になった時点で次回時刻を消す。
+- 2026-11-27 (M5 Task 2 レビュー修正): name、model、mode、cron は作成時に 256 バイト以下に制限する。モデルとモードは展開したプロファイルにも上限を適用する。一覧では cron の空白を一つのスペースにまとめる。
+  自動実行は次回時刻を先に保存してからプロバイダを呼び出す。強制終了で結果を書けなかった回は履歴と回数に残らない場合がある。
 
 - 2026-11-27 (M5 Task 1): `LocalClock` は `Send + Sync`。検索上限はローカル時刻の 5 暦年後の同じ分とし、2 月 29 日の上限は平年の 2 月末に丸める。
   Vixie cron と同様に、日または曜日のフィールドが `*` で始まる場合は両方の一致を要求する。どちらも `*` で始まらない場合は、日か曜日のいずれかの一致で発火する。
@@ -652,6 +655,13 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 2 レビュー修正（Linux、Rust 1.99.0）
+  - RED は `cargo test --locked -p dgc-daemon --test schedule` で 7 件 FAIL、対応するアクターの送信テストも `stopped` で FAIL。
+    120 秒の境界と権限待ち heartbeat のテストは修正前から PASS。
+  - GREEN は `cargo test --locked -p dgc-daemon --test schedule --test agent_manager --test server` の 100 件が PASS。
+    `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 689 件）、`bash scripts/verify.sh guidance`（Python 40 件）が PASS。
+  - 実プロバイダと macOS は未検証。
 
 - 2026-11-27 M5 Task 2（Linux、Rust 1.99.0）
   - RED は新しいスケジュール型・Store API の未実装でコンパイルエラー、`schedule.create` はメソッド未登録、v2 の hello は誤って成功。

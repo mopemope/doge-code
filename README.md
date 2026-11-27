@@ -156,7 +156,8 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
 - `dgc ls [--all]` (archived agents only with `--all`), `dgc show ID`,
   `dgc interrupt ID`, `dgc archive ID`, `dgc resume ID` (restarts a stopped or
   failed agent, reusing its provider session when available). If the provider
-  failed to start, resume sends the original prompt from the queue.
+  failed to start, resume sends the original prompt from the queue. A resumed
+  agent created by a schedule stays available for follow-up input.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An

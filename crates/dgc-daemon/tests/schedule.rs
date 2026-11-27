@@ -14,10 +14,13 @@ use dgc_daemon::schedule::localtime::{LocalClock, LocalDateTime};
 use dgc_daemon::store::Store;
 use dgc_daemon::workspace::WorkspaceManager;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
-use dgc_protocol::methods::{AgentCreateParams, ScheduleCreateParams, ScheduleTargetParams};
+use dgc_protocol::methods::{
+    AgentCreateParams, AgentSendParams, ScheduleCreateParams, ScheduleListResult,
+    ScheduleTargetParams,
+};
 use dgc_protocol::model::{
     Agent, AgentState, Isolation, ProviderKind, RunOutcome, Schedule, ScheduleState,
-    ScheduleTarget, SendOutcome, Workspace, WorkspaceState,
+    ScheduleTarget, SendBehavior, SendOutcome, Workspace, WorkspaceState,
 };
 use dgc_protocol::rpc::{INVALID_PARAMS, INVALID_STATE};
 use tempfile::{TempDir, tempdir};
@@ -237,7 +240,7 @@ async fn wait_state(agents: &AgentManager, id: &AgentId, state: AgentState) -> A
 
 #[tokio::test]
 async fn create_validates_cron_target_and_limits() {
-    let h = Harness::default();
+    let h = Harness::new("complete", profile("manual", &"m".repeat(257)));
     let mut archived = h.workspace.clone();
     archived.id = WorkspaceId::generate();
     archived.state = WorkspaceState::Archived;
@@ -287,6 +290,46 @@ async fn create_validates_cron_target_and_limits() {
             INVALID_PARAMS
         );
     }
+    let mut oversized_model = h.params();
+    let mut oversized_mode = h.params();
+    let mut oversized_profile_model = h.params();
+    if let ScheduleTargetParams::NewAgent { model, .. } = &mut oversized_model.target {
+        *model = Some("é".repeat(129));
+    }
+    if let ScheduleTargetParams::NewAgent { mode, .. } = &mut oversized_mode.target {
+        *mode = Some("m".repeat(257));
+    }
+    if let ScheduleTargetParams::NewAgent { profile, .. } = &mut oversized_profile_model.target {
+        *profile = Some("automation".into());
+    }
+    let oversized_fields = [
+        (
+            "name",
+            ScheduleCreateParams {
+                name: Some("é".repeat(129)),
+                ..h.params()
+            },
+        ),
+        (
+            "cron",
+            ScheduleCreateParams {
+                cron: format!("{}* * * * *", " ".repeat(248)),
+                ..h.params()
+            },
+        ),
+        ("model", oversized_model),
+        ("mode", oversized_mode),
+        ("model", oversized_profile_model),
+    ];
+    let mut wrong_errors = Vec::new();
+    for (field, params) in oversized_fields {
+        match h.manager.create_at(params, NOW).await {
+            Err(err) if err.code() == INVALID_PARAMS && err.to_string().contains("256") => {}
+            Err(err) => wrong_errors.push(format!("{field}: {err}")),
+            Ok(_) => wrong_errors.push(format!("{field}: accepted an oversized field")),
+        }
+    }
+    assert!(wrong_errors.is_empty(), "{wrong_errors:?}");
     assert!(h.store.list_schedules().expect("list").is_empty());
     h.manager
         .create_at(
@@ -409,11 +452,22 @@ async fn scheduled_agent_stops_when_idle_and_can_resume() {
     h.restart("resume", DaemonConfig::default()).await;
     let resumed = h.agents.resume(&id).await.expect("resume");
     assert_eq!(resumed.state, AgentState::Starting);
-    assert!(
-        wait_state(&h.agents, &id, AgentState::Stopped)
-            .await
-            .stop_when_idle
-    );
+    let idle = wait_state(&h.agents, &id, AgentState::Idle).await;
+    assert!(!idle.stop_when_idle);
+    assert!(!resumed.stop_when_idle);
+    let sent = h
+        .agents
+        .send(AgentSendParams {
+            agent_id: id.clone(),
+            text: "follow-up".into(),
+            behavior: SendBehavior::Queue,
+        })
+        .await
+        .expect("resumed agent accepts input");
+    assert_eq!(sent, SendOutcome::Sent);
+    wait_state(&h.agents, &id, AgentState::Idle).await;
+    h.shutdown().await;
+    assert!(!h.agents.get(&id).expect("persisted agent").stop_when_idle);
 
     let h = Harness::new("permission", DaemonConfig::default());
     let schedule = h.create().await;
@@ -528,6 +582,24 @@ async fn max_runs_and_expiry_end_the_schedule() {
 #[tokio::test]
 async fn manual_run_counts_and_keeps_next_run() {
     let h = Harness::default();
+    let schedule = h.create().await;
+    let run = h
+        .manager
+        .run_at(&schedule.id, NOW + 1)
+        .await
+        .expect("run now");
+    assert_eq!(run.scheduled_for, NOW + 1);
+    let stored = h.read(&schedule);
+    assert_eq!(stored.recent_runs, vec![run]);
+    assert_eq!(stored.next_run_at, schedule.next_run_at);
+    assert_eq!(stored.runs, 1);
+    assert_eq!(stored.state, ScheduleState::Active);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn manual_run_reaching_max_runs_clears_next_run() {
+    let h = Harness::default();
     let schedule = h
         .manager
         .create_at(
@@ -539,18 +611,55 @@ async fn manual_run_counts_and_keeps_next_run() {
         )
         .await
         .expect("create");
-    let run = h
-        .manager
+    h.manager
         .run_at(&schedule.id, NOW + 1)
         .await
-        .expect("run now");
-    assert_eq!(run.scheduled_for, NOW + 1);
-    let stored = h.read(&schedule);
-    assert_eq!(stored.recent_runs, vec![run]);
-    assert_eq!(stored.next_run_at, schedule.next_run_at);
-    assert_eq!(stored.runs, 1);
-    assert_eq!(stored.state, ScheduleState::Ended);
+        .expect("manual run");
     h.shutdown().await;
+    let stored = h.read(&schedule);
+    assert_eq!(stored.state, ScheduleState::Ended);
+    assert_eq!(stored.end_reason.as_deref(), Some("max_runs"));
+    assert_eq!(stored.runs, 1);
+    assert_eq!(stored.next_run_at, None);
+}
+
+#[tokio::test]
+async fn manual_run_ending_an_expired_or_unavailable_schedule_clears_next_run() {
+    let h = Harness::default();
+    let expired = h
+        .manager
+        .create_at(
+            ScheduleCreateParams {
+                expires_at: Some(NOW + 1),
+                ..h.params()
+            },
+            NOW,
+        )
+        .await
+        .expect("create expiring schedule");
+    let unavailable = h.create().await;
+    let mut workspace = h.workspace.clone();
+    workspace.state = WorkspaceState::Archived;
+    h.store
+        .put_workspace(&workspace)
+        .expect("archive workspace");
+
+    let err = h
+        .manager
+        .run_at(&expired.id, NOW + 1)
+        .await
+        .expect_err("expired");
+    assert_eq!(err.code(), INVALID_STATE);
+    h.manager
+        .run_at(&unavailable.id, NOW + 1)
+        .await
+        .expect("record unavailable result");
+    for (schedule, reason) in [(expired, "expired"), (unavailable, "workspace_unavailable")] {
+        let stored = h.read(&schedule);
+        assert_eq!(stored.state, ScheduleState::Ended);
+        assert_eq!(stored.end_reason.as_deref(), Some(reason));
+        assert_eq!(stored.next_run_at, None, "{reason}");
+    }
 }
 
 #[tokio::test]
@@ -747,4 +856,172 @@ async fn schedule_defaults_to_manual_provider_policy() {
     };
     assert_eq!(mode.as_deref(), Some("manual"));
     assert!(!auto_approve);
+}
+
+#[tokio::test]
+async fn timed_run_persists_next_run_before_starting_the_provider() {
+    let h = Harness::default();
+    let schedule = h.create().await;
+    let observed = h.dir.path().join("observed.json");
+    let schedule_file = h
+        .paths
+        .state_dir
+        .join("schedules")
+        .join(format!("{}.json", schedule.id));
+    let script = h.dir.path().join("snapshot.sh");
+    std::fs::write(
+        &script,
+        "cp \"$1\" \"$2\" || exit 1\nshift 2\nexec \"$@\"\n",
+    )
+    .expect("write snapshot wrapper");
+    let adapter: Arc<dyn ProviderAdapter> = Arc::new(ClaudeAdapter::with_program(
+        PathBuf::from("/bin/sh"),
+        vec![
+            script.to_string_lossy().into_owned(),
+            schedule_file.to_string_lossy().into_owned(),
+            observed.to_string_lossy().into_owned(),
+            env!("CARGO_BIN_EXE_dgc-fake-provider").into(),
+            format!("{FIXTURES}/complete.jsonl"),
+        ],
+    ));
+    let agents = Arc::new(AgentManager::new(
+        Arc::clone(&h.store),
+        h.paths.clone(),
+        DaemonConfig::default(),
+        HashMap::from([(ProviderKind::Claude, adapter)]),
+    ));
+    let workspaces = Arc::new(WorkspaceManager::new(
+        Arc::clone(&h.store),
+        h.paths.worktrees_dir.clone(),
+    ));
+    let manager = ScheduleManager::new(
+        Arc::clone(&h.store),
+        Arc::clone(&agents),
+        workspaces,
+        Arc::new(Utc),
+    )
+    .expect("open schedule manager");
+    manager.tick(DUE).await;
+    agents.shutdown_all(WAIT).await;
+
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&observed).expect("snapshot from provider launch"))
+            .expect("decode snapshot");
+    assert_eq!(snapshot["data"]["next_run_at"], DUE + 60);
+    assert_eq!(snapshot["data"]["recent_runs"], serde_json::json!([]));
+    let stored = h.read(&schedule);
+    assert_eq!(stored.runs, 1);
+    assert!(matches!(
+        stored.recent_runs[0].outcome,
+        RunOutcome::Started { .. }
+    ));
+}
+
+#[tokio::test]
+async fn timed_run_does_not_start_if_next_run_cannot_be_saved() {
+    let h = Harness::default();
+    let schedule = h.create().await;
+    let file = h
+        .paths
+        .state_dir
+        .join("schedules")
+        .join(format!("{}.json", schedule.id));
+    let backup = h.dir.path().join("schedule-backup.json");
+    std::fs::rename(&file, &backup).expect("move original schedule");
+    std::os::unix::fs::symlink(&backup, &file).expect("block writes");
+    h.manager.tick(DUE).await;
+    let started = h.agents.list().expect("list agents");
+    h.shutdown().await;
+    assert!(
+        started.is_empty(),
+        "an unwritable occurrence was dispatched"
+    );
+
+    std::fs::rename(&backup, &file).expect("restore original schedule");
+    h.manager.tick(DUE).await;
+    h.shutdown().await;
+    assert_eq!(h.read(&schedule).runs, 1);
+}
+
+#[tokio::test]
+async fn timed_run_missed_grace_boundary() {
+    for (delay, expected_runs) in [(120, 1), (121, 0)] {
+        let h = Harness::default();
+        let schedule = h.create().await;
+        h.manager.tick(DUE + delay).await;
+        h.shutdown().await;
+        let stored = h.read(&schedule);
+        assert_eq!(stored.runs, expected_runs, "delay {delay}");
+        let [run] = stored.recent_runs.as_slice() else {
+            panic!("expected one run record at delay {delay}");
+        };
+        assert_eq!(run.scheduled_for, DUE);
+        assert_eq!(run.at, DUE + delay);
+        if expected_runs == 1 {
+            assert!(matches!(run.outcome, RunOutcome::Started { .. }));
+        } else {
+            assert_eq!(run.outcome, RunOutcome::Missed);
+            assert!(h.agents.list().expect("list agents").is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_skips_while_waiting_for_permission() {
+    let h = Harness::new("permission", DaemonConfig::default());
+    let agent = h.create_agent().await;
+    let heartbeat = h.heartbeat(agent.id.clone()).await;
+    wait_state(&h.agents, &agent.id, AgentState::WaitingPermission).await;
+    h.manager.tick(DUE).await;
+    assert_eq!(
+        h.agents.get(&agent.id).expect("agent").state,
+        AgentState::WaitingPermission
+    );
+    assert_eq!(
+        h.agents.pending_permissions(Some(agent.id.clone())).len(),
+        1
+    );
+    h.agents
+        .interrupt(&agent.id)
+        .await
+        .expect("cancel test turn");
+    h.shutdown().await;
+    let stored = h.read(&heartbeat);
+    assert_eq!(stored.runs, 0);
+    assert_eq!(
+        stored.recent_runs[0].outcome,
+        RunOutcome::Skipped {
+            reason: "agent_busy".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn schedule_list_fits_the_wire_at_the_field_limits() {
+    let h = Harness::default();
+    let mut params = h.params();
+    params.name = Some("\0".repeat(256));
+    params.cron = format!("{}* * * * *", "\u{b}".repeat(247));
+    if let ScheduleTargetParams::NewAgent { model, .. } = &mut params.target {
+        *model = Some("\0".repeat(256));
+    }
+    for _ in 0..256 {
+        h.manager
+            .create_at(params.clone(), NOW)
+            .await
+            .expect("256-byte metadata is accepted");
+    }
+    let response = ScheduleListResult {
+        schedules: h.manager.list(None).expect("list schedules"),
+    };
+    let wire = serde_json::to_vec(&dgc_protocol::rpc::Response::ok(
+        1,
+        serde_json::to_value(response).expect("encode result"),
+    ))
+    .expect("encode wire message");
+    assert!(
+        wire.len() <= dgc_protocol::MAX_MESSAGE_BYTES,
+        "list uses {} bytes",
+        wire.len()
+    );
 }

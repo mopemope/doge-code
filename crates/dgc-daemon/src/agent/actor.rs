@@ -218,6 +218,7 @@ impl Actor {
             if self.agent.stop_when_idle
                 && self.agent.state == AgentState::Idle
                 && self.queue.is_empty()
+                && commands.is_empty()
                 && !self.has_pending()
             {
                 self.shutdown_session(SESSION_SHUTDOWN_GRACE).await;
