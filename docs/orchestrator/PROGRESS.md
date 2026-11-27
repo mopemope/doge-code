@@ -20,7 +20,7 @@
 - タスク: M5 の計画作成
 - 状態: 未着手
 - 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 の実装、受け入れ、最終レビュー修正が完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
-- 次の一手: M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
+- 次の一手: M4 の PR をマージ後、M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -1249,3 +1249,35 @@ M3 はタスクごとのレビューと全体の最終レビュー（修正の�
 - Task 2: Ruling: fold Minor 3 (credentials wording: env inheritance; "not sent over the socket") and Minor 4 (remove .gitignore skills un-ignores — personal skills could become trackable — and the skills check/tests in check-agent-guidance) — security-wording and guidance debt left by this task — cost if wrong: none
 - Final: Ruling: macOS mode runs the full workspace test suite (drop name filters) — platform coverage over speed — cost if wrong: longer macOS CI job
 - Final: Ruling: sensitive-logging scope = all crate src dirs via glob, each must exist — reviewer found zero false positives — cost if wrong: future false positives need targeted exemptions
+
+## M4 レビューで保留した指摘と判断（2026-11-27、実行台帳から移記）
+
+M4 はタスクごとのレビューと全体の最終レビュー（修正 3be7f17 の再レビューまで）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。台帳の行はそのまま転記したので、最終レビューの修正 3be7f17 で解消した項目（Claude の追加使用、プロトコル v2、`<synthetic>` 行、`last_answer` の区切り、プレビュー時の可用性確認、README の注記）も含む。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): failed initial tail load clears initial_tail → later reconnect pages from seq 0 (efficiency); R / unknown-agent / decode-failure snapshot requests dropped while one is pending (set refresh_after_pending); send mode reset overwrites a mode changed during the in-flight RPC; old daemon ignores `tail` (no protocol bump) → document daemon restart; no test pinning a newline exactly at a 64 KiB boundary; initial prompt lost if start succeeds but first send_user fails
+- Task 2: minor (deferred): rate_limited_detail_carries_no_account_data only in Codex test file (Claude covered by exact equality)
+- Task 2: minor (deferred): no test for willRetry:true followed by terminal error/snapshot in same turn; float/missing usedPercent untested (treated as not blocked); empty reason stored as empty token
+- Task 3: minor (deferred): empty/whitespace profile model/notes not rejected (CLI passes --model "" while TUI drops it); TUI model field logic overcomplicated; picker shows (none) while loading/no profiles and never shows notes; no test for safe profile + explicit auto-approve mode
+- Task 4: minor (deferred): .gitattributes filter.clean/process can run during handoff git status/diff (same exposure as existing workspace git; user trusts own repo); kill_on_drop kills only direct child; recent-3 may be <3 after removing first instruction; profile load error lingers in form.error; ⇄ only from selected agent's history after TUI restart; Esc disabled while submitting (≤90 s); confirmation doesn't require reading preview to end (consider for auto-approve modes)
+- Task 4: minor (deferred): every <synthetic> Claude row → Error (not only error rows); first instruction dropped silently if budget < marker (title+path near 32 KiB); invalid-model error shown twice; Codex non-fatal mid-turn Error (unsupported provider request) makes last_answer skip a completed turn; slow source-log read can block that source's own resume/finish
+- Task 5: minor (deferred): README doesn't state ⇄ needs selecting an agent whose limit predates TUI start (only PROGRESS 検証記録 does); privacy paragraph could say plainly that prior instructions/output are included — read the dry-run; CLI-side evidence only in report/scratch
+- final-fix 3be7f17 (Codex) re-review a019036ab379d56ee: All findings addressed, no new Critical/Important. minor (deferred): daemon stop SIGTERM fallback TOCTOU between pid read / flock probe / kill (needs PID reuse in ms; pidfd_open+pidfd_send_signal would harden); no pid != getpid() check; old daemon exiting by itself between mismatch and probe reports 'no daemon holds the instance lock'; stop test checks try_wait immediately; existing lock_free probe via InstanceLock::acquire creates/truncates daemon.lock and writes the CLI pid
+- Final review: minor (deferred): Codex RateLimitSnapshot has limitId/limitName (per-model buckets) — a reached type on a bucket the agent is not using still raises RateLimited; record limitId in a debug log or accept the risk in the fixtures README
+- Final review: minor (deferred): TUI handoff dialog — after a failed preview Enter does nothing (Esc and H again); let Enter or a key re-request the preview
+- Final review: minor (deferred): `logs --tail 0 --follow` on an empty log replays from 0 (harmless)
+- Final review: minor (deferred, M5 candidate): persist the last rate-limit state on the agent record so ⇄ survives TUI restarts without selecting the agent
+- Final review: minor (deferred): some focused tests could resolve the host's claude/codex from PATH and run only `--version` (the fix wave made the CLI preview and TUI re-confirm tests use the fake Codex explicitly); keep tests independent of the host PATH
+
+### コントローラの判断（Ruling）
+
+- Ruling: none at pre-flight
+- Task 2: Ruling: Claude limited only on status "rejected" or unknown (not allowed/allowed_warning); plan amended — reviewer cited CLI docs — cost if wrong: an unknown future "limited" status variant counts as reached (fails toward suggesting)
+- Task 2: Ruling: fold Minors — reason normalized to [A-Za-z0-9_]{≤48}; Codex error with willRetry:true ignored; resets_at prefers windows at ≥100% — all three prevent wrong/unsafe suggestions — cost if wrong: none
+- Task 4: Ruling: expected_prompt equality check (daemon rebuilds; mismatch → INVALID_STATE handoff_changed; TUI re-previews); daemon never uses client text — "approve exactly what is sent" — cost if wrong: an extra re-confirm when state changes
+- Task 4: Ruling: last_answer skips turns with RateLimited/Error; Claude is_api_error_message rows → Error (Task 2 scope, folded) — cost if wrong: none
+- Task 4: Ruling: first instruction cut at 16 KiB with marker (plan amended; full text via log path) — cost if wrong: long specs truncated in prompt (full log referenced)
+- Task 4: Ruling: fold git color off, cold-log read off the global mutex (spawn_blocking), flaky restart test helper (fail fast + 10 s)
+- Final review: Ruling: protocol v2; client maps both mismatch shapes to VersionMismatch with a `dgc daemon stop` hint; `daemon stop` on mismatch sends SIGTERM to the pid in daemon.lock only while another process holds the flock — a daemon left over from an older install must fail loudly and stay stoppable — cost if wrong: a stop right after a PID reuse could signal a same-UID process (ms window)
+- Final review: Ruling: fold `<synthetic>` row narrowing, `last_answer` cut at the first TurnCompleted, dry-run adapter check and three README notes — each prevents a wrong suggestion or a confusing preview — cost if wrong: none
