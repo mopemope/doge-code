@@ -1,6 +1,7 @@
 //! `dgc`: command-line client for the dgc orchestrator daemon.
 
 mod commands;
+mod mcp;
 mod output;
 mod tui;
 
@@ -62,6 +63,12 @@ enum Command {
         #[command(subcommand)]
         command: commands::script::ScriptCommand,
     },
+    /// Serve the MCP tools attached to an agent.
+    #[command(hide = true)]
+    Mcp {
+        #[arg(long)]
+        agent: dgc_protocol::ids::AgentId,
+    },
     /// List and answer agents' permission requests.
     Permit {
         #[command(subcommand)]
@@ -85,6 +92,7 @@ async fn main() -> ExitCode {
             commands::schedule::heartbeat(command, cli.json).await
         }
         Some(Command::Script { command }) => commands::script::run(command, cli.json).await,
+        Some(Command::Mcp { agent }) => mcp::run(agent).await,
         Some(Command::Permit { command }) => commands::permit::run(command, cli.json).await,
     };
     match result {

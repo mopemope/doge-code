@@ -18,10 +18,10 @@
 
 ## 現在の作業
 
-- タスク: M6 Task 2（`dgc mcp` サーバー）
+- タスク: M6 Task 3（CLI と TUI での表示と有効化）
 - 状態: 未着手
-- 済んだこと: Task 1 でプロトコル v4、親子の作成規則、MCP 起動引数と resume での設定復元を実装。レビュー対応で相対状態ルートを起動時に絶対化。
-- 次の一手: Task 1 のコントローラーレビュー後、Task 2 で stdio MCP サーバーと子孫操作を実装する。
+- 済んだこと: Task 2 で stdio MCP サーバー、子孫への 7 ツール、待機の終了処理を実装。
+- 次の一手: Task 2 のコントローラーレビュー後、Task 3 で `--mcp` と CLI/TUI の親子表示を実装する。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
@@ -110,7 +110,7 @@
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
 | 1 | 親子の規則と MCP の付与（デーモン） | 完了 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
-| 2 | `dgc mcp`（MCP サーバー） | 未着手 | `feat(cli): serve sub-agent tools over MCP` |
+| 2 | `dgc mcp`（MCP サーバー） | 完了 | `feat(cli): serve sub-agent tools over MCP` |
 | 3 | CLI と TUI での表示と有効化 | 未着手 | `feat(cli): enable MCP per agent and show sub-agent trees` |
 | 4 | M6 受け入れ | 未着手 | `docs(orchestrator): complete M6 acceptance` |
 
@@ -118,6 +118,13 @@
 
 - 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M6 Task 2): `initialize` で交渉する版は `2025-11-25`、`2025-06-18`。未対応版の要求には `2025-11-25` を返す。
+  公式仕様の現行版 `2026-07-28` ではハンドシェイクが廃止された。対応する両版で JSON-RPC バッチは廃止済みのため拒否する。stdio は UTF-8 の 1 行 1 メッセージとする。
+  2026-11-27 参照。[MCP 仕様](https://modelcontextprotocol.io/specification) [2026-07-28 の変更点](https://modelcontextprotocol.io/specification/2026-07-28/changelog) [バッチの廃止](https://modelcontextprotocol.io/specification/2025-06-18/changelog) [stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) [バージョン交渉](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
+- 2026-11-27 (M6 Task 2): `dgc mcp` は標準のパス解決と `Client::connect` を使う。`list_agents` はアーカイブ済みも含む子孫の ID、状態、タイトル、プロバイダを返す。
+  `wait_agent` は購読してから状態を読み、`lagged` では購読を作り直す。指定秒数は 300 に切り詰め、接続・取得には別途それぞれ最大 15 秒の猶予を設ける。
+  `last_answer` はイベント末尾ページから完了したターンを選び、失敗やレート制限を記録したターンは飛ばす。
 
 - 2026-11-27 (M6 Task 1): Claude の `--mcp-config` は単一引数のインライン JSON を使う。
   既存のユーザー MCP 設定も読み込むよう `--strict-mcp-config` は付けない。2026-11-27 参照。[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
@@ -717,6 +724,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 2（Linux、Rust 1.99.0）
+  - `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` 後、`cargo test --locked -p dgc-cli --test mcp` は実装前に 12 件失敗、実装後に 12 件 PASS。テストは一時状態ルート内で実デーモンと偽プロバイダを使用。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 757 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログチェック、Python 40 件）が PASS。
+  - 実プロバイダとの MCP 通信と macOS 実機は未検証。作業フォルダに `task-2-{red,green,verify}-*.log` を保存。
 
 - 2026-11-27 M6 Task 1 レビュー対応（Linux、Rust 1.99.0）
   - `cargo test --locked -p dgc-daemon --test agent_manager mcp_` と `cargo test --locked -p dgc-daemon --lib mcp_unavailable_executable_reports_invalid_state` で、未解決の相対パスと従来の状態メッセージを RED で確認。

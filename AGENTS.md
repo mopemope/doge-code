@@ -62,8 +62,8 @@ Do not weaken these.
 - The daemon opens no network listener. Socket directory 0700, socket 0600,
   peer UID checked on every connection. State files 0600, never written
   through symlinks.
-- The trust boundary is the peer UID. Parent/child checks constrain agent
-  creation within that UID.
+- The trust boundary is the peer UID. Parent/child rules and MCP descendant
+  checks are safeguards within that UID.
 - dgc never reads, stores or forwards provider credentials. Providers inherit
   the daemon's environment (an on-demand daemon inherits the environment of the
   command that started it); client environments are never sent over the socket.

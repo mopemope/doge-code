@@ -173,6 +173,21 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   falls back to one) discards the queued messages instead of sending them
   later; each shows in `logs` as `queued message discarded: TEXT`.
 
+### MCP sub-agent tools
+
+An attached `dgc mcp --agent ID` server connects to the running local daemon
+and exposes `create_agent`, `send_agent`, `get_agent`, `wait_agent`,
+`list_agents`, `interrupt_agent`, and `archive_agent` over stdio.
+Children start in the parent's workspace and use the parent's provider by
+default. The other tools operate on the calling agent's descendants. The peer
+UID is the trust boundary for the local socket and descendant rules constrain
+MCP tool calls within that UID. Permission requests still go to the user.
+
+`wait_agent` returns when the descendant becomes idle, stopped, failed,
+archived, or needs permission. It waits 60 seconds by default and up to 300
+seconds. `get_agent` and `wait_agent` include up to 16 KiB of the most recent
+completed answer available in the event tail.
+
 ### Launch profiles
 
 Define named launch settings in the daemon's `config.toml` and restart the
