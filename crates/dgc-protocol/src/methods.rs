@@ -217,6 +217,8 @@ pub struct ProfileInfo {
     pub mode: Option<String>,
     pub notes: Option<String>,
     pub auto_approve: bool,
+    #[serde(default)]
+    pub mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

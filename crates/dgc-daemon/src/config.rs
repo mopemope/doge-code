@@ -146,6 +146,7 @@ impl DaemonConfig {
                     mode: profile.mode.clone(),
                     notes: profile.notes.clone(),
                     auto_approve: profile.auto_approve(name)?,
+                    mcp: profile.mcp.unwrap_or_default(),
                 })
             })
             .collect()

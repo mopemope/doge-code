@@ -101,10 +101,6 @@ agents. Providers inherit the daemon's environment, and a daemon started on
 demand inherits the environment of the command that started it; to change the
 environment, restart the daemon.
 
-For agents with dgc MCP enabled, `dgc` is a reserved MCP server name. A custom
-`[mcp_servers.dgc]` in Codex or `mcpServers.dgc` in Claude can merge with or
-override the attached server's configuration.
-
 When the daemon stops it ends every agent's provider process; after a restart
 those agents show as `stopped` and `dgc resume` continues them from their
 provider session. Permission requests pending at shutdown are lost.
@@ -147,9 +143,12 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
 ## Agents
 
 - `dgc run --workspace ID [--provider claude|codex] [--profile NAME] [--model M] [--mode MODE]
-  [--title T] [--follow] PROMPT` starts an agent and prints its id (`--json`:
+  [--title T] [--mcp] [--follow] PROMPT` starts an agent and prints its id (`--json`:
   the agent record). Supply a provider or a profile. The title defaults to the
   prompt's first line (60 chars).
+  `--mcp` enables the dgc MCP server for the agent. A profile with `mcp = true`
+  enables it on every `dgc run` launch using that profile, with no per-launch
+  opt-out.
   `--follow` then prints its events until it is idle, stopped, failed or
   archived; the exit status is 0 only when it ended idle.
 - `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
@@ -165,7 +164,10 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   failed agent, reusing its provider session when available). If the provider
   failed to start, resume sends the original prompt from the queue. A resumed
   agent created by a schedule stays available for follow-up input.
-  Children retain their own state when their parent is archived.
+  In `ls`, children are indented under their parent, with `depth=N` on each
+  row and `mcp` on enabled agents. If a parent is hidden, its child keeps
+  its indentation and shows `↳ parent <short id>`. The JSON includes
+  `parent_id`, `depth`, and `mcp`. `show` prints the full parent ID.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An
@@ -173,22 +175,46 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   falls back to one) discards the queued messages instead of sending them
   later; each shows in `logs` as `queued message discarded: TEXT`.
 
-### MCP sub-agent tools
+### Sub-agents (MCP)
 
-An attached `dgc mcp --agent ID` server connects to the running local daemon
-and exposes `create_agent`, `send_agent`, `get_agent`, `wait_agent`,
-`list_agents`, `interrupt_agent`, and `archive_agent` over stdio.
-Children start in the parent's workspace and use the parent's provider by
-default. The other tools operate on the calling agent's descendants. The peer
-UID is the trust boundary for the local socket and descendant rules constrain
-MCP tool calls within that UID. Permission requests still go to the user.
+Use `dgc run --mcp` or set `mcp = true` in a [launch profile](#launch-profiles)
+to let an agent start and manage sub-agents. The TUI's new-agent form uses
+the selected profile's MCP setting. Enabled agents get the stdio server
+`dgc mcp --agent ID`, which connects to the running local daemon.
+`dgc` is a reserved MCP server name. A custom `[mcp_servers.dgc]` in Codex
+or `mcpServers.dgc` in Claude can merge with or override the attachment.
 
-`wait_agent` returns when the descendant becomes idle, stopped, failed,
-archived, or needs permission. It waits 60 seconds by default and up to 300
-seconds. Other MCP requests can proceed during the wait. Clients can cancel
-a pending MCP call with `notifications/cancelled`.
-`get_agent` and `wait_agent` include up to 16 KiB of the most recent clean,
-completed answer found within four event pages.
+| Tool | Arguments (`?` marks optional) | Result |
+|---|---|---|
+| `create_agent` | `prompt`, `title?`, `provider?`, `model?`, `mode?`, `mcp?` | Starts a child and returns `agent_id`, `provider`, `mode`, and `auto_approve`. The provider defaults to the parent's, and `mcp` defaults to false. |
+| `send_agent` | `agent_id`, `text`, `behavior?` | Sends text. Behavior is `queue` (default), `steer`, or `interrupt`. |
+| `get_agent` | `agent_id` | Returns `state`, `title`, `provider`, `last_answer`, and `pending_permission`. |
+| `wait_agent` | `agent_id`, `timeout_secs?` | Returns the same fields as `get_agent` plus `timed_out`. |
+| `list_agents` | `{}` | Lists descendants, including archived agents, with ID, state, title, and provider. |
+| `interrupt_agent` | `agent_id` | Interrupts the descendant's current turn. |
+| `archive_agent` | `agent_id` | Archives the descendant. |
+
+`wait_agent` returns when the descendant is idle, stopped, failed, archived,
+or waiting for permission. It waits 60 seconds by default, with a maximum of
+300 seconds. Other MCP requests can proceed during the wait. Clients can
+cancel a pending MCP call with `notifications/cancelled`.
+`last_answer` is the most recent clean, completed answer found within four
+event pages, limited to 16 KiB at a UTF-8 character boundary.
+
+The daemon requires a child to share the workspace of an existing, unarchived
+parent. A root has depth 0, and its children are one level deeper than their
+parent. The top-level `max_agent_depth` in daemon `config.toml` defaults to 3
+and accepts 1–8. A child at the depth limit cannot enable MCP. A child can
+use an auto-approve mode only if its parent also uses one. After a parent is
+archived, its children keep their state and can continue independently.
+Every tool other than `create_agent` operates only on descendants of the
+calling agent.
+
+MCP calls follow the provider's normal approval flow. When the provider asks
+for approval, dgc relays the request to the user through the usual CLI and TUI
+permission controls. The same flow applies to requests from children. The
+local socket's peer UID is the security boundary. The parent/child and
+descendant rules are guardrails within that UID.
 
 ### Launch profiles
 
@@ -200,6 +226,7 @@ daemon after editing the file.
 provider = "claude"
 model = "haiku"
 mode = "plan"
+mcp = true
 notes = "Review changes before editing"
 
 [profiles.quick-edit]
@@ -210,10 +237,12 @@ notes = "Runs commands and edits files without asking"
 
 Names contain 1–32 ASCII letters, digits, underscores, or hyphens. `provider`
 must be `claude` or `codex`. `model`, `mode`, and `notes` are optional
-strings. The daemon checks profile names, fields, and provider modes at startup,
-even when a provider CLI is unavailable.
+strings. `mcp` is an optional boolean that defaults to false. The daemon checks
+profile names, fields, and provider modes at startup, even when a provider CLI
+is unavailable.
 
 - `dgc profile ls [--json]` lists profiles by name, including their notes.
+  It marks MCP-enabled profiles `mcp` and includes the boolean in JSON.
 - `dgc run --workspace ID --profile review "Review the latest changes"` uses
   the profile's settings. `--model` and `--mode` override those settings.
   If you also supply `--provider`, it must match the profile's provider.
@@ -470,14 +499,18 @@ projects, workspaces and agents. It needs a terminal on stdout (and no
 `--json`), starts the daemon if it is not running, and works against the same
 state as the other commands. Quitting leaves the daemon and every agent
 running; the next `dgc tui` shows them again. Recorded sessions cover the
-[general TUI](docs/orchestrator/m2-tui-screen.txt) and
-[profiles and handoff](docs/orchestrator/m4-tui-screen.txt).
+[general TUI](docs/orchestrator/m2-tui-screen.txt),
+[profiles and handoff](docs/orchestrator/m4-tui-screen.txt), and
+[sub-agent trees](docs/orchestrator/m6-tui-screen.txt).
 
 Layout: on the left the tree (project, workspace, agent) with a state symbol per
 agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
-failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
-selected agent's stream (a tail page on selection, then live events, with the last
-2000 displayed lines kept),
+failed, `■` stopped). `[auto]` marks an auto-approve mode, and `[mcp]`
+marks MCP. Children are indented under their parent. When a parent is
+archived or absent from the current list, its children keep their depth
+under the workspace and show `↳ parent <short id>` as space permits.
+On the right is the selected agent's stream (a tail page on selection, then
+live events, with the last 2000 displayed lines kept),
 below it the input line, and at the bottom a status bar (connection, agent
 count, agents waiting for a permission, errors, key hints). In a narrow tree
 (under 50 columns) provider names are dropped. Agents and permissions update
@@ -509,8 +542,9 @@ In forms `↑` `↓` move between fields, `Tab` switches the provider (or the
 workspace isolation), `Enter` creates, and `Esc` cancels. The new-agent form
 loads profiles when it opens. On the profile field, `Tab` and `Shift-Tab` cycle
 through `(none)` and the profiles by name. Choosing a profile fills provider,
-model and mode. You can edit these fields before creating the agent. Choosing
-`(none)` resets these three fields to their initial values. Clearing model
+model and mode. The `[mcp]` mark on the profile indicates that it also enables
+MCP for the new agent. You can edit provider, model and mode before creating
+the agent. Choosing `(none)` resets the fields and disables MCP. Clearing model
 or mode uses the provider default, and the form warns in red whenever the
 effective mode auto-approves. The new-agent form needs a prompt, and a worktree
 workspace needs a branch. Failures stay in the form. A created agent or

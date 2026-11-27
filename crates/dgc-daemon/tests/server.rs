@@ -680,6 +680,7 @@ const PROFILES: &str = "
 [profiles.z-safe]
 provider = 'codex'
 mode = 'read-only'
+mcp = true
 
 [profiles.a-fast]
 provider = 'claude'
@@ -698,9 +699,9 @@ async fn profile_list_reports_auto_approve() {
         response["result"],
         json!({"profiles": [
             {"name": "a-fast", "provider": "claude", "model": "haiku",
-             "mode": "bypassPermissions", "notes": "Fast review", "auto_approve": true},
+             "mode": "bypassPermissions", "notes": "Fast review", "auto_approve": true, "mcp": false},
             {"name": "z-safe", "provider": "codex", "model": null,
-             "mode": "read-only", "notes": null, "auto_approve": false}
+             "mode": "read-only", "notes": null, "auto_approve": false, "mcp": true}
         ]}),
         "{response}"
     );

@@ -18,10 +18,10 @@
 
 ## 現在の作業
 
-- タスク: M6 Task 3（CLI と TUI での表示と有効化）
+- タスク: M6 Task 4（M6 受け入れ）
 - 状態: 未着手
-- 済んだこと: Task 2 で stdio MCP サーバーと子孫への 7 ツールを実装。レビュー対応で呼び出しの並行処理、キャンセル、回答の逆向きページ取得を追加。
-- 次の一手: Task 2 のコントローラーレビュー後、Task 3 で `--mcp` と CLI/TUI の親子表示を実装する。
+- 済んだこと: Task 3 で `dgc run --mcp`、プロファイルの MCP 表示と TUI での適用、CLI/TUI の親子ツリーを実装。合成データで [TUI 画面](m6-tui-screen.txt)を記録した。
+- 次の一手: Task 3 のコントローラーレビュー後、Task 4 で偽プロバイダと実プロバイダの受け入れ確認を行う。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
@@ -111,13 +111,17 @@
 |---|---|---|---|
 | 1 | 親子の規則と MCP の付与（デーモン） | 完了 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
 | 2 | `dgc mcp`（MCP サーバー） | 完了 | `feat(cli): serve sub-agent tools over MCP` |
-| 3 | CLI と TUI での表示と有効化 | 未着手 | `feat(cli): enable MCP per agent and show sub-agent trees` |
+| 3 | CLI と TUI での表示と有効化 | 完了 | `feat(cli): enable MCP per agent and show sub-agent trees` |
 | 4 | M6 受け入れ | 未着手 | `docs(orchestrator): complete M6 acceptance` |
 
 ## 決定事項
 
 - 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M6 Task 3): `--mcp` は有効化専用。CLI の起動単位で `mcp = true` のプロファイルを無効化する指定は設けない。TUI 作成フォームは `profile.list` の有効値を送る。RPC の `ProfileInfo.mcp` は省略時 false として読む。
+- 2026-11-27 (M6 Task 3): 親子は同じワークスペース内で親を先に表示し、兄弟は従来の一覧順。非表示の親を持つ子はワークスペース配下で深さを保ち、`↳ parent <short id>` を付ける。TUI の列幅が足りない場合は短い ID の固定接頭辞から省く。TUI の上下移動と `p` は描画順に従い、子からの `←` は表示されている親、親が非表示ならワークスペースを選ぶ。
+- 2026-11-27 (M6 Task 3): MCP ツールの承認はプロバイダの設定と通常の権限要求経路に従うことを README に記載。公式資料を同日参照した。[Claude Code の権限](https://code.claude.com/docs/en/permissions) [Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [MCP のツール仕様](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#user-interaction-model)
 
 - 2026-11-27 (M6 Task 2): `initialize` で交渉する版は `2025-11-25`、`2025-06-18`。未対応版の要求には `2025-11-25` を返す。
   公式仕様の現行版 `2026-07-28` ではハンドシェイクが廃止された。対応する両版で JSON-RPC バッチは廃止済みのため拒否する。stdio は UTF-8 の 1 行 1 メッセージとする。
@@ -733,6 +737,12 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 3（Linux、Rust 1.99.0）
+  - `bash scripts/verify.sh test <テスト名>` で指定 6 テストと TUI のプロファイル選択テストの RED/GREEN を確認した。親のアーカイブ後に TUI で ID の末尾が切れるケースを追加し、表示幅 120 列と 136 列で再検証した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 774 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
+  - 偽 Claude と一時状態ルートで `tmux capture-pane -p`（120×18）を実行し、親・子・孫、子の `[mcp]`、親のアーカイブ後の ID 注記と子の選択保持を記録した。[画面記録](m6-tui-screen.txt)
+  - 実プロバイダでの MCP 通信と macOS 実機は未検証。作業フォルダに `task-3-{red,green,verify}-*.log` を保存。
 
 - 2026-11-27 M6 Task 2 レビュー対応（Linux、Rust 1.99.0）
   - MCP で待機中の応答と EOF、フレーム処理、ツールエラー、逆方向の履歴取得、購読順と一覧 RPC に関する回帰を修正前に確認した。Codex の 330 秒と逆方向カーソルの未対応も RED で確認した。

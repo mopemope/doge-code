@@ -1,7 +1,10 @@
 //! Rendering shared by subcommands.
 
+use std::collections::HashMap;
+
 use dgc_daemon::schedule::localtime::format_local;
 use dgc_protocol::event::{AgentEvent, EventKind};
+use dgc_protocol::ids::AgentId;
 use dgc_protocol::methods::{
     DaemonStatus, ProviderStatus, ScheduleListEntry, ScriptState, ScriptStatus,
     WorkspaceArchiveResult,
@@ -196,6 +199,87 @@ fn resolution_name(resolution: Resolution) -> &'static str {
     }
 }
 
+pub struct AgentTreeEntry<'a> {
+    pub agent: &'a Agent,
+    pub missing_parent: Option<&'a AgentId>,
+}
+
+impl AgentTreeEntry<'_> {
+    pub fn indent_depth(&self) -> usize {
+        // The daemon permits up to eight levels. Bound indentation even for
+        // a persisted record with a depth outside that range.
+        self.agent.depth.min(8) as usize
+    }
+}
+
+/// Parent-first traversal, preserving input order among siblings. An agent
+/// with a hidden parent starts a subtree at its recorded depth.
+pub fn agent_tree<'a>(agents: impl IntoIterator<Item = &'a Agent>) -> Vec<AgentTreeEntry<'a>> {
+    let agents: Vec<_> = agents.into_iter().collect();
+    let by_id: HashMap<_, _> = agents.iter().map(|&agent| (&agent.id, agent)).collect();
+    let mut children: HashMap<&AgentId, Vec<_>> = HashMap::new();
+    let mut pending = Vec::new();
+    for agent in agents {
+        let parent = agent
+            .parent_id
+            .as_ref()
+            .and_then(|id| by_id.get(id).copied())
+            .filter(|parent| {
+                // A valid edge cannot cross workspaces or form a cycle.
+                parent.workspace_id == agent.workspace_id
+                    && parent.depth.checked_add(1) == Some(agent.depth)
+            });
+        if let Some(parent) = parent {
+            children
+                .entry(&parent.id)
+                .or_default()
+                .push(AgentTreeEntry {
+                    agent,
+                    missing_parent: None,
+                });
+        } else {
+            pending.push(AgentTreeEntry {
+                agent,
+                missing_parent: agent.parent_id.as_ref(),
+            });
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(by_id.len());
+    pending.reverse();
+    while let Some(entry) = pending.pop() {
+        if let Some(children) = children.remove(&entry.agent.id) {
+            pending.extend(children.into_iter().rev());
+        }
+        ordered.push(entry);
+    }
+    ordered
+}
+
+/// The ID prefix and its last six characters. Agent IDs validate as ASCII.
+pub fn short_id(id: &AgentId) -> String {
+    let s = id.as_str();
+    format!("{}…{}", AgentId::PREFIX, escape_line(&s[s.len() - 6..]))
+}
+
+pub fn missing_parent_note(id: &AgentId) -> String {
+    format!("↳ parent {}", short_id(id))
+}
+
+pub fn agent_tree_line(entry: &AgentTreeEntry<'_>) -> String {
+    let agent = entry.agent;
+    let indent = "  ".repeat(entry.indent_depth());
+    let mut line = format!("{indent}{}  depth={}", agent_line(agent), agent.depth);
+    if agent.mcp {
+        line.push_str("  mcp");
+    }
+    if let Some(parent) = entry.missing_parent {
+        line.push_str("  ");
+        line.push_str(&missing_parent_note(parent));
+    }
+    line
+}
+
 /// `<id>  <workspace>  <provider>  <state>  <title>[  auto-approve]`
 pub fn agent_line(agent: &Agent) -> String {
     let mut line = format!(
@@ -216,8 +300,12 @@ pub fn agent_line(agent: &Agent) -> String {
 pub fn agent_details(agent: &Agent) -> String {
     let optional =
         |value: &Option<String>| value.as_deref().map_or_else(|| "-".to_owned(), escape_line);
+    let parent = agent
+        .parent_id
+        .as_ref()
+        .map_or_else(|| "-".to_owned(), |id| escape_line(id.as_str()));
     let mut text = format!(
-        "id: {}\nworkspace: {}\ntitle: {}\nprovider: {}\nmodel: {}\nmode: {}\n\
+        "id: {}\nworkspace: {}\nparent_id: {parent}\ntitle: {}\nprovider: {}\nmodel: {}\nmode: {}\n\
          auto_approve: {}\nstate: {}\nprovider_session: {}\ncreated_at: {}",
         agent.id,
         agent.workspace_id,

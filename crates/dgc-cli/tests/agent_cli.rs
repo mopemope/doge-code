@@ -271,6 +271,177 @@ notes = "Quick\nreview\u001b[2J\u202e"
 }
 
 #[test]
+fn run_with_mcp_sets_flag() {
+    let a = AgentEnv::new("claude_turn", None);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&a.env.paths.config_file)
+        .expect("open config")
+        .write_all(
+            br#"
+[profiles.enabled]
+provider = "claude"
+mcp = true
+
+[profiles.disabled]
+provider = "claude"
+mcp = false
+"#,
+        )
+        .expect("append profiles");
+    let a = a.with_workspace(None);
+    let run = |profile: &str, flags: &[&str]| {
+        let mut args = vec![
+            "--json",
+            "run",
+            "--workspace",
+            &a.workspace,
+            "--profile",
+            profile,
+        ];
+        args.extend_from_slice(flags);
+        args.push("Say pong");
+        json(&a.run(&args))
+    };
+    assert_eq!(run("disabled", &["--mcp"])["mcp"], true);
+    assert_eq!(run("enabled", &[])["mcp"], true);
+    assert_eq!(run("disabled", &[])["mcp"], false);
+}
+
+fn create_child(a: &AgentEnv, parent: &str, title: &str, mcp: bool) -> Value {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let mut client = dgc_client::Client::connect(&a.env.paths)
+                .await
+                .expect("connect to test daemon");
+            client
+                .call(
+                    "agent.create",
+                    &serde_json::json!({
+                        "workspace_id": a.workspace,
+                        "provider": "claude",
+                        "title": title,
+                        "initial_prompt": "Say pong",
+                        "parent_id": parent,
+                        "mcp": mcp,
+                    }),
+                )
+                .await
+                .expect("create child")
+        })
+}
+
+#[test]
+fn ls_nests_children_under_parent() {
+    let a = AgentEnv::new("claude_turn", None).with_workspace(None);
+    let parent = created_id(&a.run_agent("claude", &["--title", "root", "Say pong"]));
+    let sibling = created_id(&a.run_agent("claude", &["--title", "other", "Say pong"]));
+    let child = create_child(&a, &parent, "child", true);
+    let child_id = child["id"].as_str().expect("child id");
+    let grandchild = create_child(&a, child_id, "grandchild", false);
+    let grandchild_id = grandchild["id"].as_str().expect("grandchild id");
+
+    let listed = a.run(&["ls"]);
+    assert_success(&listed);
+    let listed = stdout(&listed);
+    let rows: Vec<_> = listed.lines().collect();
+    assert_eq!(rows.len(), 4, "{listed}");
+    assert!(
+        rows[0].starts_with(&parent) && rows[0].contains("depth=0"),
+        "{listed}"
+    );
+    assert!(
+        rows[1].starts_with(&format!("  {child_id}"))
+            && rows[1].contains("depth=1")
+            && rows[1].contains("mcp"),
+        "{listed}"
+    );
+    assert!(
+        rows[2].starts_with(&format!("    {grandchild_id}")) && rows[2].contains("depth=2"),
+        "{listed}"
+    );
+    assert!(rows[3].starts_with(&sibling), "{listed}");
+
+    let shown = a.run(&["show", child_id]);
+    assert_success(&shown);
+    assert!(stdout(&shown).contains(&format!("parent_id: {parent}")));
+    assert_success(&a.run(&["archive", &parent]));
+    let listed = stdout(&a.run(&["ls"]));
+    let orphan = listed
+        .lines()
+        .find(|line| line.contains(child_id))
+        .expect("child survives a hidden parent");
+    let short = &parent[parent.len() - 6..];
+    assert!(orphan.starts_with("  agt_") && orphan.contains(&format!("↳ parent agt_…{short}")));
+    let including_archived = stdout(&a.run(&["ls", "--all"]));
+    assert!(
+        !including_archived.contains("↳ parent"),
+        "{including_archived}"
+    );
+}
+
+#[test]
+fn ls_json_has_parent_depth_mcp() {
+    let a = AgentEnv::new("claude_turn", None).with_workspace(None);
+    let parent = created_id(&a.run_agent("claude", &["Say pong"]));
+    let child_title = "child\u{202e}";
+    let child = create_child(&a, &parent, child_title, true);
+    let output = a.run(&["ls", "--json"]);
+    let listed = json(&output);
+    let agents = listed["agents"].as_array().expect("agents");
+    let root = agents.iter().find(|a| a["id"] == parent).expect("root");
+    let nested = agents
+        .iter()
+        .find(|a| a["id"] == child["id"])
+        .expect("child");
+    assert_eq!(root.get("parent_id"), Some(&Value::Null));
+    assert_eq!(root["depth"], 0);
+    assert_eq!(root["mcp"], false);
+    assert_eq!(nested["parent_id"], parent);
+    assert_eq!(nested["depth"], 1);
+    assert_eq!(nested["mcp"], true);
+    assert_eq!(nested["title"], child_title);
+    assert!(
+        !stdout(&output).contains('\u{202e}'),
+        "bidi control must be escaped"
+    );
+}
+
+#[test]
+fn profile_ls_shows_mcp() {
+    let a = AgentEnv::new("claude_turn", None);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&a.env.paths.config_file)
+        .expect("open config")
+        .write_all(
+            br#"
+[profiles.enabled]
+provider = "claude"
+mcp = true
+
+[profiles.plain]
+provider = "claude"
+"#,
+        )
+        .expect("append profiles");
+    let output = a.run(&["profile", "ls"]);
+    assert_success(&output);
+    let human = stdout(&output);
+    let rows: Vec<_> = human.lines().collect();
+    assert_eq!(rows.len(), 2, "{human}");
+    assert!(rows[0].starts_with("enabled") && rows[0].split_whitespace().any(|col| col == "mcp"));
+    assert!(rows[1].starts_with("plain") && !rows[1].split_whitespace().any(|col| col == "mcp"));
+
+    let listed = json(&a.run(&["profile", "ls", "--json"]));
+    assert_eq!(listed["profiles"][0]["mcp"], true);
+    assert_eq!(listed["profiles"][1]["mcp"], false);
+}
+
+#[test]
 fn run_follow_prints_assistant_text() {
     let a = AgentEnv::new("claude_turn", None).with_workspace(None);
     let output = a.run_agent("claude", &["--title", "ping", "--follow", "Say pong"]);
