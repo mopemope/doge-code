@@ -550,7 +550,8 @@ impl WorkspaceManager {
     /// Check, without changing anything, that [`Self::archive_workspace`]
     /// with the same `force` would not refuse to remove the workspace's
     /// worktree. The handler calls this before archiving the workspace's
-    /// agents so that a refusal leaves everything untouched.
+    /// agents so that a refusal leaves agent state untouched. Workspace
+    /// scripts must already be stopped before this check.
     pub async fn check_archive(&self, id: &WorkspaceId, force: bool) -> Result<(), WorkspaceError> {
         let _guard = self.write_lock.lock().await;
         let workspace = self.get_workspace(id)?;
@@ -603,6 +604,13 @@ impl WorkspaceManager {
             worktree_removed,
             branch_kept,
         })
+    }
+
+    pub(crate) fn get_project(&self, id: &ProjectId) -> Result<Project, WorkspaceError> {
+        self.store
+            .get_project(id)
+            .map_err(store_error)?
+            .ok_or_else(|| WorkspaceError::NotFound(format!("unknown project {id}")))
     }
 
     pub(crate) fn get_workspace(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {

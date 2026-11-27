@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M5 Task 4（ワークスペーススクリプトのデーモン）
+- タスク: M5 Task 5（ワークスペーススクリプトの CLI）
 - 状態: 未着手
-- 済んだこと: Task 3 の `dgc schedule` と `dgc heartbeat`、CLI 統合テスト、README を追加。
-- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 4 に従い、ワークスペーススクリプトのデーモン処理を追加する。
+- 済んだこと: Task 4 の `script.*` RPC、信頼の保存、プロセスグループの監督とログ、テストを追加。
+- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 5 に従い、`dgc script` と README を追加する。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -99,13 +99,21 @@
 | 1 | cron とローカル時刻 | 完了 | `feat(daemon): parse cron expressions in local time` |
 | 2 | スケジュールと heartbeat（デーモン） | 完了 | `feat(daemon): run schedules and heartbeats` |
 | 3 | スケジュールと heartbeat の CLI | 完了 | `feat(cli): manage schedules and heartbeats` |
-| 4 | ワークスペーススクリプト（デーモン） | 未着手 | `feat(daemon): run trusted workspace scripts from dgc.json` |
+| 4 | ワークスペーススクリプト（デーモン） | 完了 | `feat(daemon): run trusted workspace scripts from dgc.json` |
 | 5 | スクリプトの CLI | 未着手 | `feat(cli): trust, run and follow workspace scripts` |
 | 6 | M5 受け入れ | 未着手 | `docs(orchestrator): complete M5 acceptance` |
 
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 Task 4): 信頼はプロジェクトごとに直近 16 件の UTF-8 原文を保存し、ファイルのバイト列を比較する。
+  `script.start` は信頼確認と起動に同じスナップショットを使う。`script.list` は CLI の信頼確認用に `project_name` を返す。
+- 2026-11-27 (M5 Task 4): 実行状態はメモリにのみ保持する。再起動後は `not_running`。
+  通常停止とアーカイブではプロセスグループを止め、リーダーが先に終了した場合もグループ内に残ったプロセスは終了させる。
+  デーモンがクラッシュするとプロセスが残りうる。この挙動は Task 5 で README に記載する。
+- 2026-11-27 (M5 Task 4): ログはデーモンが生バイトで追記し、8 MiB に達したファイルに次のバイトを書き込む直前に回転する。
+  `script.logs` のオフセットはデーモンの稼働中は回転をまたいで継続し、再起動後は保持されているログの先頭を起点にする。
 
 - 2026-11-27 (M5 Task 3): `heartbeat ls` と `heartbeat show` のテキスト出力は `agent.get` で `auto_approve` を確認する。
   対象が見つからない場合はエージェント ID を表示する。JSON は既存 RPC の構造を使う。
@@ -659,6 +667,14 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 4（Linux、Rust 1.99.0）
+  - RED は `cargo test --locked -p dgc-daemon --test script` でスクリプトモジュールと RPC 型の未定義によるコンパイルエラー。
+    変更前のコードでは `cargo test --locked -p dgc-daemon --test server script_rpcs_round_trip` が `script.list` 未登録で FAIL。
+  - `bash scripts/verify.sh test script_file_parses_and_rejects_unknown_keys_bad_names_and_limits` は 1 件 PASS。
+    `cargo test --locked -p dgc-daemon --test script --test server --test workspace --test process` は 97 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 711 件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40 件）は PASS。
+  - macOS と実プロバイダは未検証。
 
 - 2026-11-27 M5 Task 3（Linux、Rust 1.99.0）
   - `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` は PASS。続く `cargo test --locked -p dgc-cli --test schedule_cli` は未登録の CLI で 6 件 FAIL、実装後は 6 件 PASS。

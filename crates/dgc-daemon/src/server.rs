@@ -21,8 +21,9 @@ use dgc_protocol::methods::{
     AGENT_LIST, AGENT_RESUME, AGENT_SEND, DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO,
     HelloParams, PERMISSION_LIST, PERMISSION_RESPOND, PROFILE_LIST, PROJECT_ADD, PROJECT_LIST,
     PROJECT_REMOVE, ProviderStatus, SCHEDULE_CREATE, SCHEDULE_GET, SCHEDULE_LIST, SCHEDULE_PAUSE,
-    SCHEDULE_REMOVE, SCHEDULE_RESUME, SCHEDULE_RUN, SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE,
-    WORKSPACE_CREATE, WORKSPACE_LIST,
+    SCHEDULE_REMOVE, SCHEDULE_RESUME, SCHEDULE_RUN, SCRIPT_LIST, SCRIPT_LOGS, SCRIPT_START,
+    SCRIPT_STOP, SCRIPT_TRUST, SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE,
+    WORKSPACE_LIST,
 };
 use dgc_protocol::model::ProviderKind;
 use dgc_protocol::rpc::{
@@ -50,6 +51,7 @@ use crate::provider::claude::ClaudeAdapter;
 use crate::provider::codex::CodexAdapter;
 use crate::provider::resolve::resolve_providers;
 use crate::schedule::{ScheduleManager, localtime::SystemClock};
+use crate::script::{STOP_GRACE, ScriptManager};
 use crate::store::{Store, StoreError};
 use crate::subscription::Subscriptions;
 use crate::time::now_rfc3339;
@@ -213,30 +215,11 @@ pub struct DaemonDispatcher {
     workspaces: Arc<WorkspaceManager>,
     agents: Arc<AgentManager>,
     schedules: Arc<ScheduleManager>,
+    scripts: Arc<ScriptManager>,
     providers: Vec<ProviderStatus>,
 }
 
 impl DaemonDispatcher {
-    pub fn new(
-        config: DaemonConfig,
-        started_at: String,
-        shutdown: watch::Sender<bool>,
-        workspaces: Arc<WorkspaceManager>,
-        agents: Arc<AgentManager>,
-        schedules: Arc<ScheduleManager>,
-        providers: Vec<ProviderStatus>,
-    ) -> Self {
-        Self {
-            config,
-            started_at,
-            shutdown,
-            workspaces,
-            agents,
-            schedules,
-            providers,
-        }
-    }
-
     pub fn config(&self) -> &DaemonConfig {
         &self.config
     }
@@ -258,6 +241,7 @@ impl DaemonDispatcher {
         let workspaces = self.workspaces.as_ref();
         let agents = &self.agents;
         let schedules = &self.schedules;
+        let scripts = &self.scripts;
         match method {
             DAEMON_STATUS => self.status(),
             DAEMON_SHUTDOWN => Ok(json!({})),
@@ -268,7 +252,7 @@ impl DaemonDispatcher {
             WORKSPACE_LIST => handlers::workspace_list(workspaces, params).await,
             WORKSPACE_ARCHIVE => {
                 let _gate = schedules.exclude_runs().await;
-                handlers::workspace_archive(workspaces, agents, params).await
+                handlers::workspace_archive(workspaces, agents, scripts, params).await
             }
             PROFILE_LIST => handlers::profile_list(&self.config),
             AGENT_CREATE => handlers::agent_create(agents, params).await,
@@ -289,6 +273,11 @@ impl DaemonDispatcher {
                 handlers::schedule_run(schedules, params, self.shutdown.subscribe()).await
             }
             SCHEDULE_REMOVE => handlers::schedule_remove(schedules, params).await,
+            SCRIPT_LIST => handlers::script_list(scripts, params).await,
+            SCRIPT_TRUST => handlers::script_trust(scripts, params).await,
+            SCRIPT_START => handlers::script_start(scripts, params).await,
+            SCRIPT_STOP => handlers::script_stop(scripts, params).await,
+            SCRIPT_LOGS => handlers::script_logs(scripts, params).await,
             PERMISSION_LIST => handlers::permission_list(agents, params),
             PERMISSION_RESPOND => handlers::permission_respond(agents, params).await,
             SUBSCRIBE => handlers::subscribe(agents, conn, params),
@@ -330,6 +319,10 @@ pub async fn run_daemon(
         Arc::clone(&store),
         paths.worktrees_dir.clone(),
     ));
+    let scripts = Arc::new(ScriptManager::new(
+        &paths.state_dir,
+        Arc::clone(&workspaces),
+    )?);
     let socket_dir = paths
         .socket
         .parent()
@@ -375,20 +368,22 @@ pub async fn run_daemon(
     let schedule_loop = Arc::clone(&schedules).spawn_loop(shutdown.subscribe());
     tracing::info!(pid = std::process::id(), "daemon listening");
 
-    let dispatcher = Arc::new(DaemonDispatcher::new(
+    let dispatcher = Arc::new(DaemonDispatcher {
         config,
-        now_rfc3339(),
-        shutdown.clone(),
+        started_at: now_rfc3339(),
+        shutdown: shutdown.clone(),
         workspaces,
-        Arc::clone(&agents),
-        Arc::clone(&schedules),
+        agents: Arc::clone(&agents),
+        schedules: Arc::clone(&schedules),
+        scripts: Arc::clone(&scripts),
         providers,
-    ));
+    });
     accept_loop(listener, dispatcher, shutdown.subscribe()).await;
     if schedule_loop.await.is_err() {
         tracing::warn!(error_kind = "task", "scheduler stopped unexpectedly");
     }
     drop(schedules.exclude_runs().await);
+    scripts.shutdown_all(STOP_GRACE).await;
     agents.shutdown_all(AGENT_SHUTDOWN_GRACE).await;
 
     match fs::remove_file(&paths.socket) {

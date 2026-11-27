@@ -65,11 +65,15 @@ Do not weaken these.
 - dgc never reads, stores or forwards provider credentials. Providers inherit
   the daemon's environment (an on-demand daemon inherits the environment of the
   command that started it); client environments are never sent over the socket.
-- `tracing` (and so `daemon.log`) never carries prompt, agent or permission
-  text: IDs, states, error kinds only. Agent and permission text is stored in
-  the agent's 0600 state files (`events.jsonl`, `queue.json`, and the agent
-  record, whose title defaults to the prompt's first line). Schedule prompts
-  and names are also stored in 0600 `<state>/schedules/<id>.json` records.
+- `tracing` (and so `daemon.log`) never carries prompts, agent or permission
+  text, `dgc.json` contents, script commands or script output. Use IDs, script
+  names, states and error kinds. Agent and permission text is stored in the
+  agent's 0600 state files (`events.jsonl`, `queue.json`, and the agent record,
+  whose title defaults to the prompt's first line). Schedule prompts and names
+  are stored in 0600 `<state>/schedules/<id>.json` records. Trusted script
+  configurations are stored in 0600 `<state>/script-trust/<project_id>.json`
+  records. Script output is stored in 0600
+  `<state>/scripts/<workspace_id>/<name>.log` and its rotated `.log.1`.
   `check-sensitive-logging.py` enforces this for every `crates/*/src` directory.
 - Worktree deletion only for dgc-owned workspaces whose path is inside the
   managed worktree directory, with the archive safety check (no uncommitted or
