@@ -4,7 +4,7 @@
 最初にここを読み「現在の作業」から再開する。
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
-- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md)
+- 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md) / [M4](../superpowers/plans/2026-11-26-orchestrator-m4-profiles-handoff.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,12 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M4 の計画作成
+- タスク: M5 の計画作成
 - 状態: 未着手
-- 済んだこと: M0（#183）、M1（#184）、M2（#185）マージ済み。M3（切替）完了、最終レビューと修正の再レビュー済み、PR #186（`feat/orchestrator-m3` → `develop`）でレビュー待ち
-  ブランチ `feat/orchestrator-m3` で完了（PR は未作成）。
-- 次の一手: M4（プロファイル、スケジュール、heartbeat、ワークスペーススクリプト、レート制限時の引き継ぎ提案）の計画を作成する。
-  M1/M2 の保留指摘から M4 の前提になるもの（例: 一覧の読み直しの積み上がり、送信モードの持ち越し、履歴の末尾読み込み）を選ぶ
+- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 は PR #187（develop 向け）でレビュー待ち。M4 の実装、受け入れ、最終レビュー修正が完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
+- 次の一手: M4 の PR をマージ後、M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -32,9 +30,10 @@
 | M0 | workspace 足場、検証/CI 対応 | 完了 | m0-scaffold |
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
-| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了 | m3-cutover |
-| M4 | プロファイル、スケジュール、heartbeat、スクリプト、レート制限時の引き継ぎ提案 | 未着手 | 未作成 |
-| M5 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
+| M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
+| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了 | m4-profiles-handoff |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 未着手 | 未作成 |
+| M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
 ## タスク
 
@@ -82,9 +81,53 @@
 | 2 | ドキュメントとガイダンスの切替（README、AGENTS.md、docs/ai、skills） | 完了 | `docs: describe dgc as the orchestrator and drop legacy guidance` |
 | 3 | M3 受け入れ | 完了 | `docs(orchestrator): complete M3 cutover acceptance` |
 
+### M4
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | 前提修正（末尾読み込み、送信モード、スナップショット合流、起動失敗時の初期プロンプト） | 完了 | `fix: tail history reads and other prerequisites for handoff` |
+| 2 | 上限検知（アダプタ） | 完了 | `feat(daemon): detect provider usage limits` |
+| 3 | プロファイル | 完了 | `feat: launch agents from named profiles` |
+| 4 | 引き継ぎ（デーモン、CLI、TUI） | 完了 | `feat: suggest and run a handoff to another provider` |
+| 5 | M4 受け入れ | 完了 | `docs(orchestrator): complete M4 acceptance` |
+| 6 | M4 最終レビュー修正 | 完了 | `fix: stop treating Claude overage as a limit and refuse mismatched daemons` |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-26 (M4 最終レビュー決定): Claude の `rate_limit_event` は `status` / `overageStatus` が `allowed` / `allowed_warning`、または `isUsingOverage` が `true` のとき通知を抑止する。HTTP 429 は引き続き検知する。
+- 2026-11-26 (M4 最終レビュー決定): プロトコルを 2 に更新する。バージョン不一致は `dgc daemon stop` を案内し、停止コマンドはインスタンスロックの保持と有効な PID を確認して `SIGTERM` を送る。
+- 2026-11-26 (M4 最終レビュー決定): Claude の assistant 行は `is_api_error_message: true`、またはモデルが `<synthetic>` かつ `error` が非 null の場合に `Error` とする。
+- 2026-11-26 (M4 最終レビュー決定): 引き継ぎ文の回答抽出では、完了したターンの `TurnCompleted` までを評価し、その後の `RateLimited` や `Error` で回答を除外しない。
+
+- 2026-11-26 (M4 Task 4 レビュー決定): TUI の起動 RPC は確認時の原文を `expected_prompt` として送る。デーモンが再生成した文と異なる場合は `INVALID_STATE`（`handoff_changed`）で作成を止め、TUI は新しいプレビューを取得して再確認を待つ。CLI は `expected_prompt` を省略する。
+- 2026-11-26 (M4 Task 4 レビュー決定): 冒頭の指示は先頭 16 KiB と省略表示に収める。引き継ぎ文の回答は上限到達やエラーのないターンから取る。Claude の API エラー行と合成エラー行は、4 KiB 以下の `Error` として記録する。
+- 2026-11-26 (M4 Task 4 レビュー決定): 引き継ぎの Git 出力は強制カラー設定を上書きし、失敗したコマンド名を表示する。ログ取得はブロッキングスレッドでエージェント単位のロックを使い、未オープンのログも読み取り専用で扱う。サーバーテストの起動待ちは共通の 10 秒を使い、デーモンが途中終了した場合はそのエラーを即時表示する。
+
+- 2026-11-26 (M4 Task 4): 引き継ぎ文の直近ログは最大 1000 件かつ既存の末尾ページのバイト予算内。
+  冒頭の読み取りにはプロトコルの最大入力 1 件分を確保する。初回指示がログのローテーションで失われた場合は欠落を明示する。
+  プレビューは読み取り専用で、実行時に引き継ぎ文を作り直す。
+  TUI はプレビュー取得後、選択変更後およびリサイズ後に確認キーの猶予を設ける。選んだプロファイルは Task 3 と同様に画面上の設定へ展開する。
+
+- 2026-11-26 (M4 Task 3): 起動プロファイルを明示的に選ぶと、その自動承認モードが適用される。
+  設定検証と一覧の判定にはアダプタと同じモード表を使う。TUI は新規エージェントフォームを開くたびに取得し、
+  プロファイルを選んだ時点で欄に展開する。作成 RPC には画面上の値を送るため、
+  モード欄を空にしてプロバイダ既定へ戻した場合も、選択済みプロファイルから再継承されない。
+
+- 2026-11-26 (M4 Task 2、レビュー決定): Claude の `allowed` と `allowed_warning` は通知を抑止し、`rejected`、未知の文字列ステータス、HTTP 429 を検知する。
+  Codex の再試行するエラーは通知を抑止する。リセット時刻は `primary` / `secondary` の 100% 以上のウィンドウから最小値を選び、該当がなければ両方を対象にする。
+  両アダプタの理由は ASCII 英数字と `_` の最大 48 文字とし、記録済みシナリオで `RateLimited` が出ないことを明示的に検証する。
+
+- 2026-11-26 (M4 Task 1): TUI は選択時に `tail=2000` を 1 ページ要求し、RPC では直近 1000 件かつ 768 KiB に収まる範囲を返す。
+  最後の 1 件だけで予算を超える場合はその 1 件を返す。初回取得までのライブイベントが保留上限を超えた場合は、
+  取得済みの末尾から順方向に補う。再接続・lagged 後も初回の取得後は順方向に継続する。
+  `logs --tail N --follow` は末尾を表示した直後の seq から購読する。0 件指定では出力を始める位置だけを取得する。
+- 2026-11-26 (M4 Task 1): lagged がスナップショット取得中に届いた場合は、再購読後の更新要求を 1 件にまとめ、取得完了後に送る。
+  起動エラー・タイムアウト時は M1 Task 8 の起動失敗時の方針を更新し、初期プロンプトを通常のキュー項目として保存してから
+  `failed` に遷移する。resume は同じ項目を送信してキューから除く。
+
+- 2026-11-26 (M4 計画): ユーザー決定。M4 はプロファイル・使用量上限時の引き継ぎ・前提修正、スケジュール／heartbeat／ワークスペーススクリプトは M5、エージェント向け MCP は M6。引き継ぎは「上限を検知したら提案し、ユーザーが確認して起動」（自動切替しない）。ワークスペーススクリプトはリポジトリの `dgc.json` に置き、初回と内容変更時に内容（ハッシュ）単位で信頼を確認する。デーモン停止中に過ぎたスケジュールは実行しない（記録のみ）。
 
 - 2026-11-26 (M3): Emacs 連携（`elisp/`、旧 `dgc exec` に依存）は削除する（ユーザー決定）。旧エージェント評価・修復受け入れツールと関連文書は削除し、AGENTS.md の Product priority をオーケストレーター向けに書き直す（ユーザー決定）。
 - 2026-11-26 (M3 Task 1, 実装者判断): `scripts/check-test-integrity.py` とそのテストは削除した。検査 3 種（`DOGE_SKIP_HTTPTEST`、
@@ -247,7 +290,7 @@
 - 2026-11-25 (M1 Task 8): 状態機械の細部（ブリーフに無い部分の判断）: create は `state_changed{starting}` と
   `user_message{初期プロンプト, queue}` を記録してから起動する。起動失敗・初期/queue 先頭の送信失敗・`Exited` は `error`
   イベント（4096 バイトで切り詰め）を出して `failed`（`last_error` に同じ文言。`Exited` は stderr 末尾、空なら定型文）。
-  起動失敗時の初期プロンプトは queue に入れない。ユーザーの send がプロバイダエラーになった場合は状態を変えずに
+  起動失敗時の初期プロンプトの扱いは M4 Task 1 の決定事項を参照。ユーザーの send がプロバイダエラーになった場合は状態を変えずに
   `Provider` エラーを返す（後続の `Exited` で failed になる）。interrupt 後の送信が失敗したら `idle`。
   `waiting_permission` 中の `TurnCompleted` も `running` と同様に扱い、残った保留権限は cancelled にする。
   resume は workspace が active であることを確認し、`last_error` を消す。queue.json の読み込みは `O_NOFOLLOW`、未知 version は
@@ -582,6 +625,81 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M4 最終レビュー修正（Linux、Rust 1.99.0）
+  - RED で Claude の追加使用の誤検知と合成回答の誤分類、両方の hello 不一致、旧デーモンの停止エラー、完了済み回答の欠落、
+    アダプタ確認前のログ読み取りを再現した。GREEN で偽デーモンへの `SIGTERM` による停止と、空きロックの古い PID への送信拒否を確認した。
+  - 偽プロバイダをビルドし、`cargo test --locked` で `claude_adapter` 22 件、`agent_manager` 45 件、`server` 28 件、
+    `dgc-client` 14 件、`daemon_cli` 10 件、`agent_cli` 17 件、`tui_backend` 158 件が PASS。
+    `verify.sh test` の名前フィルタは `server` が 7 件で、残り 5 名は 0 件で終了コード 2。対象の全件は上記の直接指定で検証した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 649 件）、`guidance`（Python 40 件）、
+    `tui-deps`、`msrv`（Rust 1.94.0）が PASS。実プロバイダで追加使用したターンと macOS は未検証。
+
+- 2026-11-26 M4 Task 5 受け入れ（Linux、Rust 1.99.0）:
+  - 合成シナリオ PASS。`profile ls`、CLI と TUI の通常・自動承認プロファイル起動、警告、上限時の提案と読み取り専用プレビューを確認。
+    `H` のプレビュー後にファイルを追加すると作成が止まり、再確認後に偽 Codex が同じワークスペースで 1 ターンを完了した。
+    TUI 起動前の上限イベントは、対象の履歴を読むまでツリーに `⇄` が出ない。[画面記録](m4-tui-screen.txt)の 3・4 を参照。
+  - 実機 Claude Code 2.1.332 / Haiku（`manual`）PASS。短い計算を 1 ターンで完了し、idle に戻った。
+  - 実機 Codex CLI 0.172.0 / GPT-6 Luna（既定モード）PASS。`dgc handoff ID --to codex --model gpt-6-luna --follow` で、
+    同じワークスペースで前回答を使って 1 ターンを完了した。両ターンで権限要求は発生しなかった。上限到達の検知は合成シナリオで確認した。
+  - `cargo fmt --all --check`、`bash scripts/verify.sh rust`（Clippy、Rust 641 件）、`guidance`（Python 40 件）、
+    `msrv`（Rust 1.94.0）、`tui-deps` PASS。macOS は未検証。
+
+- 2026-11-26 M4 Task 4 レビュー修正（Linux、Rust 1.99.0）:
+  - RED で古いプレビューによる新規作成、回答の欠落、100 KiB の最初の指示の拒否、Git の色と失敗名、未オープンのログの読み取りの待機、起動失敗の報告遅延を再現。
+  - GREEN は `agent_manager` 43 件、`claude_adapter` 20 件、`server` 28 件、`tui::` 138 件。
+    偽プロバイダのビルド後の `agent_cli` 17 件と `tui_backend` 158 件も通過。
+  - フォーマット、4 crate の全機能と全ターゲットの Clippy、`verify.sh rust`（641 件）、`guidance`、`tui-deps` PASS。
+    tmux でプレビュー後にファイルを作ると起動を拒否し、更新されたプレビューを確認してから偽 Codex が同じワークスペースで応答することを確認。
+    実プロバイダと macOS は未検証。詳細は Task 4 の作業レポートに追記。
+
+- 2026-11-26 M4 Task 4（Linux、Rust 1.99.0）:
+  - RED: `agent.handoff` が未定義。CLI は未登録のサブコマンドと上限提案の欠落で 2 件失敗し、TUI の対象 4 件と履歴からの提案テストも失敗。
+  - GREEN: `cargo test --locked -p dgc-daemon --test agent_manager --test events_log` 50 件、
+    `cargo test --locked -p dgc-cli --bin dgc tui::` 137 件、偽プロバイダのビルド後の
+    `cargo test --locked -p dgc-cli --test agent_cli --test tui_backend` 174 件 PASS。
+  - `cargo fmt --all`、4 crate の全ターゲット・全機能の Clippy、`bash scripts/verify.sh rust`（631 件）、
+    `guidance`、`tui-deps` PASS。既存のデーモン再起動テストは全体実行で一度ソケット待ちで失敗し、単独実行と続く全体実行では通過。
+  - 112×32 の tmux で合成 HTTP 429 の CLI と TUI の提案、読み取り専用プレビュー、自動承認の赤い警告、
+    通常モードの偽 Codex が同じワークスペースでターンを完了することを確認。端末記録は Task 4 の作業レポートを参照。
+    実プロバイダと macOS は未検証。
+
+- 2026-11-26 M4 Task 3（Linux、Rust 1.99.0）:
+  - RED: 新規の 7 テストが、設定の `profiles` キー、CLI の `--profile`、フォームを開いたときの一覧要求が未実装のため失敗。
+  - GREEN: `cargo test --locked -p dgc-daemon --test store --test server --test agent_manager` で計 80 件、
+    `cargo test --locked -p dgc-cli --bin dgc tui::` で 133 件、偽プロバイダのビルド後の
+    `cargo test --locked -p dgc-cli --test agent_cli` で 14 件 PASS。
+  - `cargo fmt --all`、4 crate の全ターゲット・全機能の Clippy、`bash scripts/verify.sh rust`（612 件）、
+    `guidance`、`tui-deps` PASS。
+  - tmux でプロファイルを選んだ直後の赤い警告、通常プロファイルへの切り替え、偽プロバイダによる応答を確認。
+    端末記録とテスト出力は Task 3 の作業レポートを参照。実プロバイダと macOS での確認は未実施。
+
+- 2026-11-26 M4 Task 2 レビュー修正（Linux、Rust 1.99.0）:
+  - RED: Claude の警告、両プロバイダの未正規化の理由、Codex の再試行エラーとリセット時刻の選択を再現。
+    通常の通知を誤検知させる一時的な変更で、記録済みの Claude resume と Codex steer のアサーションが失敗することも確認。
+  - GREEN: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter` で Claude 20 件、Codex 28 件 PASS。
+    `cargo fmt --all`、4 crate の全ターゲット・全機能の Clippy、`bash scripts/verify.sh rust`（604 件）、`guidance` PASS。
+
+- 2026-11-26 M4 Task 2（Linux、Rust 1.99.0）:
+  - RED: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter --no-fail-fast` で
+    上限イベントが生成されず Claude 3 件、Codex 4 件が失敗。通常通知を無視するテストは通過。
+  - GREEN: `cargo test --locked -p dgc-daemon --test claude_adapter --test codex_adapter` で Claude 18 件、Codex 25 件 PASS。
+  - `cargo fmt --all`、`cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`、
+    `bash scripts/verify.sh rust`（599 件）、`guidance` PASS。
+  - Claude Code 2.1.332 の記録と Codex CLI 0.172.0 の app-server 生成スキーマを根拠に、上限到達は合成シナリオで検証。
+    実プロバイダの上限到達は未観測。macOS での確認は未実施。
+
+- 2026-11-26 M4 Task 1（Linux、Rust 1.99.0）:
+  - RED: 末尾読み取り API の未定義、RPC での `tail` 無視、起動失敗後の `queue.json` 不在、TUI の末尾要求不在・送信モード残留・
+    スナップショット重複、CLI の `--tail` 未定義を確認。
+  - GREEN: `cargo test --locked -p dgc-daemon --test events_log` 14 件、`--test agent_manager` 29 件、
+    `cargo test --locked -p dgc-cli --bin dgc tui::` 132 件、偽プロバイダをビルド後の
+    `cargo test --locked -p dgc-cli --test agent_cli --test tui_backend` 164 件 PASS。
+  - `cargo fmt --all`、`cargo clippy --locked -p dgc-protocol -p dgc-daemon -p dgc-client -p dgc-cli --all-targets --all-features -- -D warnings`、
+    `bash scripts/verify.sh rust`（590 件）、`guidance`、`tui-deps` PASS。
+  - 隔離した状態ディレクトリと偽プロバイダを使い、tmux で履歴の表示、steer 送信後の queue 復帰、ライブ応答を記録。
+    同じ応答が `logs --tail 2 --follow` に連続した seq で届くことを確認。端末記録と RED/GREEN の出力は Task 1 の作業レポートを参照。
+    実プロバイダと macOS での確認は未実施。
 
 - 2026-11-25 M0 Task 1（Linux）:
   - `python3 -m unittest ... test_development_checks.py`: 新テスト 2 件が RED → 実装後 50 件 PASS。
@@ -1015,14 +1133,14 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 
 - Task 1: minor (deferred): Response/Notification lack jsonrpc field (plan-mandated); limit_raw boundary test at exactly 64 KiB; PROGRESS.md list blank line
 - Task 2: minor (deferred): file modes set via open(2) mode only (umask can make stricter, never looser); list_* order untested; post-rename dir fsync failure returns Err; write_atomic bare relative path; ensure_private_dir creates parents 0700; test gaps (symlink entry in list, dangling target, temp cleanup, events_max_bytes=0)
-- Task 3: minor (deferred): corrupt-line warn repeats per read/open and open scans whole file; 0600 not asserted on events.1.jsonl, pre-existing looser mode not tightened; oversized test doesn't assert fresh file
+- Task 3: minor (deferred): corrupt-line warn repeats per read/open; open scans whole file（M4 Task 1 で解消）; 0600 not asserted on events.1.jsonl, pre-existing looser mode not tightened; oversized test doesn't assert fresh file
 - Task 3: minor (deferred): size undercount after double fault (truncate fails then later write ok then fail+truncate ok); no test drives failure paths through append end to end
 - Task 4: minor (deferred): line.clear() keeps 16 MiB capacity after a huge line; tokio macros feature only needed by tests; wait_gone counts zombies as alive (container pid1 flake risk)
 - Task 5: minor (deferred): writer task outside JoinSet leaks after drain timeout; shutdown ignored if response send fails; no pre-hello timeout / connection cap; second_hello test doesn't assert INVALID_STATE code; responses_wait test relies on 50ms sleep; JoinError from connection task silently dropped
 - Task 6: minor (deferred): test guard may miss a still-booting daemon after a failed run; VersionMismatch after spawn reported as SpawnTimeout; Client::call has no overall timeout (wedged daemon hangs CLI); dgc-cli uses tokio::sync without declaring `sync` feature (unification); missing tests (symlinked daemon.log, log 0600, id-0 error path, pending-notification overflow); pre-existing daemon.log mode not tightened; stop's lock probe can make a concurrent autostart lose
 - Task 7: minor (deferred): missing project dir leaves workspace un-archivable → project never removable (consider re-grade at final review); worktree_requires_a_git_repository can't distinguish non-repo vs subdir and manager git inherits global config/hooks in tests; git timeout kills only git not its descendants; failed branch delete only warns (no response field)
 - Task 7: minor (deferred): `git worktree list -z` needs git >= 2.36 (no fallback/doc; fails closed); locked worktree with missing dir makes archive fail permanently; lib test name says prefix but checks suffix
-- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth; M2 Task 1 で解消); start failure drops initial prompt; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
+- Task 8: minor (deferred, consider re-grade at final review): unsupervised actor panic leaves live entry + leaked pending permissions until restart (adapter panics land here); queued items stall after interrupt; possible double send if save_queue fails after send; swallowed put_agent error in create cleanup; Shared::logs never evicts (fd growth; M2 Task 1 で解消); start failure drops initial prompt（M4 Task 1 で解消）; AGENTS_DIR duplicates Store constant; test gaps (race paths, failed queue-head send, archive during WaitingPermission, Exited while Idle, futures Send check missing interrupt/respond, slow_subscriber asserts page clamp only)
 - Task 8: minor (deferred): biased select can starve commands under a flooding provider (fairness cap suggested); drain loop has no yield/bound (use len snapshot); no test for Exited during drain; caller gets timeout error before stored state flips (≤5s)
 - Task 9: minor (deferred): Codex command deny never recorded — Deny mapping on commands unexercised (ruling: cancel when decline not offered)
 - Task 10: minor (deferred): tests hard-code sorted-key output (preserve_order unification risk); uncaptured ${name} in expect matches literally (should exit 2); capture line extra keys ignored; stdin read error treated as EOF; lossy UTF-8 on input
@@ -1035,7 +1153,7 @@ M1 はタスクごとのレビューと全体の最終レビューを通過し�
 - Task 14: minor (deferred): long DGC_STATE_ROOT → opaque SUN_LEN error (under() has no length check); `logs | head` panics on broken pipe; Claude final assistant_text after interrupt recorded after state idle; no TurnStarted event emitted though README lists it (M2 Task 1 で解消); idle sends print `user (queue)`; empty <repo>-<id> dir left after workspace archive; run --follow exit code not captured in acceptance
 - Task 14: minor (deferred): README lists `turn started` (never emitted; M2 Task 1 で emit するようになった) and omits `assistant (partial)` line; README socket fallback wording; systemd example lacks cgroup-stop note; C/D evidence summary-only, no-TCP check covers daemon pid only
 - Task 14: minor (deferred): README "does not log prompt text" true for daemon.log but events.jsonl stores prompts too — wording should say so
-- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (M2 Task 1 で解消); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt
+- Final: minor (deferred): startup error loses stderr tail end when >4 KiB; restart loses pending permissions without permission_resolved{cancelled}; Claude AllowForSession recorded as allow_for_session but sent as allow; daemon stop STOP_WAIT 5s < shutdown ~7.5s; Shared::logs never evicts (M2 Task 1 で解消); Task 11 idle-skip race; Task 12 non-32600 interrupt failure leaves Running; start failure drops initial prompt（M4 Task 1 で解消）
 - Final: minor (deferred): create_workspace rollback uses branch -d (fresh branch can be left behind with --base other); structural test only matches os("--force")/os("-D") form; second archive check after agents archived can refuse (no loss); discard_queue save failure only warns; ToolCall.name / usage unbounded at source; pre-fix oversized legacy events end logs with an error; gitignored files removed by non-force archive (documented)
 
 ### コントローラの判断（Ruling）
@@ -1073,9 +1191,9 @@ M2 はタスクごとのレビューと全体の最終レビュー（修正の�
 
 ### 保留した Minor 指摘
 
-- Task 1: minor (deferred): steer-fallback TurnStarted untested; adjacency asserted only for initial prompt; LogCache eviction tests thin (held handle skip, >64 live, mark_not_live, stored-archive forget); EventLog::open (full scan) under global logs mutex on cold reopen stalls emits; evict/mark_not_live O(n) per call
-- Task 2: minor (deferred): pending-live overflow at 2000 drops all (restart load instead); single `unsent` slot can restore a possibly-sent message (double send); create-dialog success after Esc still jumps selection; Enter toggles collapse (brief says expand) — align README; selection fallback tests only next sibling; Tree::rows / agents_in_order duplicate filters
-- Task 2: minor (deferred, re-grade at final): failed-send text restores into another agent's input (condition should be input_target == agent_id) — wrong-destination class; overlapping snapshot requests can still erase a fresh permission (count outstanding requests); permission id uniqueness assumption undocumented
+- Task 1: minor (deferred): steer-fallback TurnStarted untested; adjacency asserted only for initial prompt; LogCache eviction tests thin (held handle skip, >64 live, mark_not_live, stored-archive forget); EventLog::open (full scan) under global logs mutex on cold reopen stalls emits（M4 Task 1 で解消）; evict/mark_not_live O(n) per call
+- Task 2: minor (deferred): pending-live overflow at 2000 drops all (restart load instead)（M4 Task 1 で解消）; single `unsent` slot can restore a possibly-sent message (double send); create-dialog success after Esc still jumps selection; Enter toggles collapse (brief says expand) — align README; selection fallback tests only next sibling; Tree::rows / agents_in_order duplicate filters
+- Task 2: minor (deferred, re-grade at final): failed-send text restores into another agent's input (condition should be input_target == agent_id) — wrong-destination class; overlapping snapshot requests can still erase a fresh permission (count outstanding requests)（M4 Task 1 で解消）; permission id uniqueness assumption undocumented
 - Task 3: minor (deferred): create-dialog WARNING pushed off in tiny terminals (Enter still works) — move it next to mode field; status bar error can push permission hint off-screen; no test for tree vertical overflow
 - Task 3: minor (deferred): a single grapheme wider than 69 cols makes the dialog too_small at any size with an un-actionable "enlarge" message (fails safe); look-alike arrows (↳ ⤷ ⮡) not escaped; halfwidth render test doesn't guard N1 (layout test does)
 - Task 4: minor (deferred): subtask panic treated as connection close (terminal restored by hook but loop keeps drawing on main screen) — treat JoinError::is_panic as fatal; input thread I/O error detail lost; draw stops after MAX_REDRAWS without final redraw; fixed sleeps in tests (1.5 s quit, 500 ms resubscribe); no backend-level test that Resubscribe closes old connection; effects queued just before quit dropped silently
@@ -1083,8 +1201,8 @@ M2 はタスクごとのレビューと全体の最終レビュー（修正の�
 - Task 5: minor (deferred, re-grade at final): input draft shared across agents → text typed for A can be sent to B (wrong-destination class); new-agent form labels prompt "(optional)" but requires it; queue send to running agent gives no feedback
 - Task 5: minor (deferred): queue send to running agent gives no feedback (documented); failed send text dropped if user already typed new text; screen capture 1 caption mentions a message not captured; disconnected status bar truncates key hints
 - Task 5: minor (deferred): drafts map never pruned (archived/removed agents' drafts stay); no tests for failed-send restore after selection change / draft kept when target archived
-- Final: minor (deferred): reconnect race can skip part of the stream until reselect (display only); send mode global & sticky (interrupt persists across agents); history loaded from seq 0 each selection (O(n²) read_page, plan tail paging in protocol work); empty summary still allows a/s; auto-approve list duplicated vs daemon; single unsent slot; stream lines bounded by count not bytes
-- Final: minor (deferred): periodic snapshots can pile up behind a slow daemon (pending expires at 5 s; merge queued LoadSnapshot); empty-tree hint shows before first snapshot / while disconnected; two creates in flight share RequestTag (first success can close the second form; error resets submitting → duplicate create); terminals without bracketed paste still replay keys (document); >1 MiB paste exceeds message limit (unchecked)
+- Final: minor (deferred): reconnect race can skip part of the stream until reselect (display only); send mode global & sticky (interrupt persists across agents)（M4 Task 1 で解消）; history loaded from seq 0 each selection (O(n²) read_page, plan tail paging in protocol work)（M4 Task 1 で解消）; empty summary still allows a/s; auto-approve list duplicated vs daemon; single unsent slot; stream lines bounded by count not bytes
+- Final: minor (deferred): periodic snapshots can pile up behind a slow daemon (pending expires at 5 s; merge queued LoadSnapshot)（M4 Task 1 で解消）; empty-tree hint shows before first snapshot / while disconnected; two creates in flight share RequestTag (first success can close the second form; error resets submitting → duplicate create); terminals without bracketed paste still replay keys (document); >1 MiB paste exceeds message limit (unchecked)
 
 ### コントローラの判断（Ruling）
 
@@ -1131,3 +1249,35 @@ M3 はタスクごとのレビューと全体の最終レビュー（修正の�
 - Task 2: Ruling: fold Minor 3 (credentials wording: env inheritance; "not sent over the socket") and Minor 4 (remove .gitignore skills un-ignores — personal skills could become trackable — and the skills check/tests in check-agent-guidance) — security-wording and guidance debt left by this task — cost if wrong: none
 - Final: Ruling: macOS mode runs the full workspace test suite (drop name filters) — platform coverage over speed — cost if wrong: longer macOS CI job
 - Final: Ruling: sensitive-logging scope = all crate src dirs via glob, each must exist — reviewer found zero false positives — cost if wrong: future false positives need targeted exemptions
+
+## M4 レビューで保留した指摘と判断（2026-11-27、実行台帳から移記）
+
+M4 はタスクごとのレビューと全体の最終レビュー（修正 3be7f17 の再レビューまで）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。台帳の行はそのまま転記したので、最終レビューの修正 3be7f17 で解消した項目（Claude の追加使用、プロトコル v2、`<synthetic>` 行、`last_answer` の区切り、プレビュー時の可用性確認、README の注記）も含む。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): failed initial tail load clears initial_tail → later reconnect pages from seq 0 (efficiency); R / unknown-agent / decode-failure snapshot requests dropped while one is pending (set refresh_after_pending); send mode reset overwrites a mode changed during the in-flight RPC; old daemon ignores `tail` (no protocol bump) → document daemon restart; no test pinning a newline exactly at a 64 KiB boundary; initial prompt lost if start succeeds but first send_user fails
+- Task 2: minor (deferred): rate_limited_detail_carries_no_account_data only in Codex test file (Claude covered by exact equality)
+- Task 2: minor (deferred): no test for willRetry:true followed by terminal error/snapshot in same turn; float/missing usedPercent untested (treated as not blocked); empty reason stored as empty token
+- Task 3: minor (deferred): empty/whitespace profile model/notes not rejected (CLI passes --model "" while TUI drops it); TUI model field logic overcomplicated; picker shows (none) while loading/no profiles and never shows notes; no test for safe profile + explicit auto-approve mode
+- Task 4: minor (deferred): .gitattributes filter.clean/process can run during handoff git status/diff (same exposure as existing workspace git; user trusts own repo); kill_on_drop kills only direct child; recent-3 may be <3 after removing first instruction; profile load error lingers in form.error; ⇄ only from selected agent's history after TUI restart; Esc disabled while submitting (≤90 s); confirmation doesn't require reading preview to end (consider for auto-approve modes)
+- Task 4: minor (deferred): every <synthetic> Claude row → Error (not only error rows); first instruction dropped silently if budget < marker (title+path near 32 KiB); invalid-model error shown twice; Codex non-fatal mid-turn Error (unsupported provider request) makes last_answer skip a completed turn; slow source-log read can block that source's own resume/finish
+- Task 5: minor (deferred): README doesn't state ⇄ needs selecting an agent whose limit predates TUI start (only PROGRESS 検証記録 does); privacy paragraph could say plainly that prior instructions/output are included — read the dry-run; CLI-side evidence only in report/scratch
+- final-fix 3be7f17 (Codex) re-review a019036ab379d56ee: All findings addressed, no new Critical/Important. minor (deferred): daemon stop SIGTERM fallback TOCTOU between pid read / flock probe / kill (needs PID reuse in ms; pidfd_open+pidfd_send_signal would harden); no pid != getpid() check; old daemon exiting by itself between mismatch and probe reports 'no daemon holds the instance lock'; stop test checks try_wait immediately; existing lock_free probe via InstanceLock::acquire creates/truncates daemon.lock and writes the CLI pid
+- Final review: minor (deferred): Codex RateLimitSnapshot has limitId/limitName (per-model buckets) — a reached type on a bucket the agent is not using still raises RateLimited; record limitId in a debug log or accept the risk in the fixtures README
+- Final review: minor (deferred): TUI handoff dialog — after a failed preview Enter does nothing (Esc and H again); let Enter or a key re-request the preview
+- Final review: minor (deferred): `logs --tail 0 --follow` on an empty log replays from 0 (harmless)
+- Final review: minor (deferred, M5 candidate): persist the last rate-limit state on the agent record so ⇄ survives TUI restarts without selecting the agent
+- Final review: minor (deferred): some focused tests could resolve the host's claude/codex from PATH and run only `--version` (the fix wave made the CLI preview and TUI re-confirm tests use the fake Codex explicitly); keep tests independent of the host PATH
+
+### コントローラの判断（Ruling）
+
+- Ruling: none at pre-flight
+- Task 2: Ruling: Claude limited only on status "rejected" or unknown (not allowed/allowed_warning); plan amended — reviewer cited CLI docs — cost if wrong: an unknown future "limited" status variant counts as reached (fails toward suggesting)
+- Task 2: Ruling: fold Minors — reason normalized to [A-Za-z0-9_]{≤48}; Codex error with willRetry:true ignored; resets_at prefers windows at ≥100% — all three prevent wrong/unsafe suggestions — cost if wrong: none
+- Task 4: Ruling: expected_prompt equality check (daemon rebuilds; mismatch → INVALID_STATE handoff_changed; TUI re-previews); daemon never uses client text — "approve exactly what is sent" — cost if wrong: an extra re-confirm when state changes
+- Task 4: Ruling: last_answer skips turns with RateLimited/Error; Claude is_api_error_message rows → Error (Task 2 scope, folded) — cost if wrong: none
+- Task 4: Ruling: first instruction cut at 16 KiB with marker (plan amended; full text via log path) — cost if wrong: long specs truncated in prompt (full log referenced)
+- Task 4: Ruling: fold git color off, cold-log read off the global mutex (spawn_blocking), flaky restart test helper (fail fast + 10 s)
+- Final review: Ruling: protocol v2; client maps both mismatch shapes to VersionMismatch with a `dgc daemon stop` hint; `daemon stop` on mismatch sends SIGTERM to the pid in daemon.lock only while another process holds the flock — a daemon left over from an older install must fail loudly and stay stoppable — cost if wrong: a stop right after a PID reuse could signal a same-UID process (ms window)
+- Final review: Ruling: fold `<synthetic>` row narrowing, `last_answer` cut at the first TurnCompleted, dry-run adapter check and three README notes — each prevents a wrong suggestion or a confusing preview — cost if wrong: none

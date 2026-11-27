@@ -16,6 +16,10 @@ pub const PROJECT_REMOVE: &str = "project.remove";
 pub const WORKSPACE_CREATE: &str = "workspace.create";
 pub const WORKSPACE_LIST: &str = "workspace.list";
 pub const WORKSPACE_ARCHIVE: &str = "workspace.archive";
+pub const PROFILE_LIST: &str = "profile.list";
+pub const AGENT_HANDOFF: &str = "agent.handoff";
+/// INVALID_STATE message when the current handoff differs from the preview.
+pub const HANDOFF_CHANGED: &str = "handoff_changed";
 pub const AGENT_CREATE: &str = "agent.create";
 pub const AGENT_LIST: &str = "agent.list";
 pub const AGENT_GET: &str = "agent.get";
@@ -112,7 +116,11 @@ pub struct WorkspaceCreateParams {
 pub struct AgentCreateParams {
     pub workspace_id: WorkspaceId,
     pub title: String,
-    pub provider: ProviderKind,
+    /// Required unless a launch profile supplies the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -122,6 +130,40 @@ pub struct AgentCreateParams {
     pub labels: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub parent_id: Option<AgentId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub provider: ProviderKind,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub notes: Option<String>,
+    pub auto_approve: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileListResult {
+    pub profiles: Vec<ProfileInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHandoffParams {
+    pub agent_id: AgentId,
+    pub provider: Option<ProviderKind>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub dry_run: bool,
+    /// Compare the rebuilt prompt with this preview before launching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentHandoffResult {
+    pub prompt: String,
+    pub agent: Option<crate::model::Agent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +181,9 @@ pub struct AgentEventsParams {
     pub since_seq: u64,
     #[serde(default = "default_events_limit")]
     pub limit: u32,
+    /// When set, return the newest events, ignoring `since_seq` and `limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<u32>,
 }
 
 impl AgentEventsParams {
@@ -252,6 +297,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"agent_id": id})).unwrap();
         assert_eq!(p.since_seq, 0);
         assert_eq!(p.limit, MAX_EVENTS_LIMIT);
+        assert_eq!(p.tail, None);
         let big = AgentEventsParams {
             limit: 5000,
             ..p.clone()

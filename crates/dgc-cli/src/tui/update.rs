@@ -3,8 +3,9 @@
 use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::{AgentId, PermissionId, WorkspaceId};
 use dgc_protocol::methods::{
-    AGENT_ARCHIVE, AGENT_CREATE, AGENT_INTERRUPT, AGENT_RESUME, AGENT_SEND, AgentCreateParams,
-    AgentIdParams, AgentSendParams, PERMISSION_RESPOND, PermissionRespondParams, WORKSPACE_CREATE,
+    AGENT_ARCHIVE, AGENT_CREATE, AGENT_HANDOFF, AGENT_INTERRUPT, AGENT_RESUME, AGENT_SEND,
+    AgentCreateParams, AgentHandoffResult, AgentIdParams, AgentSendParams, PERMISSION_RESPOND,
+    PROFILE_LIST, PermissionRespondParams, ProfileListResult, WORKSPACE_CREATE,
     WorkspaceCreateParams,
 };
 use dgc_protocol::model::{
@@ -12,15 +13,14 @@ use dgc_protocol::model::{
 };
 
 use super::input::{Key, KeyInput};
+use super::layout::handoff_layout;
 use super::state::{
-    AppState, Dialog, ERROR_TICKS, Focus, NewAgentForm, NewWorkspaceForm, NodeId, PermissionChange,
-    SNAPSHOT_REFRESH_TICKS, ScrollMotion, default_title,
+    AgentField, AppState, Dialog, ERROR_TICKS, Focus, HandoffField, HandoffForm, NewAgentForm,
+    NewWorkspaceForm, NodeId, PermissionChange, SNAPSHOT_REFRESH_TICKS, STREAM_CAP, ScrollMotion,
+    default_title,
 };
 use super::{AppEvent, ConnectionState, Effect, RequestTag};
 use crate::output::escape_line;
-
-/// Ticks after which an unanswered snapshot request may be repeated.
-const SNAPSHOT_RETRY_TICKS: u32 = 20;
 
 /// Apply `event` to `state`; the returned effects are for the runtime to run.
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
@@ -33,7 +33,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             agents,
             permissions,
         } => {
-            state.snapshot_pending = None;
+            state.snapshot_pending = false;
+            for agent in &agents {
+                if agent.state == AgentState::Archived {
+                    state.rate_limits.remove(&agent.id);
+                }
+            }
             state.tree.replace(projects, workspaces, agents);
             state.permissions = permissions;
             // The snapshot may predate live permission events: apply them again.
@@ -47,6 +52,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state
                 .dismissed
                 .retain(|id| pending.iter().any(|p| &p.id == id));
+            if std::mem::take(&mut state.snapshot_refresh_again) {
+                request_snapshot(state, &mut fx, false);
+            }
         }
         AppEvent::AgentEvent(event) => on_agent_event(state, event, &mut fx),
         AppEvent::History {
@@ -56,6 +64,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             generation,
         } => on_history(state, &agent_id, &events, done, generation, &mut fx),
         AppEvent::RpcDone { request, result } => on_rpc_done(state, request, result, &mut fx),
+        AppEvent::HandoffChanged { generation } => refresh_handoff(state, generation, &mut fx),
         AppEvent::Connection(connection) => on_connection(state, connection, &mut fx),
         AppEvent::Lagged => {
             fx.push(Effect::Resubscribe);
@@ -70,6 +79,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 // so a key typed before the resize must not answer.
                 state.sync_permission_view(true);
                 state.rearm_permission();
+                if let Some(Dialog::Handoff(form)) = &mut state.dialog {
+                    form.rearm();
+                }
             }
         }
         AppEvent::Paste(text) => on_paste(state, &text),
@@ -96,6 +108,7 @@ fn settle(state: &mut AppState, fx: &mut Vec<Effect>) {
             fx.push(Effect::LoadHistory {
                 agent_id,
                 since_seq: 0,
+                tail: Some(STREAM_CAP as u32),
                 generation: state.stream.generation(),
             });
         }
@@ -133,22 +146,27 @@ fn open_pending_permission(state: &mut AppState) {
     }
 }
 
-fn request_snapshot(state: &mut AppState, fx: &mut Vec<Effect>, force: bool) {
-    if !force && state.snapshot_pending.is_some() {
+fn request_snapshot(state: &mut AppState, fx: &mut Vec<Effect>, refresh_after_pending: bool) {
+    if state.status.connection != ConnectionState::Connected {
         return;
     }
-    state.snapshot_pending = Some(0);
+    if state.snapshot_pending {
+        state.snapshot_refresh_again |= refresh_after_pending;
+        return;
+    }
+    state.snapshot_pending = true;
     state.ticks_since_snapshot = 0;
     fx.push(Effect::LoadSnapshot);
 }
 
-/// Reload the selected agent's events after `last_seq`.
+/// Reload the selected agent's events, retrying an interrupted initial tail.
 fn catch_up_selected(state: &mut AppState, fx: &mut Vec<Effect>) {
     if let Some(agent_id) = state.stream.agent_id().cloned() {
         state.stream.begin_catch_up();
         fx.push(Effect::LoadHistory {
             agent_id,
             since_seq: state.stream.last_seq(),
+            tail: state.stream.initial_tail().then_some(STREAM_CAP as u32),
             generation: state.stream.generation(),
         });
     }
@@ -163,16 +181,20 @@ fn on_connection(state: &mut AppState, connection: ConnectionState, fx: &mut Vec
         other => other,
     };
     if connected {
-        request_snapshot(state, fx, true);
+        request_snapshot(state, fx, false);
         catch_up_selected(state, fx);
     } else {
-        state.snapshot_pending = None;
+        state.snapshot_pending = false;
+        state.snapshot_refresh_again = false;
         state.ticks_since_snapshot = 0;
         state.permission_log.clear();
     }
 }
 
 fn on_tick(state: &mut AppState, fx: &mut Vec<Effect>) {
+    if let Some(Dialog::Handoff(form)) = &mut state.dialog {
+        form.ticks_until_armed = form.ticks_until_armed.saturating_sub(1);
+    }
     if let Some(Dialog::Permission {
         ticks_until_armed, ..
     }) = &mut state.dialog
@@ -185,16 +207,9 @@ fn on_tick(state: &mut AppState, fx: &mut Vec<Effect>) {
             state.clear_error();
         }
     }
-    if let Some(ticks) = &mut state.snapshot_pending {
-        *ticks += 1;
-        if *ticks >= SNAPSHOT_RETRY_TICKS {
-            state.snapshot_pending = None;
-            state.permission_log.clear();
-        }
-    } else if state.status.connection == ConnectionState::Connected {
+    if !state.snapshot_pending && state.status.connection == ConnectionState::Connected {
         // Projects and workspaces added or archived elsewhere have no live
-        // event; a periodic reload also repairs a permission that
-        // overlapping snapshots erased.
+        // event, so reload the tree periodically.
         state.ticks_since_snapshot += 1;
         if state.ticks_since_snapshot >= SNAPSHOT_REFRESH_TICKS {
             request_snapshot(state, fx, false);
@@ -206,12 +221,13 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
     if state.tree.agent(&event.agent_id).is_none() {
         request_snapshot(state, fx, false);
     }
+    track_rate_limit(state, &event);
     match &event.kind {
         EventKind::StateChanged { state: agent_state } => {
             state.tree.set_agent_state(&event.agent_id, *agent_state);
         }
         EventKind::PermissionRequested { permission } => {
-            if state.snapshot_pending.is_some() {
+            if state.snapshot_pending {
                 state
                     .permission_log
                     .push(PermissionChange::Added(permission.clone()));
@@ -226,6 +242,31 @@ fn on_agent_event(state: &mut AppState, event: AgentEvent, fx: &mut Vec<Effect>)
     }
 }
 
+fn track_rate_limit(state: &mut AppState, event: &AgentEvent) {
+    match event.kind {
+        EventKind::StateChanged {
+            state: AgentState::Archived,
+        } => {
+            state.rate_limits.remove(&event.agent_id);
+        }
+        EventKind::TurnStarted
+        | EventKind::TurnCompleted { .. }
+        | EventKind::RateLimited { .. }
+            if state
+                .tree
+                .agent(&event.agent_id)
+                .is_none_or(|agent| agent.state != AgentState::Archived) =>
+        {
+            state
+                .rate_limits
+                .entry(event.agent_id.clone())
+                .or_default()
+                .observe(event);
+        }
+        _ => {}
+    }
+}
+
 fn add_permission(state: &mut AppState, permission: PendingPermission) {
     if !state.permissions.iter().any(|p| p.id == permission.id) {
         state.permissions.push(permission);
@@ -234,7 +275,7 @@ fn add_permission(state: &mut AppState, permission: PendingPermission) {
 
 /// A permission ended (resolved, cancelled or answered by us).
 fn remove_permission(state: &mut AppState, id: &PermissionId) {
-    if state.snapshot_pending.is_some() {
+    if state.snapshot_pending {
         state
             .permission_log
             .push(PermissionChange::Resolved(id.clone()));
@@ -256,14 +297,30 @@ fn on_history(
     if state.stream.agent_id() != Some(agent_id) || generation != state.stream.generation() {
         return;
     }
+    // A live turn may already be ahead of this history page. Record the
+    // last completion first so the older starts can still follow it by seq.
+    if let Some(completion) = events
+        .iter()
+        .rfind(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+    {
+        track_rate_limit(state, completion);
+    }
+    for event in events {
+        track_rate_limit(state, event);
+    }
     let advanced = state.stream.history_page(events);
-    // An empty page, or one that shows nothing new, ends the paging.
+    // A tail, an empty page or one that shows nothing new ends the paging.
     if done || events.is_empty() || !advanced {
-        state.stream.finish_history();
+        if state.stream.pending_needs_catch_up() {
+            catch_up_selected(state, fx);
+        } else {
+            state.stream.finish_history();
+        }
     } else {
         fx.push(Effect::LoadHistory {
             agent_id: agent_id.clone(),
             since_seq: state.stream.last_seq(),
+            tail: None,
             generation,
         });
     }
@@ -285,7 +342,32 @@ fn on_rpc_done(
 
 fn on_rpc_error(state: &mut AppState, request: RequestTag, message: String) {
     match request {
-        RequestTag::Send { agent_id } => {
+        RequestTag::LoadProfiles { generation } => {
+            if generation == state.profile_generation
+                && let Some(Dialog::NewAgent(form)) = &mut state.dialog
+            {
+                form.error = Some(message);
+                return;
+            }
+            if let Some(form) = current_handoff(state, generation) {
+                form.error = Some(message);
+            }
+            return;
+        }
+        RequestTag::Handoff {
+            generation,
+            preview,
+        } => {
+            if let Some(form) = current_handoff(state, generation) {
+                form.submitting = false;
+                form.preview_failed = preview;
+                form.error = Some(message);
+            } else if !preview {
+                state.set_error(message);
+            }
+            return;
+        }
+        RequestTag::Send { agent_id, .. } => {
             if let Some((sent_to, text)) = state.unsent.take()
                 && sent_to == agent_id
                 && state.draft_is_empty(&agent_id)
@@ -334,10 +416,59 @@ fn on_rpc_ok(
     value: serde_json::Value,
     fx: &mut Vec<Effect>,
 ) {
-    state.clear_error();
+    if !matches!(
+        request,
+        RequestTag::LoadProfiles { .. } | RequestTag::Handoff { preview: true, .. }
+    ) {
+        state.clear_error();
+    }
     match request {
-        RequestTag::Send { .. } => {
+        RequestTag::LoadProfiles { generation } => {
+            if generation != state.profile_generation {
+                return;
+            }
+            match serde_json::from_value::<ProfileListResult>(value) {
+                Ok(mut result) => {
+                    result.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+                    match &mut state.dialog {
+                        Some(Dialog::NewAgent(form)) => form.profiles = result.profiles,
+                        Some(Dialog::Handoff(form)) => form.profiles = result.profiles,
+                        _ => {}
+                    }
+                }
+                Err(_) => on_rpc_error(state, request, "could not read profiles".to_owned()),
+            }
+        }
+        RequestTag::Handoff {
+            generation,
+            preview,
+        } => {
+            let result = serde_json::from_value::<AgentHandoffResult>(value);
+            match result {
+                Ok(result) if preview && result.agent.is_none() => {
+                    if let Some(form) = current_handoff(state, generation) {
+                        form.preview = Some(result.prompt);
+                        form.rearm();
+                    }
+                }
+                Ok(AgentHandoffResult {
+                    agent: Some(agent), ..
+                }) if !preview => {
+                    let waiting =
+                        current_handoff(state, generation).is_some_and(|form| form.submitting);
+                    if waiting {
+                        state.close_dialog();
+                    }
+                    insert_created_agent(state, agent, waiting);
+                }
+                _ => on_rpc_error(state, request, "could not read handoff result".to_owned()),
+            }
+        }
+        RequestTag::Send { behavior, .. } => {
             state.unsent = None;
+            if behavior != SendBehavior::Queue {
+                state.send_mode = SendBehavior::Queue;
+            }
             // A queued message shows in the stream only once delivered:
             // say it was accepted, or the user may send it again.
             if let Ok(outcome) = serde_json::from_value::<SendOutcome>(value["outcome"].clone()) {
@@ -354,14 +485,7 @@ fn on_rpc_ok(
                 state.close_dialog();
             }
             match serde_json::from_value::<Agent>(value) {
-                Ok(agent) => {
-                    let node = NodeId::Agent(agent.id.clone());
-                    state.tree.insert_agent(agent);
-                    // Watch the new agent, unless the user is typing at another.
-                    if waiting && state.focus != Focus::Input {
-                        state.tree.reveal(&node);
-                    }
-                }
+                Ok(agent) => insert_created_agent(state, agent, waiting),
                 Err(_) => request_snapshot(state, fx, false),
             }
         }
@@ -386,6 +510,21 @@ fn on_rpc_ok(
         | RequestTag::Resume { .. }
         | RequestTag::Archive { .. }
         | RequestTag::LoadHistory { .. } => {}
+    }
+}
+
+fn current_handoff(state: &mut AppState, generation: u64) -> Option<&mut HandoffForm> {
+    match &mut state.dialog {
+        Some(Dialog::Handoff(form)) if form.generation == generation => Some(form),
+        _ => None,
+    }
+}
+
+fn insert_created_agent(state: &mut AppState, agent: Agent, reveal: bool) {
+    let node = NodeId::Agent(agent.id.clone());
+    state.tree.insert_agent(agent);
+    if reveal && state.focus != Focus::Input {
+        state.tree.reveal(&node);
     }
 }
 
@@ -445,6 +584,11 @@ fn on_paste(state: &mut AppState, text: &str) {
     let editor = match state.focus {
         Focus::Input => Some(&mut state.input),
         Focus::Dialog => match &mut state.dialog {
+            Some(Dialog::Handoff(form)) if form.field == HandoffField::Mode && !form.submitting => {
+                form.rearm();
+                form.mode_editor()
+            }
+            Some(Dialog::Handoff(_)) => None,
             Some(Dialog::NewAgent(form)) => form.editor_mut(),
             Some(Dialog::NewWorkspace(form)) => form.editor_mut(),
             Some(Dialog::Permission { .. } | Dialog::ConfirmArchive { .. }) | None => None,
@@ -507,6 +651,7 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
         'r' => agent_call(state, fx, AGENT_RESUME, |agent_id| RequestTag::Resume {
             agent_id,
         }),
+        'H' => open_handoff(state, fx),
         'A' => match state.selected_agent() {
             Some(agent) => {
                 let dialog = Dialog::ConfirmArchive {
@@ -520,6 +665,14 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
         'n' => match cursor_workspace(state) {
             Some(workspace_id) => {
                 state.open_dialog(Dialog::NewAgent(NewAgentForm::new(workspace_id)));
+                state.profile_generation = state.profile_generation.wrapping_add(1);
+                fx.push(Effect::Call {
+                    request: RequestTag::LoadProfiles {
+                        generation: state.profile_generation,
+                    },
+                    method: PROFILE_LIST,
+                    params: serde_json::json!({}),
+                });
             }
             None => state.set_error("select a workspace first".to_owned()),
         },
@@ -539,6 +692,53 @@ fn tree_char(state: &mut AppState, c: char, fx: &mut Vec<Effect>) {
         }
         _ => {}
     }
+}
+
+fn open_handoff(state: &mut AppState, fx: &mut Vec<Effect>) {
+    let Some((agent_id, provider)) = state
+        .selected_agent()
+        .map(|agent| (agent.id.clone(), agent.provider.other()))
+    else {
+        state.set_error("select an agent first".to_owned());
+        return;
+    };
+    state.profile_generation = state.profile_generation.wrapping_add(1);
+    let generation = state.profile_generation;
+    let form = HandoffForm::new(agent_id, provider, generation);
+    let preview = handoff_call(&form, true);
+    state.open_dialog(Dialog::Handoff(form));
+    push_call(state, fx, preview);
+    fx.push(Effect::Call {
+        request: RequestTag::LoadProfiles { generation },
+        method: PROFILE_LIST,
+        params: serde_json::json!({}),
+    });
+}
+
+fn refresh_handoff(state: &mut AppState, generation: u64, fx: &mut Vec<Effect>) {
+    let Some(form) = current_handoff(state, generation).filter(|form| form.submitting) else {
+        return;
+    };
+    form.submitting = false;
+    form.error = None;
+    form.preview = None;
+    form.preview_failed = false;
+    form.preview_changed = true;
+    form.scroll = 0;
+    form.rearm();
+    let preview = handoff_call(form, true);
+    push_call(state, fx, preview);
+}
+
+fn handoff_call(form: &HandoffForm, preview: bool) -> Result<Effect, String> {
+    call(
+        RequestTag::Handoff {
+            generation: form.generation,
+            preview,
+        },
+        AGENT_HANDOFF,
+        serde_json::to_value(form.params(preview)),
+    )
 }
 
 /// `method` with the selected agent's id, for interrupt and resume.
@@ -708,6 +908,7 @@ fn send_message(state: &mut AppState, fx: &mut Vec<Effect>) {
     };
     let request = RequestTag::Send {
         agent_id: agent_id.clone(),
+        behavior: params.behavior,
     };
     match call(request, AGENT_SEND, serde_json::to_value(&params)) {
         Ok(effect) => {
@@ -726,10 +927,70 @@ fn send_message(state: &mut AppState, fx: &mut Vec<Effect>) {
 fn dialog_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
     match &state.dialog {
         Some(Dialog::Permission { .. }) => permission_key(state, &key, fx),
+        Some(Dialog::Handoff(_)) => handoff_key(state, key, fx),
         Some(Dialog::NewAgent(_)) => agent_form_key(state, key, fx),
         Some(Dialog::NewWorkspace(_)) => workspace_form_key(state, key, fx),
         Some(Dialog::ConfirmArchive { .. }) => archive_key(state, &key, fx),
         None => state.focus = state.focus_before_dialog,
+    }
+}
+
+fn handoff_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
+    let Some(Dialog::Handoff(form)) = &mut state.dialog else {
+        return;
+    };
+    if form.submitting || key.ctrl || key.alt {
+        return;
+    }
+    match key.key {
+        Key::Esc => state.close_dialog(),
+        Key::Enter => {
+            if form.ticks_until_armed > 0 || form.preview.is_none() {
+                return;
+            }
+            let preview = form.preview.as_deref().unwrap_or_default();
+            let layout = handoff_layout(state.size, preview, form.auto_approve_mode());
+            if layout.visible_rows == 0 {
+                return;
+            }
+            if let Err(error) =
+                dgc_daemon::provider::validate_mode(form.provider, form.mode_value())
+            {
+                form.error = Some(escape_line(&error));
+                return;
+            }
+            match handoff_call(form, false) {
+                Ok(effect) => {
+                    form.error = None;
+                    form.submitting = true;
+                    fx.push(effect);
+                }
+                Err(error) => form.error = Some(error),
+            }
+        }
+        Key::Tab | Key::BackTab if form.field == HandoffField::Profile => {
+            form.cycle_profile(key.key == Key::Tab);
+        }
+        Key::Tab if form.field == HandoffField::Provider => form.toggle_provider(),
+        Key::BackTab | Key::Up => form.move_field(false),
+        Key::Down => form.move_field(true),
+        Key::PageUp | Key::PageDown => {
+            if let Some(preview) = &form.preview {
+                let layout = handoff_layout(state.size, preview, form.auto_approve_mode());
+                let scroll = form.scroll.min(layout.max_scroll());
+                form.scroll = if key.key == Key::PageUp {
+                    scroll.saturating_sub(layout.visible_rows)
+                } else {
+                    (scroll + layout.visible_rows).min(layout.max_scroll())
+                };
+            }
+        }
+        _ => {
+            if let Some(editor) = form.mode_editor() {
+                editor.handle(&key);
+                form.rearm();
+            }
+        }
     }
 }
 
@@ -825,6 +1086,9 @@ fn agent_form_key(state: &mut AppState, key: KeyInput, fx: &mut Vec<Effect>) {
     match key.key {
         Key::Esc => state.close_dialog(),
         Key::Enter => submit_agent(state, fx),
+        Key::Tab | Key::BackTab if form.field == AgentField::Profile => {
+            form.cycle_profile(key.key == Key::Tab);
+        }
         Key::Tab => form.toggle_provider(),
         Key::BackTab | Key::Up => form.move_field(false),
         Key::Down => form.move_field(true),
@@ -853,11 +1117,20 @@ fn submit_agent(state: &mut AppState, fx: &mut Vec<Effect>) {
         form.error = Some("prompt is required".to_owned());
         return;
     }
+    let model = form
+        .selected_profile()
+        .and_then(|profile| profile.model.as_ref())
+        .filter(|model| !model.trim().is_empty() && model.as_str() == form.model.text())
+        .cloned()
+        .or_else(|| non_empty(form.model.text()));
     let params = AgentCreateParams {
         workspace_id: form.workspace_id.clone(),
         title: non_empty(form.title.text()).unwrap_or_else(|| default_title(&prompt)),
-        provider: form.provider,
-        model: non_empty(form.model.text()),
+        provider: Some(form.provider),
+        // Submit the displayed settings. An empty mode uses the provider
+        // default even when the selected profile originally filled it.
+        profile: None,
+        model,
         mode: non_empty(form.mode.text()),
         initial_prompt: prompt,
         labels: Default::default(),
@@ -1171,6 +1444,7 @@ mod tests {
         Effect::LoadHistory {
             agent_id: agent.id.clone(),
             since_seq,
+            tail: (since_seq == 0 && state.stream.initial_tail()).then_some(2000),
             generation: state.stream.generation(),
         }
     }
@@ -1215,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_agent_loads_history_from_zero() {
+    fn changing_agent_clears_the_stream() {
         let mut f = Fixture::new();
         assert_eq!(f.state.stream.agent_id(), None);
         assert_eq!(press_key(&mut f.state, Key::Down), vec![], "workspace row");
@@ -1233,6 +1507,73 @@ mod tests {
         );
         assert!(f.state.stream.lines().is_empty());
         assert_eq!(f.state.stream.last_seq(), 0);
+    }
+
+    #[test]
+    fn tui_selection_loads_tail_then_live() {
+        let mut f = Fixture::new();
+        let effects = f.select_a1();
+        let generation = generation_of(&effects);
+        assert_eq!(
+            effects,
+            vec![Effect::LoadHistory {
+                agent_id: f.a1.id.clone(),
+                since_seq: 0,
+                tail: Some(2000),
+                generation,
+            }]
+        );
+        let id = f.a1.id.clone();
+        for seq in [5002, 5001] {
+            update(
+                &mut f.state,
+                AppEvent::AgentEvent(text(&id, seq, &format!("t{seq}"))),
+            );
+        }
+        assert!(lines(&f.state).is_empty(), "live events stay buffered");
+        assert_eq!(
+            update(&mut f.state, page(&id, 5000..=5001, true, generation)),
+            vec![]
+        );
+        assert!(!f.state.stream.is_loading());
+        update(
+            &mut f.state,
+            AppEvent::AgentEvent(text(&id, 5002, "duplicate")),
+        );
+        update(&mut f.state, AppEvent::AgentEvent(text(&id, 5003, "t5003")));
+        assert_eq!(
+            lines(&f.state),
+            (5000..=5003)
+                .map(|seq| format!("[{seq}] assistant: t{seq}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tail_load_catches_up_if_the_live_buffer_overflows() {
+        let mut f = Fixture::new();
+        let generation = generation_of(&f.select_a1());
+        let id = f.a1.id.clone();
+        let tail_end = 10;
+        let live_end = tail_end + STREAM_CAP as u64 + 1;
+        for seq in tail_end + 1..=live_end {
+            update(
+                &mut f.state,
+                AppEvent::AgentEvent(text(&id, seq, &format!("t{seq}"))),
+            );
+        }
+        let fx = update(&mut f.state, page(&id, 8..=tail_end, true, generation));
+        assert_eq!(fx, vec![load_history(&f.state, &f.a1, tail_end)]);
+        assert!(f.state.stream.is_loading());
+        assert_ne!(f.state.stream.generation(), generation);
+        f.history(&id, tail_end + 1..=live_end, false);
+        f.finish_history(&id);
+        assert_eq!(
+            lines(&f.state),
+            (tail_end + 2..=live_end)
+                .map(|seq| format!("[{seq}] assistant: t{seq}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1393,7 +1734,8 @@ mod tests {
             fx,
             vec![Effect::Call {
                 request: RequestTag::Send {
-                    agent_id: f.a1.id.clone()
+                    agent_id: f.a1.id.clone(),
+                    behavior: SendBehavior::Steer,
                 },
                 method: "agent.send",
                 params: json!({"agent_id": f.a1.id, "text": "hi there", "behavior": "steer"}),
@@ -1418,12 +1760,47 @@ mod tests {
             AppEvent::RpcDone {
                 request: RequestTag::Send {
                     agent_id: f.a1.id.clone(),
+                    behavior: SendBehavior::Queue,
                 },
                 result: Err("daemon said no".to_owned()),
             },
         );
         assert_eq!(f.state.input.text(), "hello");
         assert_eq!(f.state.status.error.as_deref(), Some("daemon said no"));
+    }
+
+    #[test]
+    fn steer_or_interrupt_send_resets_mode_to_queue() {
+        for mode in [SendBehavior::Steer, SendBehavior::Interrupt] {
+            let mut f = Fixture::new();
+            f.select_a1();
+            press(&mut f.state, 'i');
+            f.state.send_mode = mode;
+            type_text(&mut f.state, "hello");
+            let effects = press_key(&mut f.state, Key::Enter);
+            let [Effect::Call { request, .. }] = effects.as_slice() else {
+                panic!("expected a send call")
+            };
+            update(
+                &mut f.state,
+                AppEvent::RpcDone {
+                    request: request.clone(),
+                    result: Err("daemon said no".to_owned()),
+                },
+            );
+            assert_eq!(f.state.send_mode, mode, "a failed send keeps the mode");
+            press_key(&mut f.state, Key::Enter);
+            update(
+                &mut f.state,
+                AppEvent::RpcDone {
+                    request: request.clone(),
+                    // Even a steer or interrupt send to an idle agent returns "sent".
+                    result: Ok(json!({"outcome": "sent"})),
+                },
+            );
+            assert_eq!(f.state.send_mode, SendBehavior::Queue);
+            assert_eq!(f.state.status.notice.as_deref(), Some("sent"));
+        }
     }
 
     #[test]
@@ -1858,7 +2235,7 @@ mod tests {
 
     #[test]
     fn unknown_agent_event_triggers_snapshot() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         let stranger = AgentId::generate();
         let fx = update(
             &mut f.state,
@@ -1871,21 +2248,19 @@ mod tests {
             AppEvent::AgentEvent(text(&stranger, 2, "again")),
         );
         assert_eq!(fx, vec![]);
-        // Once the snapshot is answered (or has timed out), a new one may follow.
+        // Once the snapshot is answered, a new one may follow.
         f.snapshot_with(vec![]);
         let fx = update(
             &mut f.state,
             AppEvent::AgentEvent(text(&stranger, 3, "still unknown")),
         );
         assert_eq!(fx, vec![Effect::LoadSnapshot]);
-        for _ in 0..SNAPSHOT_RETRY_TICKS {
-            update(&mut f.state, AppEvent::Tick);
-        }
+        tick(&mut f.state, 80);
         let fx = update(
             &mut f.state,
             AppEvent::AgentEvent(text(&stranger, 4, "unanswered")),
         );
-        assert_eq!(fx, vec![Effect::LoadSnapshot]);
+        assert_eq!(fx, vec![], "the slow request is still pending");
     }
 
     #[test]
@@ -2128,7 +2503,7 @@ mod tests {
 
     #[test]
     fn lagged_resubscribes_and_reloads() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         f.select_a1();
         let id = f.a1.id.clone();
         f.history(&id, 1..=3, true);
@@ -2503,7 +2878,7 @@ mod tests {
 
     #[test]
     fn snapshot_keeps_a_permission_requested_after_it_was_asked_for() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         let stranger = AgentId::generate();
         let fx = update(
             &mut f.state,
@@ -2523,7 +2898,7 @@ mod tests {
 
     #[test]
     fn snapshot_does_not_resurrect_a_permission_resolved_after_it_was_asked_for() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         let perm = permission(&f.a1.id);
         f.snapshot_with(vec![perm.clone()]);
         let stranger = AgentId::generate();
@@ -2681,7 +3056,7 @@ mod tests {
         // The first chain gets its first page and asks for the next.
         let fx = update(&mut f.state, page(&a1, 1..=3, false, g1));
         assert_eq!(generation_of(&fx), g1);
-        // The user moves A -> B -> A quickly: a new chain starts from 0.
+        // The user moves A -> B -> A quickly: A gets a fresh tail request.
         press_key(&mut f.state, Key::Down);
         let g3 = generation_of(&press_key(&mut f.state, Key::Up));
         assert_ne!(g1, g3);
@@ -2717,7 +3092,7 @@ mod tests {
 
     #[test]
     fn lagged_during_a_load_starts_a_new_chain() {
-        let mut f = Fixture::new();
+        let mut f = connected_fixture();
         f.select_a1();
         let a1 = f.a1.id.clone();
         let g1 = f.state.stream.generation();
@@ -2930,7 +3305,8 @@ mod tests {
             "a tab does not flip it"
         );
         assert!(!form.submitting);
-        // The provider choice (after the prompt) is not a text field.
+        // The provider choice (after the profile selector) has no text field.
+        press_key(&mut f.state, Key::Down);
         press_key(&mut f.state, Key::Down);
         paste(&mut f.state, "codex");
         let Some(Dialog::NewAgent(form)) = &f.state.dialog else {
@@ -2979,6 +3355,7 @@ mod tests {
                 AppEvent::RpcDone {
                     request: RequestTag::Send {
                         agent_id: f.a1.id.clone(),
+                        behavior: SendBehavior::Queue,
                     },
                     result: Ok(json!({ "outcome": outcome })),
                 },
@@ -2999,6 +3376,7 @@ mod tests {
         let done = |result| AppEvent::RpcDone {
             request: RequestTag::Send {
                 agent_id: f.a1.id.clone(),
+                behavior: SendBehavior::Queue,
             },
             result,
         };
@@ -3047,6 +3425,27 @@ mod tests {
     }
 
     #[test]
+    fn periodic_snapshots_do_not_pile_up_behind_a_slow_daemon() {
+        let mut f = connected_fixture();
+        f.select_a1();
+        assert_eq!(tick_fx(&mut f.state, 20), vec![Effect::LoadSnapshot]);
+        let perm = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &perm));
+        assert!(
+            tick_fx(&mut f.state, 80).is_empty(),
+            "the snapshot is still pending"
+        );
+        f.snapshot_with(vec![]);
+        assert_eq!(
+            f.state.permission_count(),
+            1,
+            "reconcile the live permission"
+        );
+        assert!(tick_fx(&mut f.state, 19).is_empty());
+        assert_eq!(tick_fx(&mut f.state, 1), vec![Effect::LoadSnapshot]);
+    }
+
+    #[test]
     fn no_periodic_snapshot_while_disconnected() {
         let mut f = Fixture::new();
         assert_eq!(
@@ -3082,37 +3481,29 @@ mod tests {
     }
 
     #[test]
-    fn the_periodic_snapshot_brings_back_a_permission_an_overlapping_snapshot_erased() {
+    fn lagged_refresh_waits_for_the_pending_snapshot_and_reconciles_permissions() {
         let mut f = Fixture::new();
         f.select_a1();
-        // Two snapshots in flight: the reconnect's and the lag's.
         update(
             &mut f.state,
             AppEvent::Connection(ConnectionState::Connected),
         );
-        update(&mut f.state, AppEvent::Lagged);
-        f.snapshot_with(vec![]);
-        // A permission arrives after the first answer, but the second
-        // snapshot was read before it and erases it.
+        for _ in 0..2 {
+            let effects = update(&mut f.state, AppEvent::Lagged);
+            assert!(effects.contains(&Effect::Resubscribe));
+            assert!(!effects.contains(&Effect::LoadSnapshot), "one is pending");
+        }
+        assert_eq!(f.snapshot_with(vec![]), vec![Effect::LoadSnapshot]);
         let perm = permission(&f.a1.id);
         update(&mut f.state, requested(&f.a1.id, 1, &perm));
-        assert_eq!(f.state.permission_count(), 1);
-        f.snapshot_with(vec![]);
-        assert_eq!(f.state.permission_count(), 0, "erased");
-        assert!(f.state.dialog.is_none());
-
-        let fx = tick_fx(&mut f.state, 20);
-        assert_eq!(fx, vec![Effect::LoadSnapshot]);
-        f.snapshot_with(vec![perm.clone()]);
-        assert_eq!(f.state.permission_count(), 1, "back");
-        assert_eq!(open_permission_id(&f.state), Some(perm.id));
-        assert!(
-            !f.state
-                .dialog
-                .as_ref()
-                .is_some_and(Dialog::permission_armed),
-            "a dialog that opens again is not armed"
+        assert!(tick_fx(&mut f.state, 80).is_empty());
+        assert_eq!(f.snapshot_with(vec![]), vec![], "refresh satisfied");
+        assert_eq!(
+            f.state.permission_count(),
+            1,
+            "live permission was reconciled"
         );
+        assert_eq!(open_permission_id(&f.state), Some(perm.id));
     }
 
     #[test]
@@ -3229,5 +3620,217 @@ mod tests {
         assert!(f.state.tree.workspace(&created.id).is_some(), "in the tree");
         assert_eq!(f.state.selected_agent_id(), Some(f.a1.id.clone()));
         assert_eq!(fx, vec![]);
+    }
+    fn handoff_screen(state: &AppState) -> String {
+        let (width, height) = state.size;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("terminal");
+        terminal
+            .draw(|frame| super::super::render::render(state, frame))
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn limit(id: &AgentId, seq: u64) -> AppEvent {
+        AppEvent::AgentEvent(event(
+            id,
+            seq,
+            EventKind::RateLimited {
+                detail: json!({"provider": "claude", "reason": "http_429"}),
+            },
+        ))
+    }
+
+    #[test]
+    fn rate_limited_agent_shows_marker_and_suggestion() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (105, 30);
+        update(&mut f.state, limit(&f.a1.id, 1));
+        let screen = handoff_screen(&f.state);
+        assert!(screen.contains("⇄"), "{screen}");
+        assert!(
+            screen.contains("rate limited (http_429) — H: hand off to codex"),
+            "{screen}"
+        );
+    }
+
+    fn sample_handoff_preview() -> String {
+        format!(
+            "preview↪\u{1b} {}\n{}END OF PREVIEW",
+            "long ".repeat(20),
+            "line\n".repeat(24)
+        )
+    }
+
+    fn finish_handoff_preview(state: &mut AppState, effects: Vec<Effect>) {
+        let (request, params) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request,
+                    method: "agent.handoff",
+                    params,
+                } => Some((request, params)),
+                _ => None,
+            })
+            .expect("request dry-run preview");
+        assert_eq!(params["dry_run"], true);
+        update(
+            state,
+            AppEvent::RpcDone {
+                request,
+                result: Ok(json!({"prompt": sample_handoff_preview(), "agent": null})),
+            },
+        );
+    }
+
+    #[test]
+    fn h_opens_confirmation_with_preview_and_enter_creates() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (95, 30);
+        let effects = press(&mut f.state, 'H');
+        assert_eq!(f.state.focus, Focus::Dialog);
+        assert!(handoff_screen(&f.state).contains("loading preview"));
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+        finish_handoff_preview(&mut f.state, effects);
+        let screen = handoff_screen(&f.state);
+        assert!(screen.contains("preview"), "{screen}");
+        assert!(screen.contains(r"\u{21aa}"), "{screen}");
+        assert!(screen.contains("↪"), "{screen}");
+        assert!(!screen.contains("END OF PREVIEW"), "{screen}");
+        assert!(press_key(&mut f.state, Key::PageDown).is_empty());
+        assert!(handoff_screen(&f.state).contains("END OF PREVIEW"));
+        tick(&mut f.state, usize::from(PERMISSION_ARM_TICKS));
+        let effects = press_key(&mut f.state, Key::Enter);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Call { method: "agent.handoff", params, .. }
+                    if params["agent_id"] == f.a1.id.as_str()
+                        && params["dry_run"] == false
+                        && params["provider"] == "codex"
+                        && params["expected_prompt"] == sample_handoff_preview()
+            )),
+            "{effects:?}"
+        );
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+    }
+
+    #[test]
+    fn handoff_changed_requires_review_of_a_fresh_preview() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (95, 30);
+        let effects = press(&mut f.state, 'H');
+        finish_handoff_preview(&mut f.state, effects);
+        arm(&mut f.state);
+        press_key(&mut f.state, Key::PageDown);
+        let generation = press_key(&mut f.state, Key::Enter)
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request:
+                        RequestTag::Handoff {
+                            generation,
+                            preview: false,
+                        },
+                    ..
+                } => Some(generation),
+                _ => None,
+            })
+            .expect("start attempt");
+        let retry = update(&mut f.state, AppEvent::HandoffChanged { generation });
+        let screen = handoff_screen(&f.state);
+        assert!(screen.contains("loading preview…"), "{screen}");
+        assert!(
+            screen.contains("the state changed — review the new preview"),
+            "{screen}"
+        );
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+        let request = retry
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request,
+                    method: "agent.handoff",
+                    params,
+                } if params["dry_run"] == true && params["expected_prompt"].is_null() => {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("request a new preview");
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request,
+                result: Ok(json!({"prompt": "replacement preview", "agent": null})),
+            },
+        );
+        let screen = handoff_screen(&f.state);
+        assert!(
+            screen.contains("the state changed — review the new preview"),
+            "{screen}"
+        );
+        assert!(screen.contains("replacement preview"), "{screen}");
+        assert!(press_key(&mut f.state, Key::Enter).is_empty());
+        arm(&mut f.state);
+        assert!(press_key(&mut f.state, Key::Enter).iter().any(|effect| matches!(
+            effect, Effect::Call { params, .. } if params["expected_prompt"] == "replacement preview"
+        )));
+    }
+
+    #[test]
+    fn suggestion_clears_after_a_completed_turn() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (105, 30);
+        update(&mut f.state, limit(&f.a1.id, 1));
+        let complete = |seq| {
+            AppEvent::AgentEvent(event(
+                &f.a1.id,
+                seq,
+                EventKind::TurnCompleted { usage: None },
+            ))
+        };
+        update(&mut f.state, complete(2));
+        assert!(handoff_screen(&f.state).contains("⇄"));
+        update(
+            &mut f.state,
+            AppEvent::AgentEvent(event(&f.a1.id, 3, EventKind::TurnStarted)),
+        );
+        assert!(handoff_screen(&f.state).contains("⇄"));
+        update(&mut f.state, complete(4));
+        let screen = handoff_screen(&f.state);
+        assert!(!screen.contains("⇄"), "{screen}");
+        assert!(!screen.contains("H: hand off to"), "{screen}");
+    }
+
+    #[test]
+    fn paste_and_tree_keys_do_not_confirm_handoff() {
+        let mut f = Fixture::new();
+        f.select_a1();
+        f.state.size = (95, 30);
+        let effects = press(&mut f.state, 'H');
+        finish_handoff_preview(&mut f.state, effects);
+        arm(&mut f.state);
+        assert!(update(&mut f.state, AppEvent::Paste("a\nH\n".to_owned())).is_empty());
+        assert!(press(&mut f.state, 'H').is_empty());
+        assert!(press(&mut f.state, 'a').is_empty());
+        let permission = permission(&f.a1.id);
+        update(&mut f.state, requested(&f.a1.id, 1, &permission));
+        assert!(handoff_screen(&f.state).contains("Handoff"));
+        assert!(open_permission_id(&f.state).is_none());
+        press_key(&mut f.state, Key::Esc);
+        assert_eq!(open_permission_id(&f.state), Some(permission.id));
     }
 }

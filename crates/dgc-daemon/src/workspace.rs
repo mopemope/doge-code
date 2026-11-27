@@ -237,6 +237,21 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
+pub(crate) fn local_command(program: &str, cwd: &Path) -> Command {
+    let mut command = Command::new(program);
+    // Ignore repository-selection variables inherited from the parent.
+    command
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
 /// Run `program` with a closed stdin and wait at most `limit`. On timeout the
 /// child is killed (`kill_on_drop`) and an error returned.
 async fn run_process(
@@ -245,25 +260,16 @@ async fn run_process(
     args: &[&OsStr],
     limit: Duration,
 ) -> Result<GitOutput, WorkspaceError> {
-    let child = Command::new(program)
+    let child = local_command(program, cwd)
         .args(args)
-        .current_dir(cwd)
-        // Never block on a credential prompt, and ignore repository-selecting
-        // variables inherited from whatever started the daemon.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
         .spawn()
         .map_err(|err| {
             tracing::error!(%err, program, "cannot start process");
             WorkspaceError::internal(format!("cannot start {program}: {}", err.kind()))
         })?;
+
     match timeout(limit, child.wait_with_output()).await {
         Ok(Ok(output)) => Ok(GitOutput {
             success: output.status.success(),

@@ -24,7 +24,7 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use dgc_daemon::paths::DaemonPaths;
 use dgc_protocol::event::AgentEvent;
 use dgc_protocol::ids::{AgentId, PermissionId};
-use dgc_protocol::model::{Agent, PendingPermission, Project, Workspace};
+use dgc_protocol::model::{Agent, PendingPermission, Project, SendBehavior, Workspace};
 use input::KeyInput;
 use ratatui::Terminal;
 use ratatui::backend::{Backend as TerminalBackend, CrosstermBackend};
@@ -50,12 +50,20 @@ pub enum ConnectionState {
 pub enum RequestTag {
     Send {
         agent_id: AgentId,
+        behavior: SendBehavior,
     },
     Respond {
         permission_id: PermissionId,
     },
     CreateAgent,
+    Handoff {
+        generation: u64,
+        preview: bool,
+    },
     CreateWorkspace,
+    LoadProfiles {
+        generation: u64,
+    },
     Interrupt {
         agent_id: AgentId,
     },
@@ -83,7 +91,7 @@ pub enum AppEvent {
     },
     /// A live event from the subscription.
     AgentEvent(AgentEvent),
-    /// One `agent.events` page; `done` when the page was empty.
+    /// One `agent.events` page; `done` for a tail or an empty forward page.
     ///
     /// Contract with the backend: `generation` is copied from the
     /// `Effect::LoadHistory` that asked for the page (every page of one
@@ -102,6 +110,10 @@ pub enum AppEvent {
         request: RequestTag,
         result: Result<serde_json::Value, String>,
     },
+    /// The daemon refused to launch with a stale handoff preview.
+    HandoffChanged {
+        generation: u64,
+    },
     Connection(ConnectionState),
     /// The subscription ended because it fell behind.
     Lagged,
@@ -117,11 +129,12 @@ pub enum AppEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     LoadSnapshot,
-    /// Fetch events after `since_seq`. The result must come back as
+    /// Fetch the tail or events after `since_seq`. The result comes back as
     /// `AppEvent::History` carrying the same `generation`.
     LoadHistory {
         agent_id: AgentId,
         since_seq: u64,
+        tail: Option<u32>,
         generation: u64,
     },
     Call {

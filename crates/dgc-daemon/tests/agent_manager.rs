@@ -256,7 +256,8 @@ impl Harness {
             .create(AgentCreateParams {
                 workspace_id: self.workspace.id.clone(),
                 title: "t".to_owned(),
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
+                profile: None,
                 model: Some("m1".to_owned()),
                 mode: None,
                 initial_prompt: prompt.to_owned(),
@@ -309,6 +310,7 @@ impl Harness {
                 agent_id: id.clone(),
                 since_seq: 0,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page")
             .into_iter()
@@ -453,7 +455,8 @@ async fn create_validates_workspace_provider_and_mode() {
     let params = |workspace_id: WorkspaceId, provider, mode: Option<&str>| AgentCreateParams {
         workspace_id,
         title: "t".to_owned(),
-        provider,
+        provider: Some(provider),
+        profile: None,
         model: None,
         mode: mode.map(str::to_owned),
         initial_prompt: "p".to_owned(),
@@ -946,6 +949,7 @@ async fn restart_recovery_marks_running_as_stopped() {
                 agent_id: id.clone(),
                 since_seq: 0,
                 limit: 10,
+                tail: None,
             })
             .expect("events");
         let stopped_event = events.iter().any(|e| {
@@ -1205,6 +1209,86 @@ async fn hung_start_fails_agent() {
 }
 
 #[tokio::test]
+async fn failed_start_keeps_initial_prompt_for_resume() {
+    for options in [
+        Options {
+            fail_start: true,
+            ..DEFAULT
+        },
+        Options {
+            start_hangs: true,
+            ..DEFAULT
+        },
+    ] {
+        let mut h = Harness::new(options);
+        let agent = h.create("recover this prompt").await;
+        h.wait_state(&agent.id, AgentState::Failed).await;
+        assert_eq!(h.queue_texts(&agent.id), ["recover this prompt"]);
+        // A failed resume must leave exactly the original pending item.
+        h.manager.resume(&agent.id).await.expect("resume");
+        h.wait_state(&agent.id, AgentState::Failed).await;
+        assert_eq!(h.queue_texts(&agent.id), ["recover this prompt"]);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        h.manager = new_manager(&h.store, &h.paths, DEFAULT, tx);
+        h.sessions = rx;
+        h.manager.resume(&agent.id).await.expect("resume");
+        let mut session = h.next_session().await;
+        assert_eq!(session.spec.resume_session_id, None);
+        assert_eq!(
+            session.next_call().await,
+            Call::SendUser("recover this prompt".to_owned())
+        );
+        h.wait_state(&agent.id, AgentState::Running).await;
+        assert!(h.queue_texts(&agent.id).is_empty());
+        session.emit(turn_completed()).await;
+        h.wait_state(&agent.id, AgentState::Idle).await;
+        session.assert_no_call();
+    }
+}
+
+#[tokio::test]
+async fn events_tail_param_returns_last_n() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, session) = h.running("first").await;
+    for _ in 0..1100 {
+        session
+            .emit(ProviderEvent::Event(EventKind::AssistantText {
+                text: "sample".to_owned(),
+                final_: false,
+            }))
+            .await;
+    }
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    let end = dgc_daemon::handlers::agent_events(
+        &h.manager,
+        serde_json::json!({"agent_id": agent.id, "since_seq": 1100}),
+    )
+    .expect("agent.events");
+    let last = end["events"]
+        .as_array()
+        .expect("events")
+        .last()
+        .expect("last event")["seq"]
+        .as_u64()
+        .expect("seq");
+    let request = |tail| {
+        let response = dgc_daemon::handlers::agent_events(
+            &h.manager,
+            serde_json::json!({"agent_id": agent.id, "since_seq": last + 1, "limit": 1, "tail": tail}),
+        ).expect("agent.events");
+        serde_json::from_value::<Vec<AgentEvent>>(response["events"].clone()).expect("events")
+    };
+    assert_eq!(
+        request(3).iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (last - 2..=last).collect::<Vec<_>>()
+    );
+    assert_eq!(request(2000).len(), 1000);
+    assert!(request(0).is_empty());
+}
+
+#[tokio::test]
 async fn buffered_turn_completed_is_applied_before_a_later_command() {
     let mut h = Harness::new(DEFAULT);
     let (agent, mut session) = h.running("first").await;
@@ -1248,6 +1332,7 @@ async fn a_huge_prompt_is_stored_in_bounded_chunks() {
                 agent_id: agent.id.clone(),
                 since_seq: since,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page");
         if page.is_empty() {
@@ -1463,6 +1548,7 @@ async fn a_chunked_prompt_records_one_turn_start_after_the_last_chunk() {
                 agent_id: agent.id.clone(),
                 since_seq: since,
                 limit: 1000,
+                tail: None,
             })
             .expect("events page");
         if page.is_empty() {
@@ -1519,4 +1605,656 @@ async fn event_log_handles_are_bounded() {
             .contains(&EventKind::TurnCompleted { usage: None })
     );
     drop(sessions);
+}
+
+async fn handoff_rpc(
+    h: &Harness,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, dgc_protocol::rpc::RpcError> {
+    dgc_daemon::handlers::agent_handoff(&h.manager, params).await
+}
+
+fn stored_handoff_source(h: &Harness, provider: ProviderKind, events: Vec<EventKind>) -> AgentId {
+    let id = AgentId::generate();
+    h.store
+        .put_agent(&Agent {
+            id: id.clone(),
+            workspace_id: h.workspace.id.clone(),
+            title: "Source title".to_owned(),
+            provider,
+            model: Some("source-only-model".to_owned()),
+            mode: Some("source-only-mode".to_owned()),
+            auto_approve: false,
+            provider_session_id: Some("source-only-session".to_owned()),
+            state: AgentState::Stopped,
+            parent_id: None,
+            labels: BTreeMap::new(),
+            created_at: String::new(),
+            last_error: None,
+        })
+        .expect("store source");
+    let dir = h.paths.state_dir.join("agents").join(id.as_str());
+    std::fs::create_dir(&dir).expect("agent dir");
+    let mut log = dgc_daemon::events_log::EventLog::open(&dir, id.clone(), 8 * 1024 * 1024)
+        .expect("open log");
+    log.append(EventKind::StateChanged {
+        state: AgentState::Starting,
+    })
+    .expect("state event");
+    for event in events {
+        log.append(event).expect("append event");
+    }
+    id
+}
+
+fn instruction(text: impl Into<String>) -> EventKind {
+    EventKind::UserMessage {
+        text: text.into(),
+        behavior: SendBehavior::Queue,
+    }
+}
+
+fn answer(text: impl Into<String>, final_: bool) -> EventKind {
+    EventKind::AssistantText {
+        text: text.into(),
+        final_,
+    }
+}
+
+async fn handoff_preview(h: &Harness, id: &AgentId) -> String {
+    let result = handoff_rpc(h, serde_json::json!({"agent_id": id, "dry_run": true}))
+        .await
+        .expect("handoff preview");
+    result["prompt"].as_str().expect("prompt").to_owned()
+}
+
+fn git_in_workspace(h: &Harness, args: &[&str]) {
+    let result = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .current_dir(&h.workspace.path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git");
+    assert!(result.status.success(), "{:?}", result);
+}
+
+#[tokio::test]
+async fn handoff_prompt_contains_instructions_answer_git_and_log_path() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    let file = h.workspace.path.join("edited.txt");
+    std::fs::write(&file, "before\n").expect("tracked file");
+    git_in_workspace(&h, &["add", "edited.txt"]);
+    std::fs::write(&file, "after\n").expect("edit tracked file");
+    std::fs::write(h.workspace.path.join("untracked.txt"), "data").expect("untracked file");
+
+    let mut events = vec![
+        instruction("first instruction"),
+        EventKind::TurnStarted,
+        instruction("first instruction"),
+        EventKind::TurnStarted,
+        answer("old answer", true),
+    ];
+    for text in ["old instruction", "one", "two", "three", "three"] {
+        events.extend([instruction(text), EventKind::TurnStarted]);
+    }
+    events.extend([answer("last answer ", false), answer("continued", true)]);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, events);
+    let prompt = handoff_preview(&h, &id).await;
+    let log = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(id.as_str())
+        .join("events.jsonl");
+    let mut after = 0;
+    for expected in [
+        "You are continuing work started by another coding agent (claude)",
+        "Source title",
+        "first instruction",
+        "one",
+        "two",
+        "three",
+        "last answer continued",
+        "?? untracked.txt",
+        "edited.txt |",
+        &format!(
+            "The full log of the previous agent is at {}.",
+            log.display()
+        ),
+    ] {
+        after += prompt[after..]
+            .find(expected)
+            .unwrap_or_else(|| panic!("expected {expected:?} after byte {after} in {prompt}"))
+            + expected.len();
+    }
+    assert_eq!(prompt.matches("three").count(), 1);
+    assert!(!prompt.contains("old answer"));
+    assert!(!prompt.contains("old instruction"));
+}
+
+#[tokio::test]
+async fn handoff_prompt_is_bounded_and_strips_control_chars() {
+    let h = Harness::new(DEFAULT);
+    // The JSON-escaped initial prompt crosses both chunk and normal
+    // forward-page boundaries, yet fits after controls are removed.
+    let initial = format!(
+        "FIRST\u{7}\t\n{}{}END_FIRST",
+        "\u{1}".repeat(140_000),
+        "初".repeat(4800)
+    );
+    let mut events: Vec<_> = dgc_protocol::chunk_text(&initial)
+        .into_iter()
+        .map(instruction)
+        .collect();
+    events.extend([
+        EventKind::TurnStarted,
+        instruction("新".repeat(3000)),
+        EventKind::TurnStarted,
+        answer(format!("OLD_ANSWER{}", "文".repeat(4000)), false),
+        answer("END_ANSWER\u{1b}", true),
+    ]);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, events);
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(prompt.len() <= 32 * 1024, "{}", prompt.len());
+    assert!(prompt.contains("FIRST\t\n"));
+    assert!(prompt.contains(&format!("FIRST\t\n{}END_FIRST", "初".repeat(4800))));
+    assert_eq!(prompt.matches("END_FIRST").count(), 1);
+    assert!(prompt.contains("…(earlier text omitted)"));
+    assert!(prompt.contains("END_ANSWER"));
+    assert!(!prompt.contains("OLD_ANSWER"));
+    assert!(
+        !prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    );
+    assert!(prompt.ends_with("events.jsonl.\n"));
+}
+
+#[tokio::test]
+async fn handoff_prompt_excludes_env_and_account_data() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    std::fs::write(h.workspace.path.join(".env"), "TOKEN=credential-sentinel")
+        .expect("untracked credentials file");
+    let id = stored_handoff_source(
+        &h,
+        ProviderKind::Claude,
+        vec![
+            instruction("first"),
+            EventKind::TurnStarted,
+            EventKind::RateLimited {
+                detail: serde_json::json!({"reason": "limit-sentinel", "account": "account-sentinel"}),
+            },
+            EventKind::Error {
+                message: "error-sentinel".to_owned(),
+            },
+            EventKind::ToolResult {
+                summary: "tool-sentinel".to_owned(),
+                is_error: false,
+            },
+        ],
+    );
+    let prompt = handoff_preview(&h, &id).await;
+    for excluded in ["sentinel", "source-only", "TOKEN="] {
+        assert!(!prompt.contains(excluded), "{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn handoff_defaults_to_the_other_provider() {
+    let mut h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let result = handoff_rpc(&h, serde_json::json!({"agent_id": id, "dry_run": false}))
+        .await
+        .expect("handoff");
+    let mut target = h.next_session().await;
+    assert_eq!(result["agent"]["provider"], "codex");
+    assert!(result["agent"]["model"].is_null());
+    assert!(result["agent"]["mode"].is_null());
+    assert_eq!(
+        target.next_call().await,
+        Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
+    );
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_dry_run_creates_nothing() {
+    let mut h = Harness::new(DEFAULT);
+    let (source, mut session) = h.running("first").await;
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({"agent_id": source.id, "provider": "codex", "dry_run": true}),
+    )
+    .await
+    .expect("handoff");
+    assert!(result["agent"].is_null());
+    assert!(result["prompt"].as_str().expect("prompt").contains("first"));
+    assert_eq!(h.manager.list().expect("list").len(), 1);
+    assert!(h.sessions.try_recv().is_err());
+    session.assert_no_call();
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_dry_run_checks_target_availability_before_reading_logs() {
+    let h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Codex, vec![instruction("first")]);
+    let path = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(id.as_str())
+        .join("events.jsonl");
+    std::fs::remove_file(&path).expect("remove source log");
+    std::fs::create_dir(&path).expect("make source log unreadable as a file");
+
+    let expected = dgc_daemon::handlers::agent_create(
+        &h.manager,
+        serde_json::json!({
+            "workspace_id": h.workspace.id, "provider": "claude",
+            "title": "test", "initial_prompt": "test"
+        }),
+    )
+    .await
+    .expect_err("target adapter is unavailable");
+    assert_eq!(expected.code, dgc_protocol::rpc::INVALID_PARAMS);
+
+    let error = handoff_rpc(&h, serde_json::json!({"agent_id": id, "dry_run": true}))
+        .await
+        .expect_err("preview must fail for the same unavailable adapter");
+    assert_eq!(error, expected);
+}
+
+#[tokio::test]
+async fn handoff_creates_agent_in_same_workspace_with_label() {
+    let mut h = Harness::new(DEFAULT);
+    let (source, mut source_session) = h.running("first").await;
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": source.id, "provider": "codex", "mode": "full-access", "dry_run": false
+        }),
+    )
+    .await
+    .expect("handoff");
+    let mut target = h.next_session().await;
+    let agent: Agent = serde_json::from_value(result["agent"].clone()).expect("agent");
+    assert_ne!(agent.id, source.id);
+    assert_eq!(agent.title, "handoff: t");
+    assert_eq!(agent.workspace_id, source.workspace_id);
+    assert_eq!(
+        agent.labels.get("handoff_from").map(String::as_str),
+        Some(source.id.as_str())
+    );
+    assert!(agent.parent_id.is_none());
+    assert!(agent.auto_approve);
+    assert_eq!(target.spec.cwd, h.workspace.path);
+    assert_eq!(
+        target.next_call().await,
+        Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
+    );
+    assert_eq!(
+        h.manager.get(&source.id).expect("source").state,
+        AgentState::Running
+    );
+    source_session.assert_no_call();
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_requires_active_source_and_workspace() {
+    let mut h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![]);
+    let path = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(id.as_str())
+        .join("events.jsonl");
+    std::fs::remove_file(&path).expect("remove incomplete source log");
+    let params = serde_json::json!({"agent_id": id, "dry_run": true});
+    let result = handoff_rpc(&h, params.clone())
+        .await
+        .expect("preview without log");
+    assert!(
+        result["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("unavailable in the retained event log")
+    );
+    assert!(!path.exists(), "preview created the missing source log");
+
+    let missing = serde_json::json!({"agent_id": AgentId::generate(), "dry_run": true});
+    assert_eq!(
+        handoff_rpc(&h, missing)
+            .await
+            .expect_err("unknown agent")
+            .code,
+        dgc_protocol::rpc::NOT_FOUND
+    );
+
+    h.workspace.state = WorkspaceState::Archived;
+    h.store
+        .put_workspace(&h.workspace)
+        .expect("archive workspace");
+    assert_eq!(
+        handoff_rpc(&h, params.clone())
+            .await
+            .expect_err("archived workspace")
+            .code,
+        dgc_protocol::rpc::INVALID_STATE
+    );
+
+    h.workspace.state = WorkspaceState::Active;
+    h.store
+        .put_workspace(&h.workspace)
+        .expect("activate workspace");
+    h.manager.archive(&id).await.expect("archive agent");
+    assert_eq!(
+        handoff_rpc(&h, params)
+            .await
+            .expect_err("archived source")
+            .code,
+        dgc_protocol::rpc::INVALID_STATE
+    );
+}
+
+#[tokio::test]
+async fn handoff_refuses_changed_preview_without_creating_an_agent() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let preview = handoff_preview(&h, &id).await;
+    std::fs::write(h.workspace.path.join("new.txt"), "").expect("change workspace");
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": id, "dry_run": false, "expected_prompt": preview
+        }),
+    )
+    .await
+    .expect_err("changed preview");
+    assert_eq!(result.code, dgc_protocol::rpc::INVALID_STATE);
+    assert_eq!(result.message, "handoff_changed");
+    assert_eq!(h.manager.list().expect("agents").len(), 1);
+}
+
+#[tokio::test]
+async fn handoff_creates_with_the_exact_matching_preview() {
+    let mut h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let preview = handoff_preview(&h, &id).await;
+    let result = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": id, "dry_run": false, "expected_prompt": preview
+        }),
+    )
+    .await
+    .expect("matching preview");
+    let mut session = h.next_session().await;
+    assert_eq!(result["prompt"], preview);
+    assert_eq!(session.next_call().await, Call::SendUser(preview));
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn handoff_keeps_last_answer_before_a_failed_or_limited_turn() {
+    let h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(
+        &h,
+        ProviderKind::Claude,
+        vec![
+            instruction("initial"),
+            EventKind::TurnStarted,
+            answer("previous ", false),
+            answer("real answer", true),
+            EventKind::TurnCompleted { usage: None },
+            instruction("next"),
+            EventKind::TurnStarted,
+            answer("old adapter 429 plan text", true),
+            EventKind::RateLimited {
+                detail: serde_json::json!({"reason": "http_429"}),
+            },
+            EventKind::TurnCompleted { usage: None },
+            instruction("retry"),
+            EventKind::TurnStarted,
+            answer("partial failed answer", true),
+            EventKind::Error {
+                message: "synthetic plan error text".to_owned(),
+            },
+            EventKind::TurnCompleted { usage: None },
+            instruction("retry again"),
+            EventKind::TurnStarted,
+            EventKind::RateLimited {
+                detail: serde_json::json!({"reason": "http_429"}),
+            },
+        ],
+    );
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(
+        prompt.contains("Last assistant answer\nprevious real answer"),
+        "{prompt}"
+    );
+    for excluded in [
+        "old adapter 429 plan text",
+        "partial failed answer",
+        "synthetic plan error text",
+    ] {
+        assert!(!prompt.contains(excluded), "{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn handoff_keeps_a_completed_answer_after_a_late_failure() {
+    let h = Harness::new(DEFAULT);
+    for late_failure in [
+        EventKind::RateLimited {
+            detail: serde_json::json!({"reason": "rejected"}),
+        },
+        EventKind::Error {
+            message: "late error".to_owned(),
+        },
+    ] {
+        let id = stored_handoff_source(
+            &h,
+            ProviderKind::Claude,
+            vec![
+                instruction("initial"),
+                EventKind::TurnStarted,
+                answer("completed answer", true),
+                EventKind::TurnCompleted { usage: None },
+                late_failure,
+                instruction("next"),
+                EventKind::TurnStarted,
+            ],
+        );
+        let prompt = handoff_preview(&h, &id).await;
+        assert!(
+            prompt.contains("Last assistant answer\ncompleted answer"),
+            "{prompt}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handoff_truncates_a_100_kib_first_instruction() {
+    let h = Harness::new(DEFAULT);
+    // Two ASCII characters before the multibyte text make the 16 KiB cutoff
+    // fall inside a character.
+    let initial = format!("ss{} unrepeated suffix", "界".repeat(100 * 1024 / 3));
+    let id = stored_handoff_source(
+        &h,
+        ProviderKind::Claude,
+        vec![
+            instruction(initial),
+            EventKind::TurnStarted,
+            answer("answer", true),
+        ],
+    );
+    let prompt = handoff_preview(&h, &id).await;
+    let prefix = format!(
+        "ss{}…(truncated; the full instruction is in the log below)",
+        "界".repeat((16 * 1024 - 2) / 3)
+    );
+    assert!(
+        prompt.contains(&prefix),
+        "first instruction was not clipped at 16 KiB"
+    );
+    assert!(!prompt.contains("unrepeated suffix"));
+    assert!(prompt.contains("Last assistant answer\nanswer"));
+    assert!(prompt.len() <= 32 * 1024);
+}
+
+#[tokio::test]
+async fn handoff_git_output_ignores_forced_color() {
+    let h = Harness::new(DEFAULT);
+    git_in_workspace(&h, &["init", "-q"]);
+    for key in ["color.ui", "color.status", "color.diff"] {
+        git_in_workspace(&h, &["config", key, "always"]);
+    }
+    std::fs::write(h.workspace.path.join("a.txt"), "before\n").expect("tracked file");
+    git_in_workspace(&h, &["add", "a.txt"]);
+    std::fs::write(h.workspace.path.join("a.txt"), "after\n").expect("changed file");
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("initial")]);
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(prompt.contains("AM a.txt"), "{prompt}");
+    assert!(prompt.contains("a.txt | 2 +-"), "{prompt}");
+    assert!(
+        !prompt.contains("[31m") && !prompt.contains("[32m") && !prompt.contains("[m"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn handoff_git_failures_name_the_command() {
+    let h = Harness::new(DEFAULT);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("initial")]);
+    std::fs::remove_dir(&h.workspace.path).expect("remove workspace directory");
+    let prompt = handoff_preview(&h, &id).await;
+    assert!(
+        prompt.contains("git status --short\n(git status unavailable:"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("git diff --stat\n(git diff unavailable:"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn handoff_reading_a_cold_log_does_not_block_unrelated_appends() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    let h = Harness::new(DEFAULT);
+    let workspace_id = h.workspace.id.clone();
+    let source = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("initial")]);
+    let fifo = h
+        .paths
+        .state_dir
+        .join("agents")
+        .join(source.as_str())
+        .join("events.1.jsonl");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+
+    let manager = Arc::new(h.manager);
+    let handoff_manager = Arc::clone(&manager);
+    let (opened_signal, opened) = tokio::sync::oneshot::channel();
+    let (ready, reader_is_waiting) = channel();
+    let (release, released) = channel();
+    let (heartbeat, tick) = channel();
+    let writer = std::thread::spawn(move || {
+        let deadline = Instant::now() + WAIT;
+        let _writer = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo)
+            {
+                Ok(writer) => break writer,
+                Err(err)
+                    if err.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("open FIFO for handoff: {err}"),
+            }
+        };
+        std::fs::remove_file(&fifo).expect("unlink FIFO after reader opened it");
+        opened_signal.send(()).expect("notify handoff runtime");
+        ready.send(()).expect("notify test");
+        released
+            .recv_timeout(WAIT)
+            .expect("release the cold reader");
+    });
+    let preview = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                tokio::spawn(async move {
+                    opened.await.expect("reader is blocked in file I/O");
+                    heartbeat.send(()).expect("notify test");
+                });
+                dgc_daemon::handlers::agent_handoff(
+                    &handoff_manager,
+                    serde_json::json!({
+                        "agent_id": source, "dry_run": true
+                    }),
+                )
+                .await
+            })
+    });
+    reader_is_waiting
+        .recv_timeout(WAIT)
+        .expect("cold reader opened the FIFO");
+    let other_manager = Arc::clone(&manager);
+    let (appended, mut append_result) = tokio::sync::oneshot::channel();
+    let other_writer = tokio::task::spawn_blocking(move || {
+        let result =
+            tokio::runtime::Handle::current().block_on(other_manager.create(AgentCreateParams {
+                workspace_id,
+                title: "other agent".to_owned(),
+                provider: Some(ProviderKind::Codex),
+                profile: None,
+                mode: None,
+                model: None,
+                initial_prompt: "unrelated append".to_owned(),
+                labels: BTreeMap::new(),
+                parent_id: None,
+            }));
+        appended.send(result).expect("report creation");
+    });
+    let did_append = timeout(Duration::from_millis(500), &mut append_result).await;
+    let runtime_responsive = tick.recv_timeout(Duration::from_millis(500)).is_ok();
+    release.send(()).expect("release writer");
+    writer.join().expect("writer thread");
+    preview.join().expect("preview thread").expect("preview");
+    other_writer.await.expect("other writer");
+    manager.shutdown_all(WAIT).await;
+    let appended = matches!(did_append, Ok(Ok(Ok(_))));
+    assert!(
+        runtime_responsive && appended,
+        "cold read blocked runtime: {}, blocked another append: {}",
+        !runtime_responsive,
+        !appended
+    );
 }

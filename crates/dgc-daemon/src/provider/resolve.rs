@@ -34,7 +34,7 @@ pub const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most `--version` output read.
 const VERSION_OUTPUT_LIMIT: usize = 4096;
 
-fn executable_name(kind: ProviderKind) -> &'static str {
+pub(crate) fn executable_name(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::Claude => "claude",
         ProviderKind::Codex => "codex",

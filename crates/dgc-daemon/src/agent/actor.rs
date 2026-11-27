@@ -113,7 +113,7 @@ pub(super) async fn run_actor(
         mut agent,
         cwd,
         start,
-        queue,
+        mut queue,
         timeouts,
     } = launch;
     let resume_session_id = match start {
@@ -127,9 +127,19 @@ pub(super) async fn run_actor(
         mode: agent.mode.clone(),
         resume_session_id,
     };
+    let queue_path = shared.queue_path(&agent.id);
     let session = match bounded(timeouts.start, "start", adapter.start(spec)).await {
         Ok(session) => session,
         Err(err) => {
+            if let Start::Create { prompt } = start {
+                queue.push_front(QueueItem {
+                    text: prompt,
+                    behavior: SendBehavior::Queue,
+                });
+                if save_queue(&queue_path, &queue).is_err() {
+                    warn!(agent_id = %agent.id, "could not persist initial prompt in agent queue");
+                }
+            }
             let message = truncate_summary(&err.to_string());
             shared.emit_or_warn(
                 &agent.id,
@@ -142,7 +152,6 @@ pub(super) async fn run_actor(
             return;
         }
     };
-    let queue_path = shared.queue_path(&agent.id);
     let mut actor = Actor {
         shared,
         agent,

@@ -17,10 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dgc_protocol::methods::{
-    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_GET, AGENT_INTERRUPT, AGENT_LIST,
-    AGENT_RESUME, AGENT_SEND, DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO, HelloParams,
-    PERMISSION_LIST, PERMISSION_RESPOND, PROJECT_ADD, PROJECT_LIST, PROJECT_REMOVE, ProviderStatus,
-    SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE, WORKSPACE_LIST,
+    AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_GET, AGENT_HANDOFF, AGENT_INTERRUPT,
+    AGENT_LIST, AGENT_RESUME, AGENT_SEND, DAEMON_SHUTDOWN, DAEMON_STATUS, DaemonStatus, HELLO,
+    HelloParams, PERMISSION_LIST, PERMISSION_RESPOND, PROFILE_LIST, PROJECT_ADD, PROJECT_LIST,
+    PROJECT_REMOVE, ProviderStatus, SUBSCRIBE, UNSUBSCRIBE, WORKSPACE_ARCHIVE, WORKSPACE_CREATE,
+    WORKSPACE_LIST,
 };
 use dgc_protocol::model::ProviderKind;
 use dgc_protocol::rpc::{
@@ -38,7 +39,8 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 
 use crate::agent::AgentManager;
-use crate::config::DaemonConfig;
+use crate::clip_error_detail;
+use crate::config::{ConfigError, DaemonConfig};
 use crate::handlers;
 use crate::lock::{InstanceLock, LockError};
 use crate::paths::{DaemonPaths, PathsError, ensure_private_dir};
@@ -60,11 +62,10 @@ pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long daemon shutdown gives live agent sessions to end.
 pub const AGENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
-/// Longest piece of untrusted input echoed back in an error message, in chars.
-pub(crate) const ECHO_LIMIT: usize = 64;
-
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     #[error(transparent)]
     Paths(#[from] PathsError),
     #[error(transparent)]
@@ -75,11 +76,6 @@ pub enum DaemonError {
     Io(#[from] io::Error),
     #[error("{} exists and is not a socket; refusing to replace it", .0.display())]
     SocketPathOccupied(PathBuf),
-}
-
-/// Cut untrusted text to [`ECHO_LIMIT`] characters before echoing it.
-fn clip(text: &str) -> String {
-    text.chars().take(ECHO_LIMIT).collect()
 }
 
 /// One queued outbound line. `written` fires once the line was handed to the
@@ -265,7 +261,9 @@ impl DaemonDispatcher {
             WORKSPACE_CREATE => handlers::workspace_create(workspaces, params).await,
             WORKSPACE_LIST => handlers::workspace_list(workspaces, params).await,
             WORKSPACE_ARCHIVE => handlers::workspace_archive(workspaces, agents, params).await,
+            PROFILE_LIST => handlers::profile_list(&self.config),
             AGENT_CREATE => handlers::agent_create(agents, params).await,
+            AGENT_HANDOFF => handlers::agent_handoff(agents, params).await,
             AGENT_LIST => handlers::agent_list(agents, params),
             AGENT_GET => handlers::agent_get(agents, params),
             AGENT_SEND => handlers::agent_send(agents, params).await,
@@ -279,7 +277,7 @@ impl DaemonDispatcher {
             UNSUBSCRIBE => handlers::unsubscribe(conn, params),
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
-                format!("unknown method: {}", clip(other)),
+                format!("unknown method: {}", clip_error_detail(other)),
             )),
         }
     }
@@ -306,6 +304,7 @@ pub async fn run_daemon(
     config: DaemonConfig,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), DaemonError> {
+    config.validate_profiles()?;
     ensure_private_dir(&paths.state_dir)?;
     let _lock = InstanceLock::acquire(&paths.state_dir)?;
     let store = Arc::new(Store::open(&paths.state_dir)?);
@@ -717,7 +716,7 @@ mod tests {
     #[test]
     fn clip_limits_chars_not_bytes() {
         let text = "あ".repeat(100);
-        assert_eq!(clip(&text).chars().count(), ECHO_LIMIT);
+        assert_eq!(clip_error_detail(&text).chars().count(), crate::ECHO_LIMIT);
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use dgc_daemon::paths::{DaemonPaths, ensure_private_dir};
 use dgc_protocol::methods::{HELLO, HelloParams, SUBSCRIBE, SubscribeParams};
-use dgc_protocol::rpc::{Notification, Request, Response, RpcError};
+use dgc_protocol::rpc::{Notification, Request, Response, RpcError, VERSION_MISMATCH};
 use dgc_protocol::{MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -59,8 +59,11 @@ pub enum ClientError {
     Closed,
     #[error("daemon did not answer the handshake in time")]
     HelloTimeout,
-    #[error("daemon speaks protocol version {daemon}, this client speaks {client}")]
-    VersionMismatch { daemon: u32, client: u32 },
+    #[error(
+        "the running daemon is from another dgc version (daemon protocol version {daemon_version}, client protocol version {client}). Run `dgc daemon stop`. The next command starts a new daemon.",
+        daemon_version = .daemon.map_or_else(|| "unknown".to_owned(), |version| version.to_string())
+    )]
+    VersionMismatch { daemon: Option<u32>, client: u32 },
     #[error("daemon did not become reachable within 15 s (last error: {last}); see {}", .log.display())]
     SpawnTimeout { last: String, log: PathBuf },
 }
@@ -122,10 +125,24 @@ impl Client {
         };
         let hello: HelloResult = timeout(HELLO_TIMEOUT, client.call(HELLO, &params))
             .await
-            .map_err(|_| ClientError::HelloTimeout)??;
+            .map_err(|_| ClientError::HelloTimeout)?
+            .map_err(|err| match err {
+                ClientError::Rpc(error) if error.code == VERSION_MISMATCH => {
+                    // The v1 daemon reports its version in the error message.
+                    let daemon = error
+                        .message
+                        .rsplit_once("daemon speaks ")
+                        .and_then(|(_, version)| version.parse().ok());
+                    ClientError::VersionMismatch {
+                        daemon,
+                        client: PROTOCOL_VERSION,
+                    }
+                }
+                other => other,
+            })?;
         if hello.protocol_version != PROTOCOL_VERSION {
             return Err(ClientError::VersionMismatch {
-                daemon: hello.protocol_version,
+                daemon: Some(hello.protocol_version),
                 client: PROTOCOL_VERSION,
             });
         }
@@ -150,6 +167,7 @@ impl Client {
             sleep(RETRY_INTERVAL).await;
             match Self::connect(paths).await {
                 Ok(client) => return Ok(client),
+                Err(err @ ClientError::VersionMismatch { .. }) => return Err(err),
                 Err(err) if Instant::now() >= deadline => {
                     return Err(ClientError::SpawnTimeout {
                         last: err.to_string(),
@@ -376,7 +394,10 @@ mod tests {
             assert_eq!(request.id, 1, "requests are numbered from 1");
             send(
                 &mut write,
-                &Response::ok(1, json!({"protocol_version": 1, "daemon_pid": 4242})),
+                &Response::ok(
+                    1,
+                    json!({"protocol_version": PROTOCOL_VERSION, "daemon_pid": 4242}),
+                ),
             )
             .await;
             script(reader, write).await;
@@ -596,9 +617,68 @@ mod tests {
             .err()
             .expect("version mismatch");
         assert!(
-            matches!(err, ClientError::VersionMismatch { daemon: 99, .. }),
+            matches!(
+                err,
+                ClientError::VersionMismatch {
+                    daemon: Some(99),
+                    ..
+                }
+            ),
             "{err:?}"
         );
+        assert_version_mismatch_hint(&err, "protocol version 99");
+    }
+
+    fn assert_version_mismatch_hint(error: &ClientError, version: &str) {
+        let text = error.to_string();
+        for expected in [
+            "running daemon is from another dgc version",
+            version,
+            "dgc daemon stop",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn version_mismatch_refusal_is_reported_without_autostart() {
+        for (message, version) in [
+            (
+                "protocol version 2 is not supported; daemon speaks 1",
+                "protocol version 1",
+            ),
+            ("incompatible protocol", "protocol version unknown"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let paths = DaemonPaths::under(dir.path());
+            std::fs::create_dir_all(paths.socket.parent().expect("parent")).expect("mkdir");
+            let listener = UnixListener::bind(&paths.socket).expect("bind");
+            let daemon = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let (read, mut write) = stream.into_split();
+                let request = read_request(&mut BufReader::new(read)).await;
+                assert_eq!(request.method, HELLO);
+                send(
+                    &mut write,
+                    &Response::err(request.id, RpcError::new(VERSION_MISMATCH, message)),
+                )
+                .await;
+            });
+            let err = Client::connect_or_spawn(&paths, &dir.path().join("missing-dgc"))
+                .await
+                .err()
+                .expect("version mismatch");
+            daemon.await.expect("fake daemon");
+            assert!(
+                matches!(err, ClientError::VersionMismatch { .. }),
+                "{err:?}"
+            );
+            assert_version_mismatch_hint(&err, version);
+            assert!(
+                !daemon_log_path(&paths).exists(),
+                "autostart attempted to spawn"
+            );
+        }
     }
 
     #[tokio::test]

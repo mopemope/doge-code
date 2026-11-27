@@ -2,8 +2,7 @@
 //! `events.1.jsonl`, one JSON `AgentEvent` per line.
 //!
 //! Files are created 0600 and never opened through symlinks. Corrupt lines are
-//! skipped on read; warnings carry the file name and line number only, never
-//! content.
+//! skipped on read; warnings carry only the file name and line position.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -17,8 +16,9 @@ use dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
 use crate::paths::ensure_private_dir;
 use crate::time::now_rfc3339;
 
-const CURRENT_FILE: &str = "events.jsonl";
+pub(crate) const CURRENT_FILE: &str = "events.jsonl";
 const ROTATED_FILE: &str = "events.1.jsonl";
+const TAIL_BLOCK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EventLogError {
@@ -144,34 +144,25 @@ impl EventLog {
     /// holds at least one event when any is left, so a short page does not
     /// mean the end: callers page on until an empty page.
     pub fn read_page(&self, since_seq: u64, limit: u32) -> Result<Vec<AgentEvent>, EventLogError> {
-        let limit = limit as usize;
-        let mut page = Vec::new();
-        if limit == 0 {
-            return Ok(page);
-        }
-        // `[` + `]`, then each event's line plus a separating comma.
-        let mut bytes = 2usize;
-        let mut full = false;
-        for path in [&self.rotated_path, &self.current_path] {
-            for_each_event(path, |event, line_len| {
-                if event.seq <= since_seq {
-                    return true;
-                }
-                let cost = line_len + usize::from(!page.is_empty());
-                if !page.is_empty() && bytes + cost > MAX_EVENTS_PAGE_BYTES {
-                    full = true;
-                    return false;
-                }
-                bytes += cost;
-                page.push(event);
-                full = page.len() >= limit;
-                !full
-            })?;
-            if full {
-                break;
-            }
-        }
-        Ok(page)
+        read_page_from(
+            [&self.rotated_path, &self.current_path],
+            since_seq,
+            limit,
+            MAX_EVENTS_PAGE_BYTES,
+        )
+    }
+
+    /// The newest events in ascending sequence order, up to `n` and the
+    /// same byte budget as a forward page. Always keep the newest event if
+    /// it alone exceeds the budget.
+    pub fn read_tail(&self, n: u32) -> Result<Vec<AgentEvent>, EventLogError> {
+        self.read_tail_with_bytes(n).map(|(events, _)| events)
+    }
+
+    /// Return the number of file bytes read as well, for tests.
+    #[doc(hidden)]
+    pub fn read_tail_with_bytes(&self, n: u32) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
+        read_tail_from([&self.current_path, &self.rotated_path], n)
     }
 
     /// Rotate the current file away and reopen a fresh one with `open`. State
@@ -248,6 +239,86 @@ fn write_line<F: LogFile>(
     }
 }
 
+/// Read a handoff snapshot without opening an append handle or repairing
+/// files. The caller prevents a concurrent rotation across the two reads.
+pub(crate) fn handoff_history(
+    dir: &Path,
+    limit: u32,
+) -> Result<(Vec<AgentEvent>, Vec<AgentEvent>), EventLogError> {
+    let current = dir.join(CURRENT_FILE);
+    let rotated = dir.join(ROTATED_FILE);
+    // Reserve room for one complete RPC-sized initial prompt and the event
+    // headers added when it was chunked. The normal response page is smaller.
+    let initial_budget = dgc_protocol::MAX_MESSAGE_BYTES + MAX_EVENTS_PAGE_BYTES;
+    let first_page = read_page_from([&rotated, &current], 0, limit, initial_budget)?;
+    let (tail, _) = read_tail_from([&current, &rotated], limit)?;
+    Ok((first_page, tail))
+}
+
+fn read_page_from(
+    paths: [&Path; 2],
+    since_seq: u64,
+    limit: u32,
+    byte_budget: usize,
+) -> Result<Vec<AgentEvent>, EventLogError> {
+    let limit = limit as usize;
+    let mut page = Vec::new();
+    if limit == 0 {
+        return Ok(page);
+    }
+    // `[` + `]`, then each event's line plus a separating comma.
+    let mut bytes = 2usize;
+    let mut full = false;
+    for path in paths {
+        for_each_event(path, |event, line_len| {
+            if event.seq <= since_seq {
+                return true;
+            }
+            let cost = line_len + usize::from(!page.is_empty());
+            if !page.is_empty() && bytes + cost > byte_budget {
+                full = true;
+                return false;
+            }
+            bytes += cost;
+            page.push(event);
+            full = page.len() >= limit;
+            !full
+        })?;
+        if full {
+            break;
+        }
+    }
+    Ok(page)
+}
+
+fn read_tail_from(paths: [&Path; 2], n: u32) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
+    let mut page = Vec::new();
+    if n == 0 {
+        return Ok((page, 0));
+    }
+    let mut bytes_read = 0;
+    let mut page_bytes = 2;
+    let mut full = false;
+    for path in paths {
+        bytes_read += for_each_event_reverse(path, |event, line_len| {
+            let cost = line_len + usize::from(!page.is_empty());
+            if !page.is_empty() && page_bytes + cost > MAX_EVENTS_PAGE_BYTES {
+                full = true;
+                return false;
+            }
+            page_bytes += cost;
+            page.push(event);
+            full = page.len() == n as usize || page_bytes >= MAX_EVENTS_PAGE_BYTES;
+            !full
+        })?;
+        if full {
+            break;
+        }
+    }
+    page.reverse();
+    Ok((page, bytes_read))
+}
+
 fn open_append(path: &Path) -> Result<File, EventLogError> {
     OpenOptions::new()
         .read(true)
@@ -271,11 +342,79 @@ fn ends_with_newline(file: &mut File, size: u64, path: &Path) -> Result<bool, Ev
 /// Sequence number of the last valid line in `path`, if the file exists and has one.
 fn last_seq_in(path: &Path) -> Result<Option<u64>, EventLogError> {
     let mut last = None;
-    for_each_event(path, |event, _| {
+    for_each_event_reverse(path, |event, _| {
         last = Some(event.seq);
-        true
+        false
     })?;
     Ok(last)
+}
+
+fn open_read(path: &Path) -> Result<Option<File>, EventLogError> {
+    match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_error(path, e)),
+    }
+}
+
+/// Visit valid events from the end of one file, returning the bytes read.
+fn for_each_event_reverse(
+    path: &Path,
+    mut f: impl FnMut(AgentEvent, usize) -> bool,
+) -> Result<u64, EventLogError> {
+    let Some(mut file) = open_read(path)? else {
+        return Ok(0);
+    };
+    let mut offset = file.seek(SeekFrom::End(0)).map_err(|e| io_error(path, e))?;
+    let end = offset;
+    let mut block = vec![0; TAIL_BLOCK_BYTES];
+    // Keep a line spanning blocks in reverse byte order until its start is
+    // found. Each fragment is appended once, even for very long lines.
+    let mut suffix = Vec::new();
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    while offset > 0 {
+        let block_start = offset.saturating_sub(TAIL_BLOCK_BYTES as u64);
+        let bytes = &mut block[..(offset - block_start) as usize];
+        file.seek(SeekFrom::Start(block_start))
+            .and_then(|_| file.read_exact(bytes))
+            .map_err(|e| io_error(path, e))?;
+        let mut line_end = offset;
+        offset = block_start;
+        for part in bytes.rsplit(|&byte| byte == b'\n') {
+            let start = line_end - part.len() as u64;
+            if start == offset && offset > 0 {
+                suffix.extend(part.iter().rev());
+                break;
+            }
+            let line = if suffix.is_empty() {
+                part
+            } else {
+                suffix.extend(part.iter().rev());
+                suffix.reverse();
+                &suffix
+            }
+            .trim_ascii();
+            if !line.is_empty() {
+                match serde_json::from_slice::<AgentEvent>(line) {
+                    Ok(event) => {
+                        if !f(event, line.len()) {
+                            return Ok(end - offset);
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(file = %name, offset = start, "skipping corrupt event log line")
+                    }
+                }
+            }
+            suffix.clear();
+            line_end = start.saturating_sub(1);
+        }
+    }
+    Ok(end)
 }
 
 /// Call `f` for each valid event in `path` (with the byte length of its
@@ -285,14 +424,8 @@ fn for_each_event(
     path: &Path,
     mut f: impl FnMut(AgentEvent, usize) -> bool,
 ) -> Result<(), EventLogError> {
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(io_error(path, e)),
+    let Some(file) = open_read(path)? else {
+        return Ok(());
     };
     let name = path
         .file_name()

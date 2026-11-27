@@ -167,6 +167,56 @@ fn corrupt_line_is_skipped() {
 }
 
 #[test]
+fn read_tail_returns_last_n_across_rotation() {
+    let dir = tempdir().expect("tempdir");
+    let mut log = EventLog::open(dir.path(), AgentId::generate(), 1 << 20).expect("open");
+    let first = log.append(text(1)).expect("append");
+    let second = log.append(text(2)).expect("append");
+    let current = dir.path().join("events.jsonl");
+    fs::rename(&current, dir.path().join("events.1.jsonl")).expect("rotate");
+    fs::write(&current, b"").expect("new log");
+    let mut log = EventLog::open(dir.path(), first.agent_id.clone(), 1 << 20).expect("reopen");
+    // This event spans several reverse-read blocks, with multibyte UTF-8.
+    let third = log
+        .append(EventKind::AssistantText {
+            text: "🐕".repeat(40_000),
+            final_: true,
+        })
+        .expect("append");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&current)
+        .expect("open for corrupt line")
+        .write_all(b"bad line\n\xff\n\n{\"partial\":")
+        .expect("write");
+    assert!(log.read_tail(0).expect("empty").is_empty());
+    assert_eq!(log.read_tail(2).expect("tail"), vec![second, third]);
+    assert_eq!(seqs(&log.read_tail(10).expect("tail")), [1, 2, 3]);
+}
+
+#[test]
+fn read_tail_does_not_scan_whole_file() {
+    let dir = tempdir().expect("tempdir");
+    let mut log = EventLog::open(dir.path(), AgentId::generate(), 16 << 20).expect("open");
+    for _ in 0..128 {
+        log.append(EventKind::AssistantText {
+            text: "x".repeat(64 << 10),
+            final_: true,
+        })
+        .expect("append");
+    }
+    assert!(
+        fs::metadata(dir.path().join("events.jsonl"))
+            .expect("log")
+            .len()
+            >= 8 << 20
+    );
+    let (events, bytes) = log.read_tail_with_bytes(3).expect("tail");
+    assert_eq!(seqs(&events), [126, 127, 128]);
+    assert!(bytes > 0 && bytes < 1 << 20, "read {bytes} bytes");
+}
+
+#[test]
 fn truncated_last_line_does_not_swallow_next_event() {
     let dir = tempdir().expect("tempdir");
     let id = AgentId::generate();
@@ -223,6 +273,8 @@ fn symlinked_rotated_file_is_refused_on_read() {
     symlink(&target, dir.path().join("events.1.jsonl")).expect("symlink");
     let err = log.read_page(0, 10).expect_err("must refuse symlink");
     assert!(matches!(err, EventLogError::Symlink { .. }), "{err}");
+    let err = log.read_tail(10).expect_err("tail must refuse symlink");
+    assert!(matches!(err, EventLogError::Symlink { .. }), "{err}");
 }
 
 #[test]
@@ -242,6 +294,14 @@ fn read_page_stays_within_the_byte_budget() {
     assert!(first.len() < 400, "a full page would exceed the budget");
     let size = serde_json::to_vec(&first).expect("serialize").len();
     assert!(size <= MAX_EVENTS_PAGE_BYTES, "{size} bytes");
+    let tail = log.read_tail(1000).expect("tail");
+    assert!(!tail.is_empty());
+    assert!(tail.len() < 400, "the tail must fit the budget too");
+    assert_eq!(
+        seqs(&tail),
+        (401 - tail.len() as u64..=400).collect::<Vec<_>>()
+    );
+    assert!(serde_json::to_vec(&tail).expect("serialize").len() <= MAX_EVENTS_PAGE_BYTES);
 
     // Paging on from the last seq returns every event exactly once.
     let mut all = first;
@@ -262,12 +322,15 @@ fn read_page_returns_an_oversized_event_alone() {
     use dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
     let dir = tempdir().expect("tempdir");
     let mut log = EventLog::open(dir.path(), AgentId::generate(), 64 << 20).expect("open");
-    log.append(EventKind::AssistantText {
+    let big = EventKind::AssistantText {
         text: "y".repeat(MAX_EVENTS_PAGE_BYTES + 10),
         final_: true,
-    })
-    .expect("append");
+    };
+    log.append(big.clone()).expect("append");
     log.append(text(2)).expect("append");
     assert_eq!(seqs(&log.read_page(0, 10).expect("read")), vec![1]);
     assert_eq!(seqs(&log.read_page(1, 10).expect("read")), vec![2]);
+    assert_eq!(seqs(&log.read_tail(10).expect("tail")), vec![2]);
+    log.append(big).expect("append");
+    assert_eq!(seqs(&log.read_tail(10).expect("oversized tail")), vec![3]);
 }

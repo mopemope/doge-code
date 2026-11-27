@@ -22,12 +22,13 @@ use dgc_protocol::model::{AgentState, Isolation, PendingPermission, ProviderKind
 use super::ConnectionState;
 use super::input::LineEditor;
 use super::layout::{
-    DIALOG_MAX_WIDTH, LEGEND, NARROW, PermissionLayout, SHORTENED_WARNING, TOO_SMALL, panes,
-    permission_layout, scroll_indicator, tail_cols, text_width, truncate_cols, wrap_line,
-    wrap_text,
+    AUTO_APPROVE_WARNING, DIALOG_MAX_WIDTH, HANDOFF_KEYS, LEGEND, NARROW, PermissionLayout,
+    SHORTENED_WARNING, SummaryRow, TOO_SMALL, handoff_layout, panes, permission_layout,
+    scroll_indicator, tail_cols, text_width, truncate_cols, wrap_line, wrap_text,
 };
 use super::state::{
-    AgentField, AppState, Dialog, Focus, NewAgentForm, NewWorkspaceForm, Row, WorkspaceField,
+    AgentField, AppState, Dialog, Focus, HandoffField, HandoffForm, NewAgentForm, NewWorkspaceForm,
+    NodeId, Row, WorkspaceField,
 };
 use crate::output::{escape_line, kind_name, provider_name, state_name};
 
@@ -122,14 +123,21 @@ fn state_symbol(row: &Row) -> (char, Color) {
     }
 }
 
-fn tree_line(row: &Row, width: usize, narrow: bool, selected: bool) -> Line<'static> {
+fn tree_line(
+    row: &Row,
+    width: usize,
+    narrow: bool,
+    selected: bool,
+    rate_limited: bool,
+) -> Line<'static> {
     let indent = " ".repeat(row.depth * if narrow { 1 } else { 2 });
     let mut spans = Vec::new();
     match row.agent_state {
         Some(_) => {
             let (symbol, color) = state_symbol(row);
             let suffix = if row.auto_approve { " [auto]" } else { "" };
-            let fixed = text_width(&indent) + 2 + text_width(suffix);
+            let limit_marker = if rate_limited { "⇄ " } else { "" };
+            let fixed = text_width(&indent) + 2 + text_width(suffix) + text_width(limit_marker);
             // The provider name goes first when at least a few columns of the
             // title still fit; in a very narrow tree only the title is kept.
             let provider = row
@@ -140,7 +148,9 @@ fn tree_line(row: &Row, width: usize, narrow: bool, selected: bool) -> Line<'sta
             let room = width.saturating_sub(fixed + text_width(&provider)).max(1);
             spans.push(Span::raw(indent));
             spans.push(Span::styled(symbol.to_string(), Style::default().fg(color)));
-            spans.push(Span::raw(format!(" {provider}")));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(limit_marker, Style::default().fg(WARN)));
+            spans.push(Span::raw(provider));
             spans.push(Span::raw(truncate_cols(&row.label, room)));
             if row.auto_approve {
                 spans.push(Span::styled(suffix, Style::default().fg(WARN)));
@@ -199,7 +209,17 @@ fn render_tree(state: &AppState, frame: &mut Frame, area: Rect) {
         .enumerate()
         .skip(offset)
         .take(height)
-        .map(|(i, row)| tree_line(row, usize::from(inner.width), narrow, Some(i) == cursor))
+        .map(|(i, row)| {
+            let limited =
+                matches!(&row.node, NodeId::Agent(id) if state.rate_limit_reason(id).is_some());
+            tree_line(
+                row,
+                usize::from(inner.width),
+                narrow,
+                Some(i) == cursor,
+                limited,
+            )
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -239,7 +259,26 @@ fn render_stream(state: &AppState, frame: &mut Frame, area: Rect) {
     if width == 0 || height == 0 {
         return;
     }
-    let lines: Vec<Line> = match &agent_id {
+    let suggestion = agent_id.as_ref().and_then(|id| {
+        let agent = state.tree.agent(id)?;
+        let reason = escape_line(state.rate_limit_reason(id)?);
+        let target = provider_name(agent.provider.other());
+        let prefix = "rate limited (";
+        let suffix = format!(") — H: hand off to {target}");
+        let room = width.saturating_sub(text_width(prefix) + text_width(&suffix));
+        let hint = if room > 0 {
+            format!("{prefix}{}{suffix}", truncate_cols(&reason, room))
+        } else {
+            format!("⇄ H: hand off to {target}")
+        };
+        Some(Line::styled(
+            truncate_cols(&hint, width),
+            Style::default().fg(WARN),
+        ))
+    });
+    let mut lines: Vec<Line> = suggestion.into_iter().collect();
+    let height = height.saturating_sub(lines.len());
+    lines.extend(match &agent_id {
         None => vec![Line::styled(
             "select an agent (\u{2191}\u{2193}, Enter) to see its stream",
             dim(),
@@ -248,7 +287,7 @@ fn render_stream(state: &AppState, frame: &mut Frame, area: Rect) {
             vec![Line::styled("loading\u{2026}", dim())]
         }
         Some(_) => stream_tail(state, width, height),
-    };
+    });
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -401,7 +440,7 @@ fn render_status(state: &AppState, frame: &mut Frame, area: Rect) {
     let hints = match state.focus {
         Focus::Tree => {
             "\u{2191}\u{2193} move  Enter open  i type  n agent  w workspace  p permission  \
-             x stop  r resume  A archive  R refresh  Tab mode  q quit"
+             H handoff  x stop  r resume  A archive  R refresh  Tab mode  q quit"
         }
         Focus::Input => "Enter send  Tab mode  PgUp/PgDn scroll  Esc back",
         Focus::Dialog => "",
@@ -460,6 +499,7 @@ fn render_dialog(state: &AppState, frame: &mut Frame, pane: Rect) -> Option<(u16
                 &layout,
             )
         }
+        Dialog::Handoff(form) => handoff_body(state, form, (area.width, area.height)),
         Dialog::NewAgent(form) => agent_body(form, inner_width),
         Dialog::NewWorkspace(form) => workspace_body(form, inner_width),
         Dialog::ConfirmArchive { title, .. } => archive_body(title, inner_width),
@@ -600,14 +640,7 @@ fn permission_body(
 
     let scroll = view.scroll.min(layout.max_scroll());
     let end = (scroll + layout.visible_rows).min(layout.rows.len());
-    for row in &layout.rows[scroll..end] {
-        let gutter = if row.soft {
-            Span::styled("\u{21aa}", dim())
-        } else {
-            Span::raw(" ")
-        };
-        lines.push(Line::from(vec![gutter, Span::raw(row.text.clone())]));
-    }
+    lines.extend(layout.rows[scroll..end].iter().map(summary_line));
 
     lines.push(hint);
     if layout.overflows {
@@ -640,6 +673,125 @@ fn permission_body(
     }
 }
 
+fn summary_line(row: &SummaryRow) -> Line<'static> {
+    let gutter = if row.soft {
+        Span::styled("↪", dim())
+    } else {
+        Span::raw(" ")
+    };
+    Line::from(vec![gutter, Span::raw(row.text.clone())])
+}
+
+fn handoff_body(state: &AppState, form: &HandoffForm, size: (u16, u16)) -> DialogBody {
+    let preview = form.preview.as_deref().unwrap_or_default();
+    let auto_approve = form.auto_approve_mode();
+    let layout = handoff_layout(size, preview, auto_approve);
+    let width = layout.width;
+    let mut lines = Vec::new();
+    if auto_approve {
+        lines.extend(wrapped(
+            AUTO_APPROVE_WARNING,
+            width,
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let source = state
+        .tree
+        .agent(&form.agent_id)
+        .map(|agent| escape_line(&agent.title));
+    let source = format!(
+        "  {:<9}{} {}",
+        "source",
+        short_id(&form.agent_id),
+        source.as_deref().unwrap_or_default()
+    );
+    lines.push(Line::raw(truncate_cols(&source, width)));
+    let profile = form
+        .selected_profile()
+        .map_or("(none)".to_owned(), |profile| {
+            let name = escape_line(&profile.name);
+            profile.model.as_ref().map_or(name.clone(), |model| {
+                format!("{name} ({})", escape_line(model))
+            })
+        });
+    for (field, label, value, hint) in [
+        (
+            HandoffField::Provider,
+            "target",
+            provider_name(form.provider),
+            "Tab",
+        ),
+        (
+            HandoffField::Profile,
+            "profile",
+            profile.as_str(),
+            "Tab/Shift-Tab",
+        ),
+    ] {
+        let focused = field == form.field;
+        let marker = if focused { "> " } else { "  " };
+        let row = format!("{marker}{label:<9}{value}  ({hint})");
+        lines.push(Line::styled(
+            truncate_cols(&row, width),
+            if focused { bold() } else { Style::default() },
+        ));
+    }
+    let mode_focused = !form.submitting && form.field == HandoffField::Mode;
+    let (mode, col) = field_line(
+        "mode",
+        &form.mode,
+        mode_focused,
+        "(provider default)",
+        width,
+    );
+    let cursor = mode_focused.then_some((lines.len(), col));
+    lines.push(mode);
+
+    let scroll = form.scroll.min(layout.max_scroll());
+    let end = scroll + layout.visible_rows;
+    let message = if form.submitting {
+        "creating…".to_owned()
+    } else if let Some(error) = &form.error {
+        error.clone()
+    } else if form.preview_failed {
+        "preview unavailable".to_owned()
+    } else if form.preview_changed {
+        "the state changed — review the new preview".to_owned()
+    } else if form.preview.is_none() {
+        "loading preview…".to_owned()
+    } else if layout.visible_rows == 0 {
+        "window too small — enlarge or Esc".to_owned()
+    } else if form.ticks_until_armed > 0 {
+        "keys enabled shortly".to_owned()
+    } else {
+        format!("Preview  {}–{end} of {}", scroll + 1, layout.rows.len())
+    };
+    let status_style = if form.error.is_some() {
+        Style::default().fg(DANGER)
+    } else {
+        dim()
+    };
+    lines.push(Line::styled(truncate_cols(&message, width), status_style));
+    if form.preview.is_some() {
+        lines.extend(layout.rows[scroll..end].iter().map(summary_line));
+    } else if form.preview_changed && form.error.is_none() && !form.preview_failed {
+        lines.push(Line::styled("loading preview…", dim()));
+    }
+    let keys = if form.preview.is_some() && !form.submitting && layout.visible_rows != 0 {
+        HANDOFF_KEYS
+    } else {
+        "Esc cancel  ↑↓ field"
+    };
+    lines.extend(wrapped(keys, width, dim()));
+    lines.truncate(layout.height);
+    DialogBody {
+        title: " Handoff ",
+        border: ACCENT,
+        lines,
+        cursor,
+    }
+}
+
 /// `label: value` rows for one editor field; returns the cursor column when
 /// `focused`.
 fn field_line(
@@ -666,8 +818,32 @@ fn field_line(
 }
 
 fn agent_body(form: &NewAgentForm, width: usize) -> DialogBody {
-    let mut lines = vec![Line::raw("")];
+    let mut lines = if form.auto_approve_mode() {
+        wrapped(
+            AUTO_APPROVE_WARNING,
+            width,
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        vec![Line::raw("")]
+    };
     let mut cursor = None;
+    let profile_focused = form.field == AgentField::Profile;
+    let profile = form
+        .selected_profile()
+        .map_or_else(|| "(none)".to_owned(), |profile| escape_line(&profile.name));
+    lines.push(Line::styled(
+        format!(
+            "{}{:<9}{profile}  (Tab/Shift-Tab)",
+            if profile_focused { "> " } else { "  " },
+            "profile"
+        ),
+        if profile_focused {
+            bold()
+        } else {
+            Style::default()
+        },
+    ));
     let provider_focused = form.field == AgentField::Provider;
     let provider = match form.provider {
         ProviderKind::Claude => "claude",
@@ -705,14 +881,6 @@ fn agent_body(form: &NewAgentForm, width: usize) -> DialogBody {
         lines.push(line);
     }
     lines.push(Line::raw(""));
-    if form.auto_approve_mode() {
-        lines.extend(wrapped(
-            "WARNING: this mode lets the agent run commands and edit files without asking you (auto-approve).",
-            width,
-            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
-        ));
-        lines.push(Line::raw(""));
-    }
     if let Some(error) = &form.error {
         lines.extend(wrapped(error, width, Style::default().fg(DANGER)));
     }
@@ -1104,6 +1272,78 @@ mod tests {
         assert!(text.contains("[s]ession"), "{text}");
         assert!(text.contains("[d]eny"), "{text}");
         assert!(text.contains(&short(&a2.id)), "{text}");
+    }
+
+    #[test]
+    fn profile_selection_fills_form_and_warns_on_auto_approve() {
+        let mut f = Fx::new();
+        press_key(&mut f.state, Key::Down); // workspace
+        let effects = press(&mut f.state, 'n');
+        let request = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Call {
+                    request,
+                    method: "profile.list",
+                    ..
+                } => Some(request),
+                _ => None,
+            })
+            .expect("opening the form fetches profiles");
+        update(
+            &mut f.state,
+            AppEvent::RpcDone {
+                request,
+                result: Ok(serde_json::json!({"profiles": [
+                    {"name": "z-read", "provider": "claude", "model": null,
+                     "mode": null, "notes": null, "auto_approve": false},
+                    {"name": "a-fast", "provider": "codex", "model": "gpt-5",
+                     "mode": "full-access", "notes": null, "auto_approve": true}
+                ]})),
+            },
+        );
+        press_key(&mut f.state, Key::Down); // profile
+        update(&mut f.state, AppEvent::Paste("\tfull-access\n".to_owned()));
+        let buffer = draw(&f.state, 120, 30);
+        assert!(find(&buffer, "(none)").is_some());
+        assert!(find(&buffer, "WARNING").is_none());
+        press_key(&mut f.state, Key::BackTab); // wrap to last
+        assert!(find(&draw(&f.state, 120, 30), "z-read").is_some());
+        press_key(&mut f.state, Key::Tab); // wrap to none
+        press_key(&mut f.state, Key::Tab); // first in sorted order
+        let buffer = draw(&f.state, 120, 30);
+        for text in ["a-fast", "gpt-5", "full-access"] {
+            assert!(find(&buffer, text).is_some(), "{}", screen(&buffer));
+        }
+        let (x, y) = find(&buffer, "WARNING").expect("warning on selecting auto-approve");
+        assert_eq!(buffer[(x, y)].fg, Color::Red);
+
+        // Clearing the inherited mode must send the provider's ordinary default.
+        for _ in 0..3 {
+            press_key(&mut f.state, Key::Down);
+        }
+        press_key(&mut f.state, Key::End);
+        for _ in "full-access".chars() {
+            press_key(&mut f.state, Key::Backspace);
+        }
+        assert!(find(&draw(&f.state, 120, 30), "WARNING").is_none());
+        press_key(&mut f.state, Key::Down);
+        press_key(&mut f.state, Key::Down);
+        press(&mut f.state, 'x');
+        let effects = press_key(&mut f.state, Key::Enter);
+        let [
+            Effect::Call {
+                method: "agent.create",
+                params,
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected agent.create: {effects:?}");
+        };
+        assert_eq!(params["provider"], "codex");
+        assert_eq!(params["model"], "gpt-5");
+        assert!(params["profile"].is_null() && params["mode"].is_null());
     }
 
     #[test]
@@ -1799,6 +2039,7 @@ mod tests {
             AppEvent::RpcDone {
                 request: RequestTag::Send {
                     agent_id: AgentId::generate(),
+                    behavior: SendBehavior::Queue,
                 },
                 result: Ok(serde_json::json!({"outcome": "queued"})),
             },

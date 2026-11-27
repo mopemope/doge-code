@@ -53,6 +53,12 @@ cargo install --locked --path crates/dgc-cli    # installs ~/.cargo/bin/dgc
 cargo build --locked --release -p dgc-cli       # builds target/release/dgc
 ```
 
+### Upgrading
+
+After installing a new `dgc`, run `dgc daemon stop`. The next command starts
+the new daemon. If a daemon with an incompatible protocol is still running,
+`dgc` reports that it is from another version and shows the stop command.
+
 ## Quick start
 
 ```sh
@@ -133,9 +139,10 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
 
 ## Agents
 
-- `dgc run --workspace ID --provider claude|codex [--model M] [--mode MODE]
+- `dgc run --workspace ID [--provider claude|codex] [--profile NAME] [--model M] [--mode MODE]
   [--title T] [--follow] PROMPT` starts an agent and prints its id (`--json`:
-  the agent record). The title defaults to the prompt's first line (60 chars).
+  the agent record). Supply a provider or a profile. The title defaults to the
+  prompt's first line (60 chars).
   `--follow` then prints its events until it is idle, stopped, failed or
   archived; the exit status is 0 only when it ended idle.
 - `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
@@ -148,13 +155,45 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   and `ls` marks such agents `auto-approve`.
 - `dgc ls [--all]` (archived agents only with `--all`), `dgc show ID`,
   `dgc interrupt ID`, `dgc archive ID`, `dgc resume ID` (restarts a stopped or
-  failed agent from its provider session).
+  failed agent, reusing its provider session when available). If the provider
+  failed to start, resume sends the original prompt from the queue.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An
   interrupt (`dgc interrupt`, `send --behavior interrupt`, or a steer that
   falls back to one) discards the queued messages instead of sending them
   later; each shows in `logs` as `queued message discarded: TEXT`.
+
+### Launch profiles
+
+Define named launch settings in the daemon's `config.toml` and restart the
+daemon after editing the file.
+
+```toml
+[profiles.review]
+provider = "claude"
+model = "haiku"
+mode = "plan"
+notes = "Review changes before editing"
+
+[profiles.quick-edit]
+provider = "codex"
+mode = "full-access"
+notes = "Runs commands and edits files without asking"
+```
+
+Names contain 1–32 ASCII letters, digits, underscores, or hyphens. `provider`
+must be `claude` or `codex`. `model`, `mode`, and `notes` are optional
+strings. The daemon checks profile names, fields, and provider modes at startup,
+even when a provider CLI is unavailable.
+
+- `dgc profile ls [--json]` lists profiles by name, including their notes.
+- `dgc run --workspace ID --profile review "Review the latest changes"` uses
+  the profile's settings. `--model` and `--mode` override those settings.
+  If you also supply `--provider`, it must match the profile's provider.
+- Choosing a profile with an auto-approve mode enables that mode when you
+  launch the agent. `profile ls` marks such profiles `auto-approve`, and
+  `run` prints the usual warning if the effective mode auto-approves.
 
 ### Permissions
 
@@ -171,9 +210,12 @@ access, file system paths) is listed with kind `other` and a
 
 ### Logs
 
-`dgc logs ID [--since SEQ] [--follow]` prints the stored events after `SEQ`;
-`--follow` keeps streaming new ones until Ctrl-C or the daemon stops. `--json`
-prints one event JSON object per line. Each human line is `[seq] <event>`:
+`dgc logs ID [--since SEQ] [--tail N] [--follow]` prints the stored events
+after `SEQ` (all events by default). `--tail N` prints the newest `N` events in
+sequence order and overrides `--since`. The tail page holds up to 1000 events
+within 768 KiB. If the newest event alone exceeds that budget, a positive `N`
+still returns that event. `--follow` keeps streaming until Ctrl-C or the daemon stops.
+`--json` prints one event JSON object per line. Each human line is `[seq] <event>`:
 `user (queue): TEXT`, `assistant: TEXT`, `tool: NAME SUMMARY`,
 `tool result: SUMMARY` / `tool error: SUMMARY`,
 `permission requested PERM_ID (KIND): SUMMARY`,
@@ -187,24 +229,82 @@ daemon-supplied text (agent output, summaries, errors) escaped (`\r`, `\t`,
 `\x1b`, `\u{202e}`; newlines are kept only where text may span lines), so a
 terminal escape cannot hide or rewrite what is displayed.
 
+### Handoff between providers
+
+You can hand off an unarchived agent to the other provider before or after
+it reaches a usage limit. The new agent starts in the same workspace and the
+source agent remains available. Both agents can work in the same checkout
+concurrently.
+
+```sh
+dgc handoff ID --to codex --dry-run
+dgc handoff ID --to codex --follow
+```
+
+- `dgc handoff ID [--to claude|codex] [--profile NAME] [--model M] [--mode MODE]
+  [--dry-run] [--follow] [--json]` defaults to the other provider when you omit
+  both `--to` and `--profile`. `--to` must match the selected profile.
+  `--model` and `--mode` override the profile. The new agent uses the target
+  provider's default mode unless you choose a mode or a profile that sets one.
+  Auto-approve modes print a warning on stderr.
+- `--dry-run` prints the prompt without starting an agent. A launch prints
+  the new agent's ID and optionally follows it. A CLI launch uses the
+  current state and sends no expected preview, even after a separate dry run.
+  With `--json`, the first result contains `prompt` and `agent` (`null` for
+  a dry run).
+- Review the `--dry-run` output or TUI preview before sending. Prior instructions,
+  the last answer, and Git status and diff stat are forwarded to the target provider.
+- `run --follow` and `logs --follow` print one handoff suggestion when they
+  encounter a rate limit. In JSON mode they emit the event as usual.
+
+dgc assembles the prompt locally without calling an LLM. It uses the source
+title, the first 16 KiB of the initial instruction, up to three recent
+instructions, the last answer from a turn without a rate limit or error
+(tail up to 4 KiB), `git status --short` and `git diff --stat` (up to
+4 KiB apiece), and the absolute path to the source event log. A truncated
+initial instruction points to the full text in the log. A missing or
+rotated-out initial instruction is marked unavailable.
+
+Environment variables, configuration and credential files, account or plan
+metadata, and rate-limit details are outside the prompt's sources. Values
+already present in conversation text and filenames can appear. The prompt is
+capped at 32 KiB. If the title and log path leave too little space for the
+required headings and preface, handoff returns an error.
+
+dgc records at most one `rate limited` event per turn. Claude Code triggers
+it on a rejected or unknown `rate_limit_event` status string, or on an HTTP 429
+in a result or assistant row. It ignores a `rate_limit_event` if `status` or
+`overageStatus` is `allowed` or `allowed_warning`, or if `isUsingOverage` is true.
+Codex triggers it when `account/rateLimits/updated` reports a non-null
+`rateLimitReachedType`, or when an error reports `usageLimitExceeded` or
+`rateLimitExceeded` with `willRetry` false or absent. The event carries the
+provider, a reason of up to 48 characters, and a Unix reset time when
+available. The detection conditions come from recorded provider traffic and
+schemas and are tested with synthetic scenarios. The real-provider handoff
+was tested with Claude Haiku and Codex GPT-6 Luna. Real usage-limit exhaustion
+remains unobserved.
+
 ## Terminal UI
 
 `dgc tui` (or `dgc` with no arguments) opens a full-screen terminal UI for all
 projects, workspaces and agents. It needs a terminal on stdout (and no
 `--json`), starts the daemon if it is not running, and works against the same
 state as the other commands. Quitting leaves the daemon and every agent
-running; the next `dgc tui` shows them again. A recorded session is in
-[m2-tui-screen.txt](docs/orchestrator/m2-tui-screen.txt).
+running; the next `dgc tui` shows them again. Recorded sessions cover the
+[general TUI](docs/orchestrator/m2-tui-screen.txt) and
+[profiles and handoff](docs/orchestrator/m4-tui-screen.txt).
 
 Layout: on the left the tree (project, workspace, agent) with a state symbol per
 agent (`●` starting/running, `○` idle, `!` waiting for a permission, `✗`
 failed, `■` stopped; `[auto]` marks an auto-approve mode). On the right the
-selected agent's stream (the same events as `dgc logs`, last 2000 lines kept),
+selected agent's stream (a tail page on selection, then live events, with the last
+2000 displayed lines kept),
 below it the input line, and at the bottom a status bar (connection, agent
 count, agents waiting for a permission, errors, key hints). In a narrow tree
 (under 50 columns) provider names are dropped. Agents and permissions update
-live; projects and workspaces added or archived by other commands appear on the
-next reload, every 5 s or at once with `R`. With no project the tree says
+live. Projects and workspaces added or archived by other commands appear on the
+next reload. The TUI requests one after 5 s with no reload pending, or on demand
+with `R`. With no project the tree says
 `no projects — add one with: dgc project add <path>`.
 
 Keys in the tree:
@@ -214,8 +314,9 @@ Keys in the tree:
 | `↑` `↓` / `k` `j` | move; `←` collapse or go to the parent; `→` expand or enter |
 | `Enter` | expand/collapse a project or workspace; on an agent, start typing |
 | `i` | type to the selected agent |
-| `n` | new agent in the selected workspace (form: provider, model, mode, title, prompt) |
+| `n` | new agent in the selected workspace (form: profile, provider, model, mode, title, prompt) |
 | `w` | new workspace in the selected project (local, or worktree with branch and optional base) |
+| `H` | preview and confirm a handoff of the selected agent |
 | `x` | interrupt the selected agent (discards its queued messages) |
 | `r` | resume a stopped or failed agent |
 | `A` | archive the selected agent (asks first: `y`/`Enter` or `n`/`Esc`) |
@@ -226,11 +327,34 @@ Keys in the tree:
 | `q`, `Ctrl-C` | quit (`Ctrl-C` works everywhere) |
 
 In forms `↑` `↓` move between fields, `Tab` switches the provider (or the
-workspace isolation), `Enter` creates, `Esc` cancels. The new-agent form needs a
-prompt, and a worktree workspace needs a branch; failures stay in the form. The
-form warns in red when the mode is an auto-approve one. A created agent or
+workspace isolation), `Enter` creates, and `Esc` cancels. The new-agent form
+loads profiles when it opens. On the profile field, `Tab` and `Shift-Tab` cycle
+through `(none)` and the profiles by name. Choosing a profile fills provider,
+model and mode. You can edit these fields before creating the agent. Choosing
+`(none)` resets these three fields to their initial values. Clearing model
+or mode uses the provider default, and the form warns in red whenever the
+effective mode auto-approves. The new-agent form needs a prompt, and a worktree
+workspace needs a branch. Failures stay in the form. A created agent or
 workspace is selected only if its form is still open when the daemon answers;
 after `Esc` it is still created, but the cursor stays where you left it.
+
+When the TUI receives a usage-limit event live or loads it from the selected
+agent's history, it marks that agent with `⇄` in the tree and shows a handoff
+hint above its stream. For a limit hit while the TUI was closed, the marker
+appears only after you select that agent and its history loads. The hint clears
+after the agent completes a later turn without a limit, or is archived. Select
+any agent in the tree and press `H` for a
+handoff. In the dialog, use `↑`/`↓` to select the target, profile or mode
+field. `Tab` switches the target on the target field, and `Tab`/`Shift-Tab`
+cycle profiles on the profile field. The mode field accepts text or paste
+and shows a red warning for auto-approve modes. Use `PgUp`/`PgDn` to scroll
+the escaped dry-run preview. Once the preview is visible and the brief
+confirmation delay has passed, press `Enter` to start or `Esc` to cancel.
+The daemon compares the rebuilt prompt with the preview. If they differ,
+the TUI displays a fresh preview and asks you to confirm again. If the source
+agent or another agent keeps changing the checkout, confirmation can keep
+reporting “the state changed”. Interrupt or stop the source agent first. Pending
+permission dialogs wait while the handoff dialog is open.
 
 Sending: `i` focuses the input; `Enter` sends the line to the agent that was
 selected when you pressed `i` (the input title shows it: `→ agt_…xxxxxx TITLE`).
@@ -244,13 +368,14 @@ never sends, never changes the mode and never submits a form. A paste in the
 tree, the permission dialog or the archive confirmation is ignored. The modes
 are the `dgc send` behaviors: `queue` (default; sent when the current turn
 ends), `steer` and `interrupt`. Claude agents cannot steer, so there `steer`
-interrupts and then sends, which also discards the queue. When the daemon
+interrupts and then sends, which also discards the queue. A successful send
+with `steer` or `interrupt` returns the input to `queue`. When the daemon
 accepts a message the status bar says what happened to it for a few seconds:
 `queued — delivered when the turn ends`, `sent`, `steered` or
 `interrupted and sent`. A queued message appears in the stream only when it is
-delivered (or shown as discarded). If the send fails, the text returns to an
-empty input and the error shows in the status bar. If the agent you were typing
-to is archived or disappears, the input keeps its text and shows
+delivered (or shown as discarded). If the send fails, the mode stays selected,
+the text returns to an empty input, and the error shows in the status bar. If the
+agent you were typing to is archived or disappears, the input keeps its text and shows
 `no target — select an agent`; leave with `Esc` and pick another agent. The
 text stays with that removed agent and is not shown again.
 
@@ -310,7 +435,7 @@ experiments).
 |---|---|
 | Socket | `$XDG_RUNTIME_DIR/dgc/daemon.sock`, else `~/.local/state/dgc/run/daemon.sock` |
 | Projects, workspaces, agents, events, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
-| Config (`claude_path`, `codex_path`, `events_max_bytes`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
+| Config (`claude_path`, `codex_path`, `events_max_bytes`, `profiles`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
 | Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
 
 Each agent's events are in `agents/<id>/events.jsonl` under the state
@@ -419,10 +544,11 @@ replaying recorded or hand-written scenarios
 
 ## Roadmap
 
-- **M4:** profiles, schedules (start agents on a cron schedule), heartbeats
-  (periodic follow-ups to an agent), supervised workspace scripts, and a
-  suggested handoff to the other provider when an agent hits a rate limit.
-- **M5:** an MCP server for agents, so an agent can start and drive sub-agents
+- **M4:** launch profiles and a suggested handoff to the other provider when
+  an agent hits a usage limit.
+- **M5:** schedules (start agents on a cron schedule), heartbeats (periodic
+  follow-ups to an agent), and supervised workspace scripts.
+- **M6:** an MCP server for agents, so an agent can start and drive sub-agents
   through dgc.
 - **Phase B:** remote use (another machine or a phone) over the same socket
   protocol, under a separate design. Until then dgc stays local only.

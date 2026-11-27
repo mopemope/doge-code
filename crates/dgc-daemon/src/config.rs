@@ -1,9 +1,14 @@
 //! Daemon configuration file (`config.toml`).
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use dgc_protocol::methods::ProfileInfo;
+use dgc_protocol::model::ProviderKind;
+use serde::{Deserialize, Deserializer, de};
+
+use crate::provider::validate_mode;
 
 /// Default cap for one agent's event log file: 32 MiB.
 pub const DEFAULT_EVENTS_MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -17,6 +22,44 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
+    #[error("invalid profile {name:?}: {reason}")]
+    InvalidProfile { name: String, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    pub provider: ProviderKind,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub notes: Option<String>,
+}
+
+fn deserialize_profiles<'de, D>(input: D) -> Result<BTreeMap<String, ProfileConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // TOML can highlight a field inside a table without naming the table.
+    BTreeMap::<String, toml::Value>::deserialize(input)?
+        .into_iter()
+        .map(|(name, value)| {
+            let profile = value
+                .try_into()
+                .map_err(|err| de::Error::custom(format!("invalid profile {name:?}: {err}")))?;
+            Ok((name, profile))
+        })
+        .collect()
+}
+
+impl ProfileConfig {
+    fn auto_approve(&self, name: &str) -> Result<bool, ConfigError> {
+        validate_mode(self.provider, self.mode.as_deref()).map_err(|reason| {
+            ConfigError::InvalidProfile {
+                name: name.to_owned(),
+                reason,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -28,6 +71,9 @@ pub struct DaemonConfig {
     pub codex_path: Option<PathBuf>,
     /// Size at which an agent's event log rotates.
     pub events_max_bytes: u64,
+    /// Named launch settings, ordered by name.
+    #[serde(deserialize_with = "deserialize_profiles")]
+    pub profiles: BTreeMap<String, ProfileConfig>,
 }
 
 impl Default for DaemonConfig {
@@ -36,6 +82,7 @@ impl Default for DaemonConfig {
             claude_path: None,
             codex_path: None,
             events_max_bytes: DEFAULT_EVENTS_MAX_BYTES,
+            profiles: BTreeMap::new(),
         }
     }
 }
@@ -54,9 +101,44 @@ impl DaemonConfig {
                 });
             }
         };
-        toml::from_str(&text).map_err(|source| ConfigError::Parse {
+        let config: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
             path: path.to_owned(),
             source,
-        })
+        })?;
+        config.validate_profiles()?;
+        Ok(config)
+    }
+
+    pub(crate) fn validate_profiles(&self) -> Result<(), ConfigError> {
+        for (name, profile) in &self.profiles {
+            if !(1..=32).contains(&name.len())
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Err(ConfigError::InvalidProfile {
+                    name: name.clone(),
+                    reason: "profile name must match [A-Za-z0-9_-]{1,32}".to_owned(),
+                });
+            }
+            profile.auto_approve(name)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn profile_infos(&self) -> Result<Vec<ProfileInfo>, ConfigError> {
+        self.profiles
+            .iter()
+            .map(|(name, profile)| {
+                Ok(ProfileInfo {
+                    name: name.clone(),
+                    provider: profile.provider,
+                    model: profile.model.clone(),
+                    mode: profile.mode.clone(),
+                    notes: profile.notes.clone(),
+                    auto_approve: profile.auto_approve(name)?,
+                })
+            })
+            .collect()
     }
 }

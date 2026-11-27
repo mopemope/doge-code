@@ -165,6 +165,7 @@ impl Forwarder {
                 agent_id: agent.clone(),
                 since_seq: cursor,
                 limit: MAX_EVENTS_LIMIT,
+                tail: None,
             };
             let page = match agents.events_page(&params) {
                 Ok(page) => page,

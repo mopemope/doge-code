@@ -1,0 +1,16 @@
+// Synthetic; derived from ../simple_turn.jsonl (Claude Code 2.1.332).
+// Rejected included usage while extra usage is active or available.
+{"expect_args":["-p","--input-format","stream-json","--output-format","stream-json","--verbose","--permission-prompt-tool","stdio","--model","haiku"]}
+{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}
+{"capture":"init","path":"/request_id"}
+{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}
+{"expect":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly the word: pong"}]},"parent_tool_use_id":null,"session_id":""}}
+{"send":{"type":"system","subtype":"init","session_id":"synthetic-session"}}
+{"send":{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true,"overageStatus":"REDACTED"}}}
+{"send":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"active overage"}]}}}
+{"send":{"type":"result","subtype":"success","is_error":false,"result":"active overage"}}
+{"expect":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly the word: pong"}]},"parent_tool_use_id":null,"session_id":""}}
+{"send":{"type":"system","subtype":"init","session_id":"synthetic-session"}}
+{"send":{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageStatus":"allowed_warning","isUsingOverage":false}}}
+{"send":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"allowed overage"}]}}}
+{"send":{"type":"result","subtype":"success","is_error":false,"result":"allowed overage"}}

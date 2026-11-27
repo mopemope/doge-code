@@ -16,6 +16,15 @@ pub enum ProviderKind {
     Codex,
 }
 
+impl ProviderKind {
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Claude,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Isolation {
