@@ -35,6 +35,7 @@ pub(super) enum Command {
     Send {
         text: String,
         behavior: SendBehavior,
+        only_idle: bool,
         reply: oneshot::Sender<Result<SendOutcome, AgentError>>,
     },
     Interrupt {
@@ -97,6 +98,7 @@ pub(super) struct Launch {
     /// Workspace path.
     pub(super) cwd: PathBuf,
     pub(super) start: Start,
+    pub(super) started: Option<oneshot::Sender<Result<(), AgentError>>>,
     pub(super) queue: VecDeque<QueueItem>,
     pub(super) timeouts: ProviderTimeouts,
 }
@@ -113,6 +115,7 @@ pub(super) async fn run_actor(
         mut agent,
         cwd,
         start,
+        started,
         mut queue,
         timeouts,
     } = launch;
@@ -149,6 +152,9 @@ pub(super) async fn run_actor(
             );
             agent.last_error = Some(message);
             shared.finish(&mut agent, AgentState::Failed);
+            if let Some(started) = started {
+                let _ = started.send(Err(provider(err)));
+            }
             return;
         }
     };
@@ -175,8 +181,14 @@ pub(super) async fn run_actor(
         Ok(false) => actor.set_state(AgentState::Idle),
         Err(err) => {
             actor.fail(err.to_string()).await;
+            if let Some(started) = started {
+                let _ = started.send(Err(provider(err)));
+            }
             return;
         }
+    }
+    if let Some(started) = started {
+        let _ = started.send(Ok(()));
     }
     actor.run(commands).await;
 }
@@ -201,6 +213,16 @@ impl Actor {
         loop {
             if let Some((success, stderr_tail)) = self.deferred_exit.take() {
                 self.exited(success, stderr_tail).await;
+                break;
+            }
+            if self.agent.stop_when_idle
+                && self.agent.state == AgentState::Idle
+                && self.queue.is_empty()
+                && commands.is_empty()
+                && !self.has_pending()
+            {
+                self.shutdown_session(SESSION_SHUTDOWN_GRACE).await;
+                self.shared.finish(&mut self.agent, AgentState::Stopped);
                 break;
             }
             // Biased toward provider events: events already buffered are
@@ -366,9 +388,15 @@ impl Actor {
             Command::Send {
                 text,
                 behavior,
+                only_idle,
                 reply,
             } => {
-                let _ = reply.send(self.send(text, behavior).await);
+                let result = if only_idle && self.agent.state != AgentState::Idle {
+                    Err(AgentError::state(self.agent.state))
+                } else {
+                    self.send(text, behavior).await
+                };
+                let _ = reply.send(result);
                 Flow::Continue
             }
             Command::Interrupt { reply } => {

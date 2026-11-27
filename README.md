@@ -72,9 +72,11 @@ dgc send AGENT --behavior queue "Then update the changelog"
 dgc                                        # the terminal UI
 ```
 
-With the global `--json` flag the commands print machine-readable JSON (except
-`daemon start` / `stop`; the TUI refuses it). The CLI starts the daemon on demand, so you rarely need the daemon
-commands.
+Use the global `--json` flag for machine-readable output. Among workspace
+script commands, `dgc script ls` is the only one that accepts `--json`.
+`daemon start` and `daemon stop` always print text, and the TUI requires
+interactive terminal output. The CLI starts the daemon on demand, so you rarely
+need the daemon commands.
 
 ## Daemon
 
@@ -118,13 +120,14 @@ workspaces.
   `--base`, default `HEAD`) under `<worktrees>/<repo>-<id>/<slug>`.
 - `ls` lists active workspaces.
 
-Archiving a workspace first archives its agents. For a worktree workspace it
-removes the worktree (`git worktree remove`) and safely deletes its branch
-(`git branch -d`), but only for paths inside that managed directory. Archive is
-refused, and nothing (agents included) is changed, while the worktree has
-uncommitted or untracked changes or commits not reachable from the commit it
-was created from (the error names which); `--force` removes it anyway and
-force-deletes the branch. The check is reachability from that base commit only,
+Archiving a workspace stops its scripts before checking worktree safety. If
+that check refuses the archive, the scripts stay stopped and the agents
+remain unchanged. If the check passes, dgc archives the agents. For a worktree
+inside the managed directory, it also removes the worktree (`git worktree remove`)
+and safely deletes its branch (`git branch -d`). The safety check refuses a
+worktree with uncommitted or untracked changes or commits unreachable from its
+recorded base. The error names the reason. With `--force`, dgc removes the
+worktree and force-deletes its branch. The check is reachability from that base commit only,
 so a branch already merged into main that still carries commits beyond its base
 also needs `--force`. Untracked files count as work regardless of git's
 `status.showUntrackedFiles`, but gitignored files in the worktree (build output,
@@ -156,7 +159,8 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
 - `dgc ls [--all]` (archived agents only with `--all`), `dgc show ID`,
   `dgc interrupt ID`, `dgc archive ID`, `dgc resume ID` (restarts a stopped or
   failed agent, reusing its provider session when available). If the provider
-  failed to start, resume sends the original prompt from the queue.
+  failed to start, resume sends the original prompt from the queue. A resumed
+  agent created by a schedule stays available for follow-up input.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An
@@ -283,6 +287,159 @@ available. The detection conditions come from recorded provider traffic and
 schemas and are tested with synthetic scenarios. The real-provider handoff
 was tested with Claude Haiku and Codex GPT-6 Luna. Real usage-limit exhaustion
 remains unobserved.
+
+## Schedules and heartbeats
+
+A schedule launches a new agent in a workspace on each run. A heartbeat sends
+the same prompt to an existing agent when it is idle.
+
+- `dgc schedule create --cron EXPR --workspace WS (--provider P | --profile N)
+  [--model M] [--mode MODE] [--name NAME] [--max-runs N] [--expires-in DUR]
+  PROMPT` registers a schedule and prints its id. Choose exactly one of
+  `--provider` and `--profile`. As with `dgc run`, pass the prompt as one
+  positional argument and use shell quoting for spaces or line breaks.
+- `dgc heartbeat create AGENT --cron EXPR [--name NAME] [--max-runs N]
+  [--expires-in DUR] PROMPT` registers a heartbeat for that agent. Use the
+  returned schedule id to show or remove the heartbeat.
+- `dgc schedule ls [--json]` and `dgc heartbeat ls [--json]` list the id, name,
+  cron expression, state, next run, run count and limit, and target.
+  `dgc schedule show ID [--json]` and `dgc heartbeat show ID [--json]` show the
+  settings, prompt, and up to 20 recent runs.
+- `dgc schedule pause ID` pauses timed runs, and `dgc schedule resume ID`
+  recalculates the next run and resumes them. The text list and details show
+  `-` for the next run while paused. `dgc schedule run ID` triggers
+  a run immediately, including while paused. A manual run leaves the next
+  scheduled time in place unless the schedule ends. `dgc schedule rm ID` and
+  `dgc heartbeat rm ID` remove the registration.
+
+```sh
+dgc schedule create --cron '0 9 * * mon-fri' --workspace "$ws" --profile review \
+  --name 'Weekday review' --expires-in 7d 'Review the latest changes'
+dgc heartbeat create "$agent" --cron '*/30 * * * *' --max-runs 4 'Check for updates'
+```
+
+Quote cron expressions so the shell passes them as one argument. The five
+fields are minute, hour, day of month, month, and day of week. They accept
+`*`, numbers, ranges (`a-b`), lists (`a,b`), and steps (`*/n`, `a-b/n`).
+Month and weekday names (`jan`–`dec` and `sun`–`sat`) are case-insensitive.
+Both `0` and `7` mean Sunday. When neither the day-of-month nor the weekday
+field begins with `*`, either field can match. Otherwise both must match.
+The supported macros are `@hourly`, `@daily`, `@weekly`, `@monthly`,
+`@yearly`, and `@annually`. An expression must have a match within five years.
+
+The daemon evaluates cron in its local time. Restart it after changing its
+`TZ`. Run the CLI with the same timezone as the daemon to see corresponding
+local timestamps (`YYYY-MM-DD HH:MM ±hhmm`). At the start of daylight saving
+time, a skipped clock minute never fires. At the end, a repeated minute
+fires once.
+
+`--expires-in` takes a positive integer followed by `m`, `h`, or `d`
+(minutes, hours, or 24-hour days). The schedule ends when the expiry or the
+run limit is reached, and ended schedules have no next run. The run limit
+counts successful launches and sends, including manual runs. When the daemon
+finds a timed run more than 120 seconds overdue, it records one `missed` entry
+and computes the next run. A `skipped` entry means the previous scheduled
+agent is still starting, running, or waiting for permission, or a heartbeat's
+agent is busy or stopped. A failed agent also causes a heartbeat to skip.
+The daemon saves the next run before launching or sending, so a restart loads
+the advanced time. A daemon crash just after a launch or send can
+leave that run absent from the history and count. If a backward clock
+adjustment puts an earlier cron match in the future, the daemon saves that
+earlier time as the next run.
+
+A scheduled agent stops when it goes idle with an empty queue. If you start it
+again with `dgc resume AGENT`, that agent stays live when idle. A heartbeat
+ends if its agent is archived or disappears. Either registration ends if
+its workspace is archived or disappears.
+
+The daemon resolves and saves the provider, model, permission mode, and
+auto-approve setting when you create a schedule. Later profile edits do not
+change it. When you leave the mode unspecified, the daemon saves `manual`
+for Claude or `workspace-write` for Codex. Creating an auto-approve schedule
+or a heartbeat targeting an auto-approve agent prints a `warning:` line on
+stderr, including with `--json`. The text list and details mark auto-approve
+schedules and heartbeats whose target agent uses auto-approve. A missing
+heartbeat target appears by id alone. Provider permission requests wait for
+the user, including on unattended runs.
+
+Prompts and names are stored in the schedule's `0600`
+`schedules/<id>.json` record under the daemon's state directory. The
+scheduled agent's record also includes the first line of the prompt in its
+title (`<name>: <first line>`, or just the first line for an unnamed schedule).
+The prompt is stored in that agent's `events.jsonl` and, while queued, its
+`queue.json`. Heartbeat prompts are stored in the target agent's corresponding
+files.
+
+## Workspace scripts
+
+Put a `dgc.json` file in the root of the workspace. For example, this defines a
+script named `check` that runs from the workspace root.
+
+```json
+{
+  "version": 1,
+  "scripts": {
+    "check": { "command": "cargo test --locked", "cwd": "." }
+  }
+}
+```
+
+`dgc.json` must be a regular UTF-8 file of at most 64 KiB. Symlinks, unknown
+keys, duplicate script names, and versions other than `1` are rejected. The
+file may define up to 32 scripts with names matching `[A-Za-z0-9_-]{1,32}`.
+Each `command` must have 1 to 4096 bytes and contain no NUL. The optional
+`cwd` defaults to the workspace root. If set, it must be a relative path to
+an existing directory within the workspace, with no `..` components or
+symlinks that resolve outside the workspace.
+
+- `dgc script ls --workspace WS [--json]` shows trust, script names, working
+  directories, commands, and execution states. Runs whose definition has
+  been removed remain visible as `(not in dgc.json)` and can still be stopped.
+- `dgc script trust --workspace WS [--yes]` shows the project, file path, and
+  parsed definitions before asking for confirmation. The prompt requires
+  terminals on both stdin and stdout. If either stream is redirected,
+  explicitly pass `--yes` to trust the displayed configuration.
+- `dgc script start NAME --workspace WS` runs the named script from a trusted
+  configuration. `dgc script stop NAME --workspace WS` stops it.
+- `dgc script logs NAME --workspace WS [--follow]` reads the last 64 KiB of
+  combined output by default. With `--follow`, it reads from the start of
+  the retained output until the script exits and its output is drained. It
+  reads the next page immediately after a full page and waits 500 ms after
+  shorter pages. It marks output skipped due to rotation. A daemon
+  disconnect or a reset of the log offsets ends the follow with a nonzero
+  exit status.
+
+Script trust covers only the exact bytes of `dgc.json`. An agent with
+workspace write access (for example, Codex in `workspace-write` mode or
+Claude with allow rules) can change files the commands execute or read,
+such as `./dev.sh`, `package.json` scripts, `Makefile`, or `build.rs`,
+without changing `dgc.json`. The next `dgc script start` runs those commands
+against the changed files with the daemon's environment, outside any sandbox.
+
+All worktrees of a project share its trust history, which keeps the 16 most
+recently trusted contents. Any byte change requires confirmation again
+unless that exact content is still in the project's trust history. If the
+file changes while you review it, the trust command asks you to review the
+new content.
+
+The daemon launches `/bin/sh -c` in a dedicated process group with standard
+input redirected from `/dev/null`. Scripts inherit the daemon's environment
+plus `DGC_WORKSPACE_ID`, `DGC_WORKSPACE_PATH`, and `DGC_SCRIPT_NAME`. The
+daemon appends stdout and stderr to `scripts/<workspace_id>/<name>.log`
+under the state directory and rotates the file at 8 MiB, keeping one `.log.1`
+generation. The daemon stores script output only in these `0600` logs and
+stores trusted `dgc.json` contents only in `0600`
+`script-trust/<project_id>.json` records. Neither appears in `daemon.log`.
+
+`script stop`, workspace archive, and normal daemon shutdown send SIGTERM
+to the script's process group, then SIGKILL if needed after 5 seconds.
+`ChildProcess` also kills group members left after the script's leader exits,
+so background jobs in that group end with the script. Descendants that
+leave the process group (for example through `setsid` or a double fork that
+detaches) escape stop, archive, and shutdown. If they hold an output pipe
+open, the daemon stops reading from it after at most 1 second once the
+leader exits. A daemon crash can leave scripts running. Execution state is
+kept in memory and scripts are not restarted when the daemon restarts.
 
 ## Terminal UI
 
@@ -435,6 +592,9 @@ experiments).
 |---|---|
 | Socket | `$XDG_RUNTIME_DIR/dgc/daemon.sock`, else `~/.local/state/dgc/run/daemon.sock` |
 | Projects, workspaces, agents, events, lock, `daemon.log` | `$XDG_STATE_HOME/dgc` (`~/.local/state/dgc`) |
+| Schedule and heartbeat records | `$XDG_STATE_HOME/dgc/schedules/` |
+| Workspace script output | `$XDG_STATE_HOME/dgc/scripts/` |
+| Trusted `dgc.json` snapshots | `$XDG_STATE_HOME/dgc/script-trust/` |
 | Config (`claude_path`, `codex_path`, `events_max_bytes`, `profiles`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
 | Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
 
@@ -462,6 +622,12 @@ stay under 100 bytes (`sockaddr_un` limit), so keep `DGC_STATE_ROOT` short.
   the agent's 0600 state files (`events.jsonl`, `queue.json` for queued
   messages, and the agent record, whose title defaults to the prompt's first
   line), so they can contain secrets the agent printed.
+- Schedule and heartbeat prompts and names are stored in `schedules/`, script
+  output in `scripts/`, and trusted `dgc.json` snapshots in `script-trust/`,
+  all in 0600 files. The daemon log omits these contents and records script
+  lifecycle events with workspace and script identifiers, PIDs and exit status
+  where applicable. Script commands inherit the daemon's environment and run
+  outside any sandbox. See [Workspace scripts](#workspace-scripts).
 - The permission dialog and `permit ls` show dgc's summary of a request, not
   everything the agent will do (for example not the content of a file it
   writes), and a summary longer than 4 KiB is cut.

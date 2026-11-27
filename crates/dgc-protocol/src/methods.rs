@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
-use crate::model::{Decision, Isolation, ProviderKind, SendBehavior, Workspace};
+use crate::ids::{AgentId, PermissionId, ProjectId, ScheduleId, WorkspaceId};
+use crate::model::{
+    Decision, Isolation, ProviderKind, ScheduleState, ScheduleTarget, SendBehavior, Workspace,
+};
 
 pub const HELLO: &str = "hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
@@ -28,6 +30,18 @@ pub const AGENT_INTERRUPT: &str = "agent.interrupt";
 pub const AGENT_ARCHIVE: &str = "agent.archive";
 pub const AGENT_RESUME: &str = "agent.resume";
 pub const AGENT_EVENTS: &str = "agent.events";
+pub const SCHEDULE_CREATE: &str = "schedule.create";
+pub const SCHEDULE_LIST: &str = "schedule.list";
+pub const SCHEDULE_GET: &str = "schedule.get";
+pub const SCHEDULE_PAUSE: &str = "schedule.pause";
+pub const SCHEDULE_RESUME: &str = "schedule.resume";
+pub const SCHEDULE_RUN: &str = "schedule.run";
+pub const SCHEDULE_REMOVE: &str = "schedule.remove";
+pub const SCRIPT_LIST: &str = "script.list";
+pub const SCRIPT_TRUST: &str = "script.trust";
+pub const SCRIPT_START: &str = "script.start";
+pub const SCRIPT_STOP: &str = "script.stop";
+pub const SCRIPT_LOGS: &str = "script.logs";
 pub const PERMISSION_LIST: &str = "permission.list";
 pub const PERMISSION_RESPOND: &str = "permission.respond";
 pub const SUBSCRIBE: &str = "subscribe";
@@ -79,7 +93,8 @@ pub struct WorkspaceArchiveParams {
     pub id: WorkspaceId,
     /// Remove an owned worktree even when it has uncommitted changes or
     /// commits not in its base, and force-delete its branch. Without it such
-    /// a workspace is refused (`INVALID_STATE`) and nothing is changed.
+    /// a workspace is refused (`INVALID_STATE`). Its scripts are stopped
+    /// before this check.
     #[serde(default)]
     pub force: bool,
 }
@@ -110,6 +125,66 @@ pub struct WorkspaceCreateParams {
     pub base_ref: Option<String>,
     #[serde(default)]
     pub slug: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleCreateParams {
+    pub name: Option<String>,
+    pub target: ScheduleTargetParams,
+    pub prompt: String,
+    pub cron: String,
+    pub max_runs: Option<u32>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleTargetParams {
+    NewAgent {
+        workspace_id: WorkspaceId,
+        provider: Option<ProviderKind>,
+        profile: Option<String>,
+        model: Option<String>,
+        mode: Option<String>,
+    },
+    Agent {
+        agent_id: AgentId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleKind {
+    NewAgent,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScheduleListParams {
+    pub kind: Option<ScheduleKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleListResult {
+    pub schedules: Vec<ScheduleListEntry>,
+}
+
+/// Listing omits prompt bodies and history, which can be fetched with `schedule.get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleListEntry {
+    pub id: ScheduleId,
+    pub name: Option<String>,
+    pub target: ScheduleTarget,
+    pub cron: String,
+    pub state: ScheduleState,
+    pub next_run_at: Option<i64>,
+    pub max_runs: Option<u32>,
+    pub runs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleIdParams {
+    pub id: ScheduleId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +339,98 @@ pub struct DaemonStatus {
     pub started_at: String,
     pub providers: Vec<ProviderStatus>,
     pub path_env: String,
+}
+
+/// Default and maximum number of raw log bytes per response.
+pub const MAX_SCRIPT_LOG_BYTES: u32 = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptListParams {
+    pub workspace_id: WorkspaceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptTrustParams {
+    pub workspace_id: WorkspaceId,
+    pub expected_content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptNameParams {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptLogsParams {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub offset: Option<u64>,
+    pub max_bytes: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFileState {
+    Ok,
+    Missing,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptTrustState {
+    Trusted,
+    Untrusted,
+    Changed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptState {
+    NotRunning,
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptStatus {
+    pub name: String,
+    /// True when the current valid script file defines this name. For a run
+    /// absent from that file, `command` is empty and `cwd` is absent.
+    pub in_file: bool,
+    pub command: String,
+    pub cwd: Option<PathBuf>,
+    pub state: ScriptState,
+    pub pid: Option<u32>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    /// Unix seconds.
+    pub started_at: Option<i64>,
+    /// Unix seconds.
+    pub ended_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptListResult {
+    pub project_name: String,
+    pub file: ScriptFileState,
+    pub error: Option<String>,
+    pub trust: ScriptTrustState,
+    pub content: Option<String>,
+    pub scripts: Vec<ScriptStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptLogsResult {
+    pub data: String,
+    /// Raw byte offset where the returned data starts. A higher offset than
+    /// requested indicates skipped bytes, such as output lost to rotation.
+    pub start_offset: u64,
+    /// Raw byte offset to request next. A page can hold back a partial UTF-8
+    /// character. A caller using a small byte limit can retry with a larger one.
+    pub next_offset: u64,
+    pub running: bool,
 }
 
 #[cfg(test)]

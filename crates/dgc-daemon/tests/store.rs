@@ -52,6 +52,7 @@ fn sample_agent(workspace_id: &WorkspaceId) -> Agent {
         model: Some("opus".into()),
         mode: None,
         auto_approve: false,
+        stop_when_idle: false,
         provider_session_id: Some("sess-1".into()),
         state: AgentState::Idle,
         parent_id: None,
@@ -513,4 +514,52 @@ fn config_syntax_error_is_error() {
     let path = dir.path().join("config.toml");
     fs::write(&path, "events_max_bytes = [\n").expect("write");
     assert!(DaemonConfig::load(&path).is_err());
+}
+
+#[test]
+fn schedule_files_are_private() {
+    use dgc_protocol::ids::ScheduleId;
+    use dgc_protocol::model::{Schedule, ScheduleState, ScheduleTarget};
+
+    let dir = tempdir().expect("tempdir");
+    let store = open_store(dir.path());
+    let schedule = Schedule {
+        id: ScheduleId::generate(),
+        name: None,
+        target: ScheduleTarget::Agent {
+            agent_id: AgentId::generate(),
+        },
+        prompt: "private schedule prompt".into(),
+        cron: "@hourly".into(),
+        state: ScheduleState::Active,
+        end_reason: None,
+        max_runs: None,
+        runs: 0,
+        expires_at: None,
+        next_run_at: Some(1_800_003_600),
+        last_agent_id: None,
+        recent_runs: vec![],
+        created_at: "2026-11-27T00:00:00Z".into(),
+    };
+    store.put_schedule(&schedule).expect("put schedule");
+    let subdir = dir.path().join("state/schedules");
+    let file = subdir.join(format!("{}.json", schedule.id));
+    assert_eq!(mode_of(&subdir), 0o700);
+    assert_eq!(mode_of(&file), 0o600);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(&file).expect("read schedule")).expect("schedule JSON");
+    assert_eq!(raw["version"], 1);
+    assert_eq!(
+        store.get_schedule(&schedule.id).expect("get"),
+        Some(schedule.clone())
+    );
+
+    let outside = dir.path().join("outside");
+    fs::write(&outside, "untouched").expect("write sentinel");
+    assert!(store.remove_schedule(&schedule.id).expect("remove"));
+    symlink(&outside, &file).expect("symlink");
+    assert!(store.put_schedule(&schedule).is_err());
+    assert!(store.get_schedule(&schedule.id).is_err());
+    assert!(store.list_schedules().expect("list").is_empty());
+    assert_eq!(fs::read_to_string(&outside).expect("sentinel"), "untouched");
 }

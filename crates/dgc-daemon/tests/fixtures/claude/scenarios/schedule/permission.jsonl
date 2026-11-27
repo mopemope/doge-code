@@ -1,0 +1,12 @@
+// Synthetic. Claude Code 2.1.332 stream-json shapes from the parent scenarios.
+{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}
+{"capture":"init","path":"/request_id"}
+{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}
+{"expect":{"type":"user"}}
+{"send":{"type":"system","subtype":"init","session_id":"schedule-session"}}
+{"send":{"type":"control_request","request_id":"permission","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo fixture"},"tool_use_id":"tool"}}}
+{"expect":{"type":"control_response","response":{"request_id":"permission","response":{"behavior":"deny"}}}}
+{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"interrupt"}}}
+{"capture":"interrupt","path":"/request_id"}
+{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${interrupt}","response":{}}}}
+{"send":{"type":"result","subtype":"success","is_error":false}}

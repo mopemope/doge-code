@@ -118,6 +118,11 @@ define_id!(
     PermissionId, "perm_"
 );
 
+define_id!(
+    /// Identifies a schedule or heartbeat.
+    ScheduleId, "sch_"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

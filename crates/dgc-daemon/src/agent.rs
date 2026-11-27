@@ -446,6 +446,11 @@ impl Shared {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CreateOptions {
+    pub stop_when_idle: bool,
+}
+
 /// Supervises agents. Cheap to share behind an `Arc`.
 pub struct AgentManager {
     shared: Arc<Shared>,
@@ -514,7 +519,14 @@ impl AgentManager {
             .ok_or_else(|| AgentError::InvalidParams(format!("provider {kind:?} is not available")))
     }
 
-    fn resolve_profile(&self, params: &mut AgentCreateParams) -> Result<ProviderKind, AgentError> {
+    pub(crate) fn provider_available(&self, kind: ProviderKind) -> bool {
+        self.adapters.contains_key(&kind)
+    }
+
+    pub(crate) fn resolve_profile(
+        &self,
+        params: &mut AgentCreateParams,
+    ) -> Result<ProviderKind, AgentError> {
         let Some(name) = &params.profile else {
             return params.provider.ok_or_else(|| {
                 AgentError::InvalidParams("provider is required without a profile".to_owned())
@@ -542,10 +554,20 @@ impl AgentManager {
     /// Store a new agent, record its initial prompt and start it. Returns once
     /// the start has been initiated; the agent becomes `running` (or `failed`)
     /// asynchronously.
-    pub async fn create(&self, mut params: AgentCreateParams) -> Result<Agent, AgentError> {
-        let provider = self.resolve_profile(&mut params)?;
+    pub async fn create(&self, params: AgentCreateParams) -> Result<Agent, AgentError> {
+        self.create_with(params, CreateOptions::default()).await
+    }
+
+    /// Scheduled launches wait until the provider accepts the first prompt
+    /// so the scheduler counts only launches that actually start a turn.
+    pub async fn create_with(
+        &self,
+        mut params: AgentCreateParams,
+        options: CreateOptions,
+    ) -> Result<Agent, AgentError> {
+        let kind = self.resolve_profile(&mut params)?;
         let workspace = self.active_workspace(&params.workspace_id)?;
-        let adapter = self.adapter(provider)?;
+        let adapter = self.adapter(kind)?;
         let auto_approve = adapter
             .validate_mode(params.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
@@ -553,10 +575,11 @@ impl AgentManager {
             id: AgentId::generate(),
             workspace_id: params.workspace_id,
             title: params.title,
-            provider,
+            provider: kind,
             model: params.model,
             mode: params.mode,
             auto_approve,
+            stop_when_idle: options.stop_when_idle,
             provider_session_id: None,
             state: AgentState::Starting,
             parent_id: params.parent_id,
@@ -588,10 +611,17 @@ impl AgentManager {
             .shared
             .register_live(&mut lock(&self.shared.live), &agent.id);
         info!(agent_id = %agent.id, provider = ?agent.provider, auto_approve, "agent created");
+        let (started, answer) = if options.stop_when_idle {
+            let (started, answer) = oneshot::channel();
+            (Some(started), Some(answer))
+        } else {
+            (None, None)
+        };
         let launch = Launch {
             adapter,
             agent: agent.clone(),
             cwd: workspace.path,
+            started,
             start: Start::Create {
                 prompt: params.initial_prompt,
             },
@@ -599,6 +629,11 @@ impl AgentManager {
             timeouts: self.timeouts,
         };
         tokio::spawn(run_actor(Arc::clone(&self.shared), launch, commands));
+        if let Some(answer) = answer {
+            answer
+                .await
+                .map_err(|_| provider(ProviderError::Exited))??;
+        }
         Ok(agent)
     }
 
@@ -678,6 +713,7 @@ impl AgentManager {
 
     /// Restart a stopped or failed agent from its provider session. The first
     /// queued message, if any, is sent; otherwise the agent becomes idle.
+    /// A manual resume keeps the session available for follow-up input.
     pub async fn resume(&self, id: &AgentId) -> Result<Agent, AgentError> {
         let (agent, cwd, adapter, queue, commands) = {
             let mut live = lock(&self.shared.live);
@@ -691,6 +727,7 @@ impl AgentManager {
             let adapter = self.adapter(agent.provider)?;
             let queue = load_queue(&self.shared.queue_path(id))?;
             agent.last_error = None;
+            agent.stop_when_idle = false;
             self.shared.store_state(&mut agent, AgentState::Starting)?;
             let commands = self.shared.register_live(&mut live, id);
             (agent, workspace.path, adapter, queue, commands)
@@ -700,6 +737,7 @@ impl AgentManager {
             adapter,
             agent: agent.clone(),
             cwd,
+            started: None,
             start: Start::Resume,
             queue,
             timeouts: self.timeouts,
@@ -742,6 +780,22 @@ impl AgentManager {
         self.request(&agent_id, |reply| Command::Send {
             text,
             behavior,
+            only_idle: false,
+            reply,
+        })
+        .await
+    }
+
+    /// A heartbeat must never queue behind a turn that started concurrently.
+    pub(crate) async fn send_if_idle(
+        &self,
+        id: &AgentId,
+        text: String,
+    ) -> Result<SendOutcome, AgentError> {
+        self.request(id, |reply| Command::Send {
+            text,
+            behavior: SendBehavior::Queue,
+            only_idle: true,
             reply,
         })
         .await

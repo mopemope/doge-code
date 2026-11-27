@@ -5,6 +5,7 @@
 
 - 設計書: [2026-11-25-orchestrator-design.md](../superpowers/specs/2026-11-25-orchestrator-design.md)
 - 計画: [M0](../superpowers/plans/2026-11-25-orchestrator-m0-scaffold.md) / [M1](../superpowers/plans/2026-11-25-orchestrator-m1-daemon.md) / [M2](../superpowers/plans/2026-11-26-orchestrator-m2-tui.md) / [M3](../superpowers/plans/2026-11-26-orchestrator-m3-cutover.md) / [M4](../superpowers/plans/2026-11-26-orchestrator-m4-profiles-handoff.md)
+  / [M5](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)
   （M2 以降の計画は、前のマイルストーン完了時に作成する）
 
 ## 運用ルール
@@ -17,10 +18,10 @@
 
 ## 現在の作業
 
-- タスク: M5 の計画作成
-- 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 は PR #187（develop 向け）でレビュー待ち。M4 の実装、受け入れ、最終レビュー修正が完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
-- 次の一手: M4 の PR をマージ後、M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
+- タスク: M5 の PR 作成とマージ待ち、その後 M6（エージェント向け MCP）の計画作成
+- 状態: M5 は PR #188（develop 向け）でレビュー待ち。CI は macOS を含め全ジョブ通過（65bfe6a）
+- 済んだこと: M5 Task 6 の偽プロバイダ、実 Claude Haiku、固定ツールチェーンでの受け入れ検証と M5 最終レビューの修正。
+- 次の一手: PR #188 のマージ後に M6（エージェント向け MCP）の計画を作成する。M6 では、同じ UID のエージェントがソケット経由でスクリプトの信頼・起動や自動承認スケジュールの作成をできる点を扱う（M5 最終レビューの保留事項）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -31,8 +32,8 @@
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
-| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了 | m4-profiles-handoff |
-| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 未着手 | 未作成 |
+| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188） | m5-schedules-scripts |
 | M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
 ## タスク
@@ -92,9 +93,73 @@
 | 5 | M4 受け入れ | 完了 | `docs(orchestrator): complete M4 acceptance` |
 | 6 | M4 最終レビュー修正 | 完了 | `fix: stop treating Claude overage as a limit and refuse mismatched daemons` |
 
+### M5
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | cron とローカル時刻 | 完了 | `feat(daemon): parse cron expressions in local time` |
+| 2 | スケジュールと heartbeat（デーモン） | 完了 | `feat(daemon): run schedules and heartbeats` |
+| 3 | スケジュールと heartbeat の CLI | 完了 | `feat(cli): manage schedules and heartbeats` |
+| 4 | ワークスペーススクリプト（デーモン） | 完了 | `feat(daemon): run trusted workspace scripts from dgc.json` |
+| 5 | スクリプトの CLI | 完了 | `feat(cli): trust, run and follow workspace scripts` |
+| 6 | M5 受け入れ | 完了 | `docs(orchestrator): complete M5 acceptance` |
+| 最終修正 | スクリプトの信頼確認と監査、スケジュールの表示と時計補正 | 完了 | `fix: tighten script trust wording and prompts, and harden schedules` |
+
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 最終修正): Script trust covers only the exact bytes of `dgc.json`. An agent with
+  workspace write access (for example, Codex in `workspace-write` mode or
+  Claude with allow rules) can change files the commands execute or read,
+  such as `./dev.sh`, `package.json` scripts, `Makefile`, or `build.rs`,
+  without changing `dgc.json`. The next `dgc script start` runs those commands
+  against the changed files with the daemon's environment, outside any sandbox.
+- 2026-11-27 (M5 最終修正): スクリプトの信頼、起動、停止、終了を、適用できるワークスペース ID、スクリプト名、PID、終了コードまたはシグナルで記録する。
+  スクリプトの警告にもワークスペース ID とスクリプト名を付ける。
+- 2026-11-27 (M5 最終修正): active の保存時刻が現在から計算した次の cron 一致より後なら、発火せずに新しい時刻を保存する。
+  paused の次回時刻は保存値と JSON に残し、テキスト表示では `-` とする。
+
+- 2026-11-27 (M5 Task 5): 信頼確認は `script.list` の解析済みの定義と `workspace.list` のパスを表示し、取得済みの原文をそのまま `expected_content` に渡す。
+  確認には標準入力と標準出力の両方が端末である必要があり、どちらかが端末でなければ明示の `--yes` が必要。JSON 出力は `script ls` が対応し、原文は含めない。
+- 2026-11-27 (M5 Task 5): `script logs` は末尾 64 KiB、`--follow` は保持中のログの先頭から読み、上限まで読んだ場合は次をすぐ取得し、短いページの後は 500 ms 待つ。
+  回転で失われた範囲を表示し、オフセットの後退や RPC の失敗時は 1 行のエラーで終了する。ログ出力は改行とタブを保持し、ほかの制御文字と bidi 文字をエスケープする。
+
+- 2026-11-27 (M5 Task 4 レビュー修正): `script.logs` は生バイトの `start_offset` を返す。要求位置より後ろなら、ログ回転などで読み飛ばしたデータがある。
+  ページ末尾の未完の UTF-8 文字は次回の読み取りに回し、プロセス終了後の EOF では不正なバイトとして置換する。
+  `script.list` は有効なファイルに存在しない実行履歴も `in_file: false`、空の `command`、`cwd: null` で返す。
+  重複したスクリプト名は無効。信頼時のファイルエラーは `INVALID_PARAMS` とエラー種別を返し、バイト不一致は `script_file_changed` を返す。
+
+- 2026-11-27 (M5 Task 4): 信頼はプロジェクトごとに直近 16 件の UTF-8 原文を保存し、ファイルのバイト列を比較する。
+  `script.start` は信頼確認と起動に同じスナップショットを使う。`script.list` は CLI の信頼確認用に `project_name` を返す。
+- 2026-11-27 (M5 Task 4): 実行状態はメモリにのみ保持する。再起動後は `not_running`。
+  通常停止とアーカイブではプロセスグループを止め、リーダーが先に終了した場合もグループ内に残ったプロセスは終了させる。
+  デーモンがクラッシュするとプロセスが残りうる。この挙動は Task 5 で README に記載する。
+- 2026-11-27 (M5 Task 4): ログはデーモンが生バイトで追記し、8 MiB に達したファイルに次のバイトを書き込む直前に回転する。
+  `script.logs` のオフセットはデーモンの稼働中は回転をまたいで継続し、再起動後は保持されているログの先頭を起点にする。
+
+- 2026-11-27 (M5 Task 3): `heartbeat ls` と `heartbeat show` のテキスト出力は `agent.get` で `auto_approve` を確認する。
+  対象が見つからない場合はエージェント ID を表示する。JSON は既存 RPC の構造を使う。`heartbeat create` も登録前に `agent.get` で確認し、対象が自動承認なら登録成功後に schedule と同じ警告を標準エラーに出す。
+  CLI の時刻表示は `format_local` で行う。デーモンが独自の `TZ` で動く場合は CLI に同じ設定が必要。
+
+- 2026-11-27 (M5 Task 2): 新しい RPC と `stop_when_idle` を追加し、プロトコルを v3 に更新する。v2 の hello は `VERSION_MISMATCH`。
+  `schedule.list` は `ScheduleListResult` を返す。本文と履歴は `schedule.get` で取得する。`pause` と `resume` は更新後の `Schedule`、`remove` は空オブジェクトを返す。
+- 2026-11-27 (M5 Task 2): scheduled agent は初回プロンプトの送信に成功してから実行回数に加える。
+  `stop_when_idle` が有効なら、idle かつ待ち行列、アクターの受信コマンド、権限要求が空のときにプロバイダを閉じて stopped にする。中断で idle に戻る場合も同じ。
+  ユーザーの `agent.resume` は起動前に `stop_when_idle = false` を保存する。再開後は idle で入力を待てる。
+  heartbeat の idle 判定はアクターでも行う。停止時はスケジューラーと進行中の手動実行が終わってからエージェントを止める。
+- 2026-11-27 (M5 Task 2): 作成時にプロファイルを展開して設定を保存する。モードを省略した場合は Claude を `manual`、Codex を `workspace-write` に固定する。
+  対象のプロバイダが利用できない場合も登録でき、発火時は失敗種別を記録する。heartbeat は対象が存在し、archived 以外であることを登録時に確認する。
+- 2026-11-27 (M5 Task 2): 次回時刻は Task 1 の `LocalClock` と `CronExpr::next_after` で求める。DST で飛ぶ分は発火せず、繰り返す分は `mktime` が選ぶ一方だけで発火する。
+  停止中などに保存時刻を 120 秒より多く過ぎた場合は `missed` を 1 件記録し、その時点から次回時刻を求める。
+  pause は自動実行を止める。手動実行は paused でも可能で、終了するまでは既存の `next_run_at` を保持する。`ended` になった時点で次回時刻を消す。
+- 2026-11-27 (M5 Task 2 レビュー修正): name、model、mode、cron は作成時に 256 バイト以下に制限する。モデルとモードは展開したプロファイルにも上限を適用する。一覧では cron の空白を一つのスペースにまとめる。
+  自動実行は次回時刻を先に保存してからプロバイダを呼び出す。強制終了で結果を書けなかった回は履歴と回数に残らない場合がある。
+
+- 2026-11-27 (M5 Task 1): `LocalClock` は `Send + Sync`。検索上限はローカル時刻の 5 暦年後の同じ分とし、2 月 29 日の上限は平年の 2 月末に丸める。
+  Vixie cron と同様に、日または曜日のフィールドが `*` で始まる場合は両方の一致を要求する。どちらも `*` で始まらない場合は、日か曜日のいずれかの一致で発火する。
+  `SystemClock` は既存の `libc` を使う。glibc の繰り返し時刻の選択が直前の変換に左右されるため、ロック内で 1970-01-02 の正午を変換した後、`tm_isdst = -1` で対象の時刻を変換する。
+  変換できない Unix 秒は `to_local` で月 0 を返す。cron の探索はそこで終了し、表示には元の Unix 秒を含むエラー文を出す。
 
 - 2026-11-26 (M4 最終レビュー決定): Claude の `rate_limit_event` は `status` / `overageStatus` が `allowed` / `allowed_warning`、または `isUsingOverage` が `true` のとき通知を抑止する。HTTP 429 は引き続き検知する。
 - 2026-11-26 (M4 最終レビュー決定): プロトコルを 2 に更新する。バージョン不一致は `dgc daemon stop` を案内し、停止コマンドはインスタンスロックの保持と有効な PID を確認して `SIGTERM` を送る。
@@ -625,6 +690,87 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Linux CI（62c6dfd）: 子が親から継承した TERM ハンドラを解除する前に TERM を受け、親が `wait` 中に猶予切れで SIGKILL された。子自身が `exec` 後に改行付き PID を公開するようテストを修正。dash の負荷試験で shutdown と stop は各 2/200 → 0/200、archive と SIGKILL の検証は各 0/200 → 0/200。トレース付きでは archive も 1/200 → 0/200。Rust 1.99.0 の `verify.sh rust`（732件）と `verify.sh guidance`（Python 40件）が PASS。macOS 実機は未検証。
+
+- 2026-11-27 M5 macOS PTY 修正（Linux、Rust 1.99.0）: `cargo test --locked -p dgc-cli --test script_cli`（11件）、`cargo fmt --all`、`bash scripts/verify.sh rust`（732件）、`bash scripts/verify.sh guidance`（Python 40件）、`cargo check --locked --workspace --all-targets --target aarch64-apple-darwin` が PASS。macOS 実機のテストは未実行。
+
+- 2026-11-27 M5 最終修正（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-cli --test schedule_cli` 7件、`--test script_cli` 11件、`cargo test --locked -p dgc-daemon --test schedule` 25件、`--test script` 21件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 732件）、`bash scripts/verify.sh guidance`（リンク、機密ログチェック、Python 40件）、
+    `bash scripts/verify.sh tui-deps`、`bash scripts/verify.sh msrv`（Rust 1.94.0）が PASS。
+  - 実プロバイダと macOS での検証は未実行。作業フォルダに `final-fix-red-*.log`、`final-fix-green-*.log`、`final-fix-verify-*.log` を保存。
+
+- 2026-11-27 M5 Task 6（Linux、Rust 1.99.0、手動確認の時刻は JST）
+  - `cargo build --locked -p dgc-cli -p dgc-daemon --bins` は PASS。偽プロバイダと実 Claude は別々の一時 git リポジトリと `DGC_STATE_ROOT`、作業用 `config.toml` で実施。
+  - `dgc schedule create --cron '* * * * *' … --max-runs 1` は 16:37:06 に `started` が1件。`dgc schedule show` は `runs: 1/1`、`state: ended`。
+    `dgc logs --json` で `turn_completed` 1件と `idle` → `stopped` を確認。
+  - 権限要求を返す偽シナリオの初回実行は 16:37:06 に `waiting_permission` となり、`dgc permit ls` に要求が表示された。
+    次回の 16:38:06 に `dgc schedule show` は `skipped previous_run_active` を表示し、実行回数は1、同じエージェントの権限待ちが続いた。
+  - `dgc daemon stop` で 16:38:07.027 に停止し、174.973秒待って 16:41:02 に同じ状態から `dgc daemon run` で再起動。
+    16:39:00 の予定時刻から122秒経過しており、`dgc schedule show --json` は `missed` 1件、`runs: 0`、`last_agent_id: null`、次回 16:42 を返した。
+  - idle の偽エージェントに `dgc heartbeat create AGENT --cron '* * * * *' --max-runs 1 heartbeat` を登録。
+    シナリオは `heartbeat.jsonl` の作業用コピーを使い、末尾に合成の成功結果ステップを1件追加した。
+    16:37:06 に `dgc heartbeat show` が `sent` を表示し、対象ログの `user_message`（`queue`）、2回目の `turn_completed`、`idle` を確認。
+  - 16:36:06 に `dgc script trust --workspace WS --yes` → `dgc script start tick --workspace WS`。
+    `dgc script logs tick --workspace WS --follow` は `m5 script boot`、`m5 tick 1`、`m5 tick 2` を配信し、16:36:08 に `dgc script stop tick --workspace WS` 後、終了コード0。
+    `dgc.json` の整形だけを変えると `script ls` は `trust: changed`、再度の `script start` は `script_untrusted` と終了コード1。
+  - 実 Claude Code 2.1.332 は `claude auth status` が `loggedIn: true`。
+    `dgc schedule create --cron '0 0 1 1 *' --workspace WS --provider claude --model haiku --max-runs 1 'Reply with the single word OK.'` で 2027-01-01 00:00 を指定し、既定の `manual` と `auto_approve: false` を確認。
+    16:37:12 に `dgc schedule run ID` を1回実行し、16:37:13 に `OK`、`turn_completed` 1件、`idle` → `stopped` を観測。
+    `claude_path` は `--safe-mode --no-session-persistence --tools ''` を付ける作業用ラッパースクリプトに設定した。
+    実 CLI のツール呼び出しは0件で、実 CLI に対する権限要求の中継は未検証。
+  - `script trust`、`start`、`stop`、`logs --follow` の `--json` がいずれも終了コード1で拒否されたため、README の Quick start を修正し、スクリプト系で `--json` を受け付けるのは `script ls` と記載した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 723件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40件）、
+    `bash scripts/verify.sh msrv`（Rust 1.94.0）、`bash scripts/verify.sh tui-deps` はすべて PASS。
+  - `dgc daemon stop` と `script stop` で停止し、試験用プロセスの残存0件と一時ディレクトリの削除を確認した。
+    コマンド、タイムスタンプ、出力は作業フォルダの `task-6-manual-*.log`、自動検証は `task-6-verify-*.log` に保存。必須検証のブロックは0件。macOS は未実行。
+
+- 2026-11-27 M5 Task 5（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-cli --test script_cli` は `script` サブコマンド未登録で 7 件 FAIL、実装後は 7 件 PASS。`bash scripts/verify.sh test script_` は 18 件 PASS。
+  - 擬似端末で確認プロンプト、既定の拒否、確認中にファイルが変わった場合の拒否、明示の承認を確認。デーモン切断時の `--follow` は 1 行を表示し非 0 で終了した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 723 件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40 件）は PASS。macOS と実プロバイダは未検証。
+
+- 2026-11-27 M5 Task 4 レビュー修正（Linux、Rust 1.99.0）
+  - RED は `cargo test --locked -p dgc-daemon --test script --test server` で script 7 件、`cargo test --locked -p dgc-daemon --test server script_rpcs_round_trip` で RPC 1 件が期待どおり FAIL。
+  - GREEN は `cargo test --locked -p dgc-daemon --test script --test server` で 51 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 716 件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40 件）は PASS。macOS と実プロバイダは未検証。
+
+- 2026-11-27 M5 Task 4（Linux、Rust 1.99.0）
+  - RED は `cargo test --locked -p dgc-daemon --test script` でスクリプトモジュールと RPC 型の未定義によるコンパイルエラー。
+    変更前のコードでは `cargo test --locked -p dgc-daemon --test server script_rpcs_round_trip` が `script.list` 未登録で FAIL。
+  - `bash scripts/verify.sh test script_file_parses_and_rejects_unknown_keys_bad_names_and_limits` は 1 件 PASS。
+    `cargo test --locked -p dgc-daemon --test script --test server --test workspace --test process` は 97 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 711 件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40 件）は PASS。
+  - macOS と実プロバイダは未検証。
+
+- 2026-11-27 M5 Task 3（Linux、Rust 1.99.0）
+  - `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` は PASS。続く `cargo test --locked -p dgc-cli --test schedule_cli` は未登録の CLI で 6 件 FAIL、実装後は 6 件 PASS。
+  - `bash scripts/verify.sh test schedule` は 28 件 PASS。`cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 695 件）、`bash scripts/verify.sh guidance`（Python 40 件）は PASS。
+  - ヘルプの全サブコマンドと `--provider` / `--profile` の排他を確認。実プロバイダと macOS は未検証。
+
+- 2026-11-27 M5 Task 2 レビュー修正（Linux、Rust 1.99.0）
+  - RED は `cargo test --locked -p dgc-daemon --test schedule` で 7 件 FAIL、対応するアクターの送信テストも `stopped` で FAIL。
+    120 秒の境界と権限待ち heartbeat のテストは修正前から PASS。
+  - GREEN は `cargo test --locked -p dgc-daemon --test schedule --test agent_manager --test server` の 100 件が PASS。
+    `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 689 件）、`bash scripts/verify.sh guidance`（Python 40 件）が PASS。
+  - 実プロバイダと macOS は未検証。
+
+- 2026-11-27 M5 Task 2（Linux、Rust 1.99.0）
+  - RED は新しいスケジュール型・Store API の未実装でコンパイルエラー、`schedule.create` はメソッド未登録、v2 の hello は誤って成功。
+  - `bash scripts/verify.sh test schedule` は 21 件 PASS。`cargo test --locked -p dgc-daemon --test schedule --test store --test server --test agent_manager` は 117 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 681 件）、`bash scripts/verify.sh guidance`（Python 40 件）、
+    `python3 -I scripts/check-sensitive-logging.py` は PASS。初回の全体テストでは既存の偽プロバイダのバージョン検出が 1 回失敗し、単独と全体の再実行で PASS。
+  - 実プロバイダと macOS は未検証。
+
+- 2026-11-27 M5 Task 1 レビュー修正（Linux、Rust 1.99.0）
+  - `bash scripts/verify.sh test schedule::` は RED で日・曜日の `*/2` の2件が FAIL、既存10件が PASS。修正後は12件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 661 件）、`bash scripts/verify.sh guidance`（Python 40 件）が PASS。macOS は未検証。
+
+- 2026-11-27 M5 Task 1（Linux、Rust 1.99.0）
+  - RED の `bash scripts/verify.sh test schedule::` は未実装の型と関数でコンパイルエラー。GREEN は新規 10 件 PASS。
+  - 固定の時刻を先に変換しない場合、`bash scripts/verify.sh test system_clock_selects_same_repeated_time_after_other_conversions` は同じ壁時計時刻に別の Unix 秒を返して FAIL。修正後は GREEN の 10 件に含めて確認。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 659 件）、`bash scripts/verify.sh guidance`（Python 40 件）が PASS。macOS は未検証。
 
 - 2026-11-27 M4 最終レビュー修正（Linux、Rust 1.99.0）
   - RED で Claude の追加使用の誤検知と合成回答の誤分類、両方の hello 不一致、旧デーモンの停止エラー、完了済み回答の欠落、
@@ -1281,3 +1427,33 @@ M4 はタスクごとのレビューと全体の最終レビュー（修正 3be7
 - Task 4: Ruling: fold git color off, cold-log read off the global mutex (spawn_blocking), flaky restart test helper (fail fast + 10 s)
 - Final review: Ruling: protocol v2; client maps both mismatch shapes to VersionMismatch with a `dgc daemon stop` hint; `daemon stop` on mismatch sends SIGTERM to the pid in daemon.lock only while another process holds the flock — a daemon left over from an older install must fail loudly and stay stoppable — cost if wrong: a stop right after a PID reuse could signal a same-UID process (ms window)
 - Final review: Ruling: fold `<synthetic>` row narrowing, `last_answer` cut at the first TurnCompleted, dry-run adapter check and three README notes — each prevents a wrong suggestion or a confusing preview — cost if wrong: none
+
+## M5 レビューで保留した指摘と判断（2026-11-27、実行台帳から移記）
+
+M5 はタスクごとのレビュー（修正の再レビューまで）と全体の最終レビュー（修正 82bedd3）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。台帳の行はそのまま転記したので、最終レビューの修正で解消した項目（信頼範囲の README、信頼確認の端末判定と回答のテスト、`--follow` の待ち、heartbeat 作成時の警告、停止中の次回表示、時計の巻き戻り、監査ログ、0700 と SIGKILL のテスト、README の表と見出し、PROGRESS の実 Claude 記録）も含む。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): start-day next_after converts every matching wall minute before now (≤1439 from_local calls for * * * * * at 23:59); to_local month==0 sentinel instead of Option (brief-fixed signature) — Task 2 callers must check; child-process DST test detects pass via "1 passed" stdout text instead of --exact + exit status
+- Task 2: minor (deferred): pause on paused is Ok while resume on active is INVALID_STATE("active") (asymmetric, bare messages); get/list read the store while memory is authoritative (stale after a failed persist); create_with uses stop_when_idle also to wait for start (separate flag or doc); no concurrency test tick vs run vs remove; manager.rs 735 lines (split target execution if it grows); flake: provider::resolve::tests::configured_path_wins_and_version_decides_tested failed once in task-2-verify-rust-first.log, passed on rerun
+- Task 2: minor (deferred): schedule.list at worst-case limits ~0.85 MB (margin modest); schedule.list collapses cron whitespace while get returns stored text; a command arriving during shutdown_session after the is_empty check gets 'stopped'
+- Task 3: minor (deferred): schedule rm --json prints without escape_json_line (daemon returns {}); one non-NOT_FOUND agent.get failure aborts heartbeat ls mid-output; heartbeat --json has no auto-approve marker (text only); schedule/heartbeat commands do not check kind (heartbeat rm removes either); escaping tests cover name/prompt only (not model/mode/reasons/warning mode); README storage line omits that scheduled agent title/events/queue and heartbeat target files also hold prompt text; TZ: CLI formats in its own zone with offset (optional: daemon tz in daemon.status)
+- Task 4: minor (deferred): offsets renumbered after a daemon restart if a rotation had happened (Task 5 --follow treats disconnect/backwards offset as end); blocking file I/O and fork under std mutexes (runs/oldest) on runtime threads serializes script RPCs; no test for SIGKILL escalation of a TERM-ignoring group member, the 1 s drain with an out-of-group pipe holder, or 0700 of scripts/<ws>/; script tracing warnings lack workspace id/script name; script-trust/<project_id>.json not removed by project.remove; macOS unverified (pre_exec/fchdir, openat O_NOFOLLOW)
+- Task 4: minor (deferred): ScriptStatus.in_file lacks #[serde(default)]; script.logs max_bytes 0-3 can return an empty page with unchanged next_offset before a multi-byte char (clamp min 4 or keep CLI default); start clamped to oldest mid-character yields leading U+FFFD (start_offset tells the client)
+- Task 5: minor (deferred): --json rejection on script start/stop/trust/logs untested and README:75 JSON exception list not updated; --follow sleeps 500 ms even after a data page (catch-up ~2 min for 16 MiB; >128 KiB/s never catches up); first-call error reported as 'stopped following'; preview on stdout while answer from stdin (redirected stdout hides preview); no repeatable test for y/n/EOF terminal answers; README section heading in Japanese in an English README (brief-mandated) and Storage/Security tables omit scripts/ and script-trust/; 'Trust these 0 scripts' possible
+- Task 6: minor (deferred): PROGRESS real-Claude bullet should name the wrapper flags (--safe-mode --no-session-persistence --tools '') and say the permission relay was not exercised for real; README 'the TUI requires interactive terminal output' looser than code ('the TUI has no JSON mode'); PROGRESS heartbeat bullet omits the synthetic result step; verify logs lack cargo --version; 未コミットの変更 line ignores the two unrelated untracked files
+- Deferred after final review (recorded to PROGRESS): logs/start hold std mutexes across blocking I/O; no concurrency tests tick/run/remove/archive; heartbeat --json lacks auto-approve marker; heartbeat ls aborts on one non-NOT_FOUND agent.get error; one missing cwd makes all of dgc.json invalid; flake configured_path_wins_and_version_decides_tested; agents can trust/start scripts and create auto-approve schedules over the socket (pre-existing UID trust boundary; M6 planning)
+
+### コントローラの判断（Ruling）
+
+- Ruling: LocalClock: Send + Sync — shared via Arc across the scheduler loop — cost if wrong: none
+- Ruling: script.list carries project_name — Task 5 trust prompt names the project — cost if wrong: one extra field
+- Ruling: heartbeat target validated at schedule.create (exists, not archived → INVALID_PARAMS) — fail early instead of an immediate ended schedule — cost if wrong: none
+- Ruling: process.rs extensions default to existing provider behavior — providers are the safety-critical path — cost if wrong: none
+- Task 2: Ruling: a user-initiated agent.resume clears stop_when_idle (persisted) — plan intent is "dgc resume で再開できる" = the user can continue; "resume 後も同じ扱い" in the brief contradicted it (plan defect) — cost if wrong: a resumed scheduled agent keeps its provider process until archived, by user choice
+- Task 2: Ruling: cap schedule name, model, mode and cron at 256 bytes (INVALID_PARAMS) — keeps list/get under 1 MiB — cost if wrong: none
+- Task 2: Ruling: fold Minors 1 (do not self-stop while commands are waiting), 2 (persist next_run_at before launching → at-most-once for timed runs), 3 (ended schedules clear next_run_at), 7 (120 s boundary test, heartbeat on waiting_permission → agent_busy) — correctness and Task 3 display depend on them — cost if wrong: one extra store write per run
+- Task 2: Ruling: heartbeat auto-approve visibility — Task 3 looks up the target agent and shows auto-approve in heartbeat ls/show — the agent's mode was chosen and is shown at agent creation; no protocol field needed — cost if wrong: one agent.get per heartbeat row
+- Task 4: Ruling: fold Minors 1 (list shows in-memory runs absent from the current file), 2 (logs result carries start_offset so the CLI can mark skipped output), 7 (trust reports why the file could not be read instead of script_file_changed) — Task 5 builds on these RPC shapes — cost if wrong: two small result fields
+- Ruling: macOS verified by the CI macos job on the PR (cannot run locally); a CI failure there is fixed before merge — cost if wrong: one more fix commit after the PR opens
+- Ruling: final fix wave = README trust scope + PROGRESS decision; trust prompt requires a terminal stdout as well (preview cannot be hidden) with a testable prompt function (y/n/EOF tests); --follow skips the 500 ms wait after a full page; heartbeat create warns when the target agent is auto-approve; paused schedules show no next run; clock moving backwards recomputes next_run_at; info! audit lines (ids/names/states only) for script trust/start/stop/exit; tests for 0700 scripts/<ws>/ and SIGKILL of a TERM-ignoring group member; README archive-refusal note, storage/security tables, English heading, scheduled-agent prompt locations; PROGRESS real-Claude wrapper flags + unexercised permission relay + synthetic heartbeat step — each touches trust, approval visibility or recovery — cost if wrong: a larger fix diff to review

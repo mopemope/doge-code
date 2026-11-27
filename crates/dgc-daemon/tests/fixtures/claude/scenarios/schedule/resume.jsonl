@@ -1,0 +1,7 @@
+// Synthetic. Claude Code 2.1.332 stream-json shapes from the parent scenarios.
+{"expect_args":["--resume","schedule-session"]}
+{"expect":{"type":"control_request","request_id":"${ANY}","request":{"subtype":"initialize"}}}
+{"capture":"init","path":"/request_id"}
+{"send":{"type":"control_response","response":{"subtype":"success","request_id":"${init}","response":{}}}}
+{"expect":{"type":"user","message":{"content":[{"type":"text","text":"follow-up"}]}}}
+{"send":{"type":"result","subtype":"success","is_error":false}}

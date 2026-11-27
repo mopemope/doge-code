@@ -1004,6 +1004,7 @@ mod tests {
             model: None,
             mode: None,
             auto_approve: false,
+            stop_when_idle: false,
             provider_session_id: None,
             state,
             parent_id: None,

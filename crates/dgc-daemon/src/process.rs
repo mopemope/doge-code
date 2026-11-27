@@ -1,22 +1,24 @@
-//! Child process management for provider CLIs (Unix only).
+//! Child process groups for provider CLIs and workspace scripts (Unix only).
 //!
-//! Each child leads its own process group so that stopping an agent kills the
-//! whole tree (the CLI and anything it spawned), not just the direct child.
-//! Stdout is delivered line by line over a bounded channel; the last 4 KiB of
-//! stderr is kept for diagnostics. Neither stream's content is ever logged.
+//! Each child leads its own process group. Provider stdout is delivered line
+//! by line and stderr is kept as a bounded tail. Script output is returned as
+//! raw pipes for the script manager to drain.
 
 #[cfg(not(unix))]
 compile_error!("dgc-daemon process management supports Unix (Linux and macOS) only");
 
 use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -46,6 +48,70 @@ pub struct ChildSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+}
+
+// Per-spawn extensions of ChildSpec. Default preserves the provider spawn
+// settings and keeps existing ChildSpec literals source-compatible.
+struct ChildOptions<'a> {
+    env: &'a [(&'a str, OsString)],
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    cwd_fd: Option<File>,
+}
+
+impl Default for ChildOptions<'_> {
+    fn default() -> Self {
+        Self {
+            env: &[],
+            stdin: Stdio::piped(),
+            stdout: Stdio::piped(),
+            stderr: Stdio::piped(),
+            cwd_fd: None,
+        }
+    }
+}
+
+impl ChildSpec {
+    fn spawn_with(&self, options: ChildOptions<'_>) -> Result<ChildProcess> {
+        let mut command = Command::new(&self.program);
+        command
+            .args(&self.args)
+            .envs(options.env.iter().map(|(key, value)| (*key, value)))
+            .stdin(options.stdin)
+            .stdout(options.stdout)
+            .stderr(options.stderr)
+            .process_group(0)
+            .kill_on_drop(false);
+        if let Some(dir) = options.cwd_fd {
+            // SAFETY: This closure calls only async-signal-safe fchdir and
+            // captures an open directory descriptor retained until exec.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(dir.as_raw_fd()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                });
+            }
+        } else {
+            command.current_dir(&self.cwd);
+        }
+        let child = command.spawn().map_err(|source| ProcessError::Spawn {
+            program: self.program.clone(),
+            source,
+        })?;
+
+        // From here on ChildProcess owns the group, even if pipe setup fails.
+        let pgid = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok());
+        Ok(ChildProcess {
+            child,
+            pgid: pgid.unwrap_or(0),
+            armed: pgid.is_some_and(|pgid| pgid > 0),
+            status: None,
+        })
+    }
 }
 
 /// One item from the child's stdout.
@@ -108,30 +174,11 @@ impl ChildProcess {
     /// Spawn `spec` with piped stdio. Must be called inside a tokio runtime
     /// (the stdout/stderr reader tasks are spawned here).
     pub fn spawn(spec: ChildSpec) -> Result<(Self, ChildIo)> {
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(false);
-        let mut child = command.spawn().map_err(|source| ProcessError::Spawn {
-            program: spec.program.clone(),
-            source,
-        })?;
-
-        // From here on `process` owns the group, so an early return kills it.
-        let pgid = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok());
-        let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
-        let process = Self {
-            child,
-            pgid: pgid.unwrap_or(0),
-            armed: pgid.is_some_and(|pgid| pgid > 0),
-            status: None,
-        };
-        let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
+        let mut process = spec.spawn_with(ChildOptions::default())?;
+        let child = &mut process.child;
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
             return Err(ProcessError::MissingPipe("stdio"));
         };
 
@@ -148,6 +195,27 @@ impl ChildProcess {
                 stderr_tail,
             },
         ))
+    }
+
+    /// Spawn with null stdin and return the two raw output pipes. The caller
+    /// drains them and selects the log destination in the parent.
+    pub(crate) fn spawn_raw(
+        spec: ChildSpec,
+        env: &[(&str, OsString)],
+        cwd_fd: File,
+    ) -> Result<(Self, ChildStdout, ChildStderr)> {
+        let mut process = spec.spawn_with(ChildOptions {
+            env,
+            stdin: Stdio::null(),
+            cwd_fd: Some(cwd_fd),
+            ..ChildOptions::default()
+        })?;
+        let (Some(stdout), Some(stderr)) =
+            (process.child.stdout.take(), process.child.stderr.take())
+        else {
+            return Err(ProcessError::MissingPipe("output"));
+        };
+        Ok((process, stdout, stderr))
     }
 
     /// The child's pid (also its process-group id), if it has not been reaped.

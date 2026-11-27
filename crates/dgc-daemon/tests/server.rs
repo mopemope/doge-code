@@ -1074,3 +1074,181 @@ async fn wait_for_socket_reports_a_failed_daemon_start() {
     std::fs::write(&paths.socket, "regular file").expect("create conflicting file");
     start_in(dir).await;
 }
+
+#[tokio::test]
+async fn old_protocol_hello_is_refused() {
+    let daemon = start().await;
+    let mut client = Client::connect(&daemon.paths.socket).await;
+    let response = client
+        .request(1, "hello", json!({"protocol_version": 2, "client": "test"}))
+        .await;
+    assert_eq!(error_code(&response), i64::from(rpc::VERSION_MISMATCH));
+    client.assert_closed_silently().await;
+    daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn schedule_rpcs_round_trip() {
+    let (daemon, mut client, ws) = start_agents(include_str!(
+        "fixtures/claude/scenarios/schedule/complete.jsonl"
+    ))
+    .await;
+    let created = client
+        .call_ok(
+            "schedule.create",
+            json!({
+                "name": "Nightly",
+                "target": {"kind": "new_agent", "workspace_id": ws, "provider": "claude"},
+                "prompt": "hello",
+                "cron": "@daily"
+            }),
+        )
+        .await;
+    let params = json!({"id": created["id"]});
+    assert!(
+        created["id"]
+            .as_str()
+            .expect("schedule ID")
+            .starts_with("sch_")
+    );
+    assert_eq!(created["state"], "active");
+    assert_eq!(
+        client.call_ok("schedule.get", params.clone()).await,
+        created
+    );
+    let listed = client
+        .call_ok("schedule.list", json!({"kind": "new_agent"}))
+        .await;
+    let entries = listed["schedules"].as_array().expect("schedule entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], created["id"]);
+    assert_eq!(entries[0]["target"], created["target"]);
+    assert!(entries[0].get("prompt").is_none());
+    assert_eq!(
+        client
+            .call_ok("schedule.list", json!({"kind": "agent"}))
+            .await["schedules"],
+        json!([])
+    );
+    let (invalid_kind, _) = client
+        .call_collect("schedule.list", json!({"kind": "invalid"}))
+        .await;
+    assert_eq!(error_code(&invalid_kind), i64::from(rpc::INVALID_PARAMS));
+
+    assert_eq!(
+        client.call_ok("schedule.pause", params.clone()).await["state"],
+        "paused"
+    );
+    let resumed = client.call_ok("schedule.resume", params.clone()).await;
+    assert_eq!(resumed["state"], "active");
+
+    let run = client.call_ok("schedule.run", params.clone()).await;
+    assert_eq!(run["outcome"]["kind"], "started");
+    let after = client.call_ok("schedule.get", params.clone()).await;
+    assert_eq!(after["runs"], 1);
+    assert_eq!(after["next_run_at"], resumed["next_run_at"]);
+    assert_eq!(after["recent_runs"], json!([run]));
+
+    assert_eq!(
+        client.call_ok("schedule.remove", params.clone()).await,
+        json!({})
+    );
+    assert_eq!(
+        client.call_ok("schedule.list", json!({})).await,
+        json!({"schedules": []})
+    );
+    let (missing, _) = client.call_collect("schedule.get", params).await;
+    assert_eq!(error_code(&missing), i64::from(rpc::NOT_FOUND));
+    daemon.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn script_rpcs_round_trip() {
+    let daemon = start().await;
+    let mut client = Client::connect(&daemon.paths.socket).await;
+    client.hello().await;
+
+    let dir = daemon._dir.path().join("script-project");
+    std::fs::create_dir(&dir).expect("project directory");
+    let project = client
+        .call_ok(
+            "project.add",
+            json!({"path": std::fs::canonicalize(&dir).expect("path")}),
+        )
+        .await;
+    let workspace = client
+        .call_ok(
+            "workspace.create",
+            json!({"project_id":project["id"], "isolation":"local"}),
+        )
+        .await;
+    let ws = json!({"workspace_id":workspace["id"]});
+    let demo = json!({"workspace_id":workspace["id"], "name":"demo"});
+    let body =
+        r#"{"version":1,"scripts":{"demo":{"command":"printf abc; read -r line; exec sleep 60"}}}"#;
+
+    let missing = client.call_ok("script.list", ws.clone()).await;
+    assert_eq!(missing["file"], "missing");
+    assert_eq!(missing["project_name"], "script-project");
+    std::fs::write(dir.join("dgc.json"), b"invalid").expect("invalid file");
+    let invalid = client.call_ok("script.list", ws.clone()).await;
+    assert_eq!(invalid["file"], "invalid");
+    assert!(invalid["error"].is_string());
+    std::fs::write(dir.join("dgc.json"), body).expect("script file");
+    let listed = client.call_ok("script.list", ws.clone()).await;
+    assert_eq!(listed["file"], "ok");
+    assert_eq!(listed["content"], body);
+    assert_eq!(listed["trust"], "untrusted");
+    assert_eq!(listed["scripts"][0]["state"], "not_running");
+
+    let (refused, _) = client.call_collect("script.start", demo.clone()).await;
+    assert_eq!(error_code(&refused), i64::from(rpc::INVALID_STATE));
+    assert_eq!(refused["error"]["message"], "script_untrusted");
+    let (changed, _) = client
+        .call_collect(
+            "script.trust",
+            json!({"workspace_id":workspace["id"], "expected_content":"stale"}),
+        )
+        .await;
+    assert_eq!(changed["error"]["message"], "script_file_changed");
+    assert_eq!(
+        client
+            .call_ok(
+                "script.trust",
+                json!({"workspace_id":workspace["id"], "expected_content":body})
+            )
+            .await,
+        json!({})
+    );
+    assert_eq!(
+        client.call_ok("script.start", demo.clone()).await,
+        json!({})
+    );
+    let running = client.call_ok("script.list", ws.clone()).await;
+    assert_eq!(running["trust"], "trusted");
+    assert_eq!(running["scripts"][0]["state"], "running");
+    let page = timeout(WAIT, async {
+        loop {
+            let page = client.call_ok("script.logs", json!({"workspace_id":workspace["id"], "name":"demo", "offset": 1, "max_bytes":2})).await;
+            if page["data"] == "bc" {
+                break page;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("log data");
+    assert_eq!(
+        page,
+        json!({"data":"bc", "start_offset":1, "next_offset":3, "running":true})
+    );
+    assert_eq!(running["scripts"][0]["in_file"], true);
+    assert_eq!(client.call_ok("script.stop", demo.clone()).await, json!({}));
+    let stopped = client.call_ok("script.list", ws.clone()).await;
+    assert_eq!(stopped["scripts"][0]["state"], "exited");
+
+    client.call_ok("script.start", demo).await;
+    let running = client.call_ok("script.list", ws).await;
+    let pid = running["scripts"][0]["pid"].as_i64().expect("PID") as i32;
+    daemon.stop().await.expect("clean stop");
+    // SAFETY: signal 0 only tests the PID's existence.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+}

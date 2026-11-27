@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dgc_daemon::agent::{AgentError, AgentManager, ProviderTimeouts};
+use dgc_daemon::agent::{AgentError, AgentManager, CreateOptions, ProviderTimeouts};
 use dgc_daemon::config::DaemonConfig;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::{
@@ -919,6 +919,7 @@ async fn restart_recovery_marks_running_as_stopped() {
             model: None,
             mode: None,
             auto_approve: false,
+            stop_when_idle: false,
             provider_session_id: Some("sess".to_owned()),
             state,
             parent_id: None,
@@ -1308,6 +1309,53 @@ async fn buffered_turn_completed_is_applied_before_a_later_command() {
 }
 
 #[tokio::test]
+async fn scheduled_agent_handles_a_waiting_send_before_stopping() {
+    let mut h = Harness::new(DEFAULT);
+    let agent = h
+        .manager
+        .create_with(
+            AgentCreateParams {
+                workspace_id: h.workspace.id.clone(),
+                title: "scheduled agent".into(),
+                provider: Some(ProviderKind::Codex),
+                profile: None,
+                model: None,
+                mode: None,
+                initial_prompt: "scheduled turn".into(),
+                labels: BTreeMap::new(),
+                parent_id: None,
+            },
+            CreateOptions {
+                stop_when_idle: true,
+            },
+        )
+        .await
+        .expect("create");
+    let mut session = h.next_session().await;
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("scheduled turn".into())
+    );
+    h.wait_state(&agent.id, AgentState::Running).await;
+
+    // In this current-thread runtime both messages are buffered before
+    // the actor next runs. It handles TurnCompleted first.
+    session.emit(turn_completed()).await;
+    assert_eq!(
+        h.send(&agent.id, "follow-up", SendBehavior::Queue).await,
+        SendOutcome::Sent
+    );
+    assert_eq!(
+        session.next_call().await,
+        Call::SendUser("follow-up".into())
+    );
+
+    session.emit(turn_completed()).await;
+    assert_eq!(session.next_call().await, Call::Shutdown);
+    h.wait_state(&agent.id, AgentState::Stopped).await;
+}
+
+#[tokio::test]
 async fn a_huge_prompt_is_stored_in_bounded_chunks() {
     let mut h = Harness::new(DEFAULT);
     let prompt = "p".repeat(2 * 1024 * 1024);
@@ -1625,6 +1673,7 @@ fn stored_handoff_source(h: &Harness, provider: ProviderKind, events: Vec<EventK
             model: Some("source-only-model".to_owned()),
             mode: Some("source-only-mode".to_owned()),
             auto_approve: false,
+            stop_when_idle: false,
             provider_session_id: Some("source-only-session".to_owned()),
             state: AgentState::Stopped,
             parent_id: None,

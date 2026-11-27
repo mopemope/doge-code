@@ -6,17 +6,22 @@ use std::sync::Arc;
 use dgc_protocol::methods::{
     AgentCreateParams, AgentEventsParams, AgentHandoffParams, AgentIdParams, AgentListParams,
     AgentSendParams, PermissionListParams, PermissionRespondParams, ProfileListResult,
-    ProjectAddParams, ProjectRemoveParams, SubscribeParams, UnsubscribeParams,
-    WorkspaceArchiveParams, WorkspaceCreateParams, WorkspaceListParams,
+    ProjectAddParams, ProjectRemoveParams, ScheduleCreateParams, ScheduleIdParams,
+    ScheduleListParams, ScheduleListResult, ScriptListParams, ScriptLogsParams, ScriptNameParams,
+    ScriptTrustParams, SubscribeParams, UnsubscribeParams, WorkspaceArchiveParams,
+    WorkspaceCreateParams, WorkspaceListParams,
 };
 use dgc_protocol::model::AgentState;
 use dgc_protocol::rpc::{INTERNAL, INVALID_PARAMS, RpcError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use crate::agent::{AgentError, AgentManager};
 use crate::config::DaemonConfig;
+use crate::schedule::{ScheduleError, ScheduleManager};
+use crate::script::{ScriptError, ScriptManager};
 use crate::server::ConnCtx;
 use crate::workspace::WorkspaceManager;
 
@@ -68,14 +73,18 @@ impl From<AgentError> for RpcError {
     }
 }
 
-/// Archive the workspace's agents that are not archived yet, then the
-/// workspace itself.
+/// Stop scripts, then archive the workspace's agents and the workspace itself.
 pub async fn workspace_archive(
     manager: &WorkspaceManager,
     agents: &AgentManager,
+    scripts: &ScriptManager,
     params: Value,
 ) -> Result<Value, RpcError> {
     let params: WorkspaceArchiveParams = parse(params)?;
+    // The dispatcher already holds the schedule gate. No script operation
+    // takes that gate, and script starts stay excluded through the archive.
+    let _gate = scripts.exclude_starts().await;
+    scripts.stop_workspace(&params.id).await;
     manager.check_archive(&params.id, params.force).await?;
     for agent in agents.list()? {
         if agent.workspace_id != params.id || agent.state == AgentState::Archived {
@@ -88,6 +97,114 @@ pub async fn workspace_archive(
         }
     }
     encode(&manager.archive_workspace(&params.id, params.force).await?)
+}
+
+impl From<ScheduleError> for RpcError {
+    fn from(err: ScheduleError) -> Self {
+        RpcError::new(err.code(), err.to_string())
+    }
+}
+
+pub async fn schedule_create(
+    schedules: &ScheduleManager,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ScheduleCreateParams = parse(params)?;
+    encode(&schedules.create(params).await?)
+}
+
+pub fn schedule_list(schedules: &ScheduleManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScheduleListParams = parse(params)?;
+    encode(&ScheduleListResult {
+        schedules: schedules.list(params.kind)?,
+    })
+}
+
+pub fn schedule_get(schedules: &ScheduleManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.get(&params.id)?)
+}
+
+pub async fn schedule_pause(schedules: &ScheduleManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.pause(&params.id).await?)
+}
+
+pub async fn schedule_resume(
+    schedules: &ScheduleManager,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.resume(&params.id).await?)
+}
+
+pub async fn schedule_run(
+    schedules: &ScheduleManager,
+    params: Value,
+    shutdown: watch::Receiver<bool>,
+) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.run(params.id, shutdown).await?)
+}
+
+pub async fn schedule_remove(
+    schedules: &ScheduleManager,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    schedules.remove(&params.id).await?;
+    Ok(json!({}))
+}
+
+impl From<ScriptError> for RpcError {
+    fn from(err: ScriptError) -> Self {
+        RpcError::new(err.code(), err.to_string())
+    }
+}
+
+// Script parameter errors must not echo malformed command or content values.
+fn parse_script<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
+    serde_json::from_value(params)
+        .map_err(|_| RpcError::new(INVALID_PARAMS, "invalid script params"))
+}
+
+pub async fn script_list(scripts: &ScriptManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScriptListParams = parse_script(params)?;
+    encode(&scripts.list(&params.workspace_id).await?)
+}
+
+pub async fn script_trust(scripts: &ScriptManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScriptTrustParams = parse_script(params)?;
+    scripts
+        .trust(&params.workspace_id, &params.expected_content)
+        .await?;
+    Ok(json!({}))
+}
+
+pub async fn script_start(scripts: &ScriptManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScriptNameParams = parse_script(params)?;
+    scripts.start(&params.workspace_id, &params.name).await?;
+    Ok(json!({}))
+}
+
+pub async fn script_stop(scripts: &ScriptManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScriptNameParams = parse_script(params)?;
+    scripts.stop(&params.workspace_id, &params.name).await?;
+    Ok(json!({}))
+}
+
+pub async fn script_logs(scripts: &ScriptManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScriptLogsParams = parse_script(params)?;
+    encode(
+        &scripts
+            .logs(
+                &params.workspace_id,
+                &params.name,
+                params.offset,
+                params.max_bytes,
+            )
+            .await?,
+    )
 }
 
 pub fn profile_list(config: &DaemonConfig) -> Result<Value, RpcError> {
@@ -207,7 +324,9 @@ mod tests {
     #[tokio::test]
     async fn malformed_params_are_invalid_params() {
         let tmp = tempdir().expect("tempdir");
-        let m = manager(tmp.path());
+        let m = Arc::new(manager(tmp.path()));
+        let scripts =
+            ScriptManager::new(&tmp.path().join("state"), Arc::clone(&m)).expect("scripts");
         for result in [
             project_add(&m, json!({})).await,
             project_add(&m, json!({"path": 5})).await,
@@ -215,7 +334,7 @@ mod tests {
             project_remove(&m, json!({"id": "not-an-id"})).await,
             workspace_create(&m, json!({"project_id": "x"})).await,
             workspace_list(&m, json!({"project_id": 3})).await,
-            workspace_archive(&m, &agents(tmp.path()), json!([])).await,
+            workspace_archive(&m, &agents(tmp.path()), &scripts, json!([])).await,
         ] {
             assert_eq!(result.expect_err("must fail").code, INVALID_PARAMS);
         }

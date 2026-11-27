@@ -6,6 +6,8 @@ pub mod handoff;
 pub mod permit;
 pub mod profile;
 pub mod project;
+pub mod schedule;
+pub mod script;
 pub mod workspace;
 
 use std::error::Error;
