@@ -18,11 +18,11 @@
 
 ## 現在の作業
 
-- タスク: M5 の PR 作成とマージ待ち、その後 M6（エージェント向け MCP）の計画作成
-- 状態: M5 は PR #188（develop 向け）でレビュー待ち。CI は macOS を含め全ジョブ通過（65bfe6a）
-- 済んだこと: M5 Task 6 の偽プロバイダ、実 Claude Haiku、固定ツールチェーンでの受け入れ検証と M5 最終レビューの修正。
-- 次の一手: PR #188 のマージ後に M6（エージェント向け MCP）の計画を作成する。M6 では、同じ UID のエージェントがソケット経由でスクリプトの信頼・起動や自動承認スケジュールの作成をできる点を扱う（M5 最終レビューの保留事項）
-- 未コミットの変更: なし
+- タスク: M6 Task 1（親子の規則と MCP の付与）
+- 状態: 計画作成済み（`docs/superpowers/plans/2026-11-27-orchestrator-m6-mcp-subagents.md`）
+- 済んだこと: M0〜M5 マージ済み（#183〜#188）。M6 のユーザー決定（MCP はサブエージェント操作のみ、子のモードは親より緩くしない、MCP は明示したエージェントだけ、子は親と同じワークスペース）を反映した計画を作成。
+- 次の一手: Task 1 から順に実装する（実装は Codex gpt-6.2-sol xhigh、レビューは Claude）。
+- 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
 
@@ -33,8 +33,8 @@
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
 | M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
-| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188） | m5-schedules-scripts |
-| M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188 マージ済み） | m5-schedules-scripts |
+| M6 | エージェント向け MCP（サブエージェント） | 作業中 | m6-mcp-subagents |
 
 ## タスク
 
@@ -105,8 +105,18 @@
 | 6 | M5 受け入れ | 完了 | `docs(orchestrator): complete M5 acceptance` |
 | 最終修正 | スクリプトの信頼確認と監査、スケジュールの表示と時計補正 | 完了 | `fix: tighten script trust wording and prompts, and harden schedules` |
 
+### M6
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | 親子の規則と MCP の付与（デーモン） | 未着手 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
+| 2 | `dgc mcp`（MCP サーバー） | 未着手 | `feat(cli): serve sub-agent tools over MCP` |
+| 3 | CLI と TUI での表示と有効化 | 未着手 | `feat(cli): enable MCP per agent and show sub-agent trees` |
+| 4 | M6 受け入れ | 未着手 | `docs(orchestrator): complete M6 acceptance` |
+
 ## 決定事項
 
+- 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
 
 - 2026-11-27 (M5 最終修正): Script trust covers only the exact bytes of `dgc.json`. An agent with
