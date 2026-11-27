@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
+use crate::ids::{AgentId, PermissionId, ProjectId, ScheduleId, WorkspaceId};
 use crate::{MAX_PERMISSION_RAW_BYTES, truncate_summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -127,12 +127,82 @@ pub struct Agent {
     pub model: Option<String>,
     pub mode: Option<String>,
     pub auto_approve: bool,
+    #[serde(default)]
+    pub stop_when_idle: bool,
     pub provider_session_id: Option<String>,
     pub state: AgentState,
     pub parent_id: Option<AgentId>,
     pub labels: BTreeMap<String, String>,
     pub created_at: String,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: ScheduleId,
+    pub name: Option<String>,
+    pub target: ScheduleTarget,
+    pub prompt: String,
+    pub cron: String,
+    pub state: ScheduleState,
+    pub end_reason: Option<String>,
+    pub max_runs: Option<u32>,
+    pub runs: u32,
+    pub expires_at: Option<i64>,
+    pub next_run_at: Option<i64>,
+    pub last_agent_id: Option<AgentId>,
+    /// Oldest first.
+    pub recent_runs: Vec<ScheduleRun>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleTarget {
+    NewAgent {
+        workspace_id: WorkspaceId,
+        provider: ProviderKind,
+        model: Option<String>,
+        mode: Option<String>,
+        auto_approve: bool,
+    },
+    Agent {
+        agent_id: AgentId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleState {
+    Active,
+    Paused,
+    Ended,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleRun {
+    pub scheduled_for: i64,
+    pub at: i64,
+    pub outcome: RunOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunOutcome {
+    Started {
+        agent_id: AgentId,
+    },
+    Sent {
+        agent_id: AgentId,
+        outcome: SendOutcome,
+    },
+    Skipped {
+        reason: String,
+    },
+    Missed,
+    Failed {
+        error_kind: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,7 +329,7 @@ mod tests {
 
     #[test]
     fn agent_roundtrip_with_optional_fields_absent() {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "id": AgentId::generate(),
             "workspace_id": WorkspaceId::generate(),
             "title": "t",
@@ -276,6 +346,11 @@ mod tests {
         });
         let agent: Agent = serde_json::from_value(json.clone()).expect("deserialize");
         assert_eq!(agent.labels.get("k").map(String::as_str), Some("v"));
+        assert!(
+            !agent.stop_when_idle,
+            "older agent records default to false"
+        );
+        json["stop_when_idle"] = serde_json::json!(false);
         assert_eq!(serde_json::to_value(&agent).unwrap(), json);
     }
 }

@@ -1,4 +1,4 @@
-//! JSON entity store: one file per entity under `<state>/{projects,workspaces,agents}/`.
+//! JSON entity store: one file per entity under `<state>/{projects,workspaces,agents,schedules}/`.
 //!
 //! `list_*` skips (and warns about) unreadable entries; `get_*` reports them.
 //! Files hold `{"version":1,"data":{...}}`. Writes are atomic (temp file in the
@@ -11,8 +11,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
-use dgc_protocol::model::{Agent, Project, Workspace};
+use dgc_protocol::ids::{AgentId, ProjectId, ScheduleId, WorkspaceId};
+use dgc_protocol::model::{Agent, Project, Schedule, Workspace};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -24,6 +24,7 @@ pub const STORE_VERSION: u32 = 1;
 const PROJECTS_DIR: &str = "projects";
 const WORKSPACES_DIR: &str = "workspaces";
 const AGENTS_DIR: &str = "agents";
+const SCHEDULES_DIR: &str = "schedules";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -42,7 +43,7 @@ pub enum StoreError {
 
 impl StoreError {
     /// Short, content-free label for logs.
-    fn kind(&self) -> &'static str {
+    pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Io { .. } => "io",
             Self::Symlink { .. } => "symlink",
@@ -81,7 +82,7 @@ impl Store {
     /// with mode 0700. Symlinked or foreign-owned directories are refused.
     pub fn open(state_dir: &Path) -> Result<Self, StoreError> {
         ensure_private_dir(state_dir).map_err(io_err(state_dir))?;
-        for sub in [PROJECTS_DIR, WORKSPACES_DIR, AGENTS_DIR] {
+        for sub in [PROJECTS_DIR, WORKSPACES_DIR, AGENTS_DIR, SCHEDULES_DIR] {
             let dir = state_dir.join(sub);
             ensure_private_dir(&dir).map_err(io_err(&dir))?;
         }
@@ -191,6 +192,19 @@ impl Store {
     /// Returns whether a file was removed.
     pub fn remove_agent(&self, id: &AgentId) -> Result<bool, StoreError> {
         self.remove(AGENTS_DIR, id.as_str())
+    }
+
+    pub fn put_schedule(&self, schedule: &Schedule) -> Result<(), StoreError> {
+        self.put(SCHEDULES_DIR, schedule.id.as_str(), schedule)
+    }
+    pub fn get_schedule(&self, id: &ScheduleId) -> Result<Option<Schedule>, StoreError> {
+        self.get(SCHEDULES_DIR, id.as_str())
+    }
+    pub fn list_schedules(&self) -> Result<Vec<Schedule>, StoreError> {
+        self.list(SCHEDULES_DIR)
+    }
+    pub fn remove_schedule(&self, id: &ScheduleId) -> Result<bool, StoreError> {
+        self.remove(SCHEDULES_DIR, id.as_str())
     }
 }
 

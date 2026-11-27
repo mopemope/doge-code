@@ -605,7 +605,7 @@ impl WorkspaceManager {
         })
     }
 
-    fn get_workspace(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {
+    pub(crate) fn get_workspace(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {
         self.store
             .get_workspace(id)
             .map_err(store_error)?

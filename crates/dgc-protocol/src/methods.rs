@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AgentId, PermissionId, ProjectId, WorkspaceId};
-use crate::model::{Decision, Isolation, ProviderKind, SendBehavior, Workspace};
+use crate::ids::{AgentId, PermissionId, ProjectId, ScheduleId, WorkspaceId};
+use crate::model::{
+    Decision, Isolation, ProviderKind, ScheduleState, ScheduleTarget, SendBehavior, Workspace,
+};
 
 pub const HELLO: &str = "hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
@@ -28,6 +30,13 @@ pub const AGENT_INTERRUPT: &str = "agent.interrupt";
 pub const AGENT_ARCHIVE: &str = "agent.archive";
 pub const AGENT_RESUME: &str = "agent.resume";
 pub const AGENT_EVENTS: &str = "agent.events";
+pub const SCHEDULE_CREATE: &str = "schedule.create";
+pub const SCHEDULE_LIST: &str = "schedule.list";
+pub const SCHEDULE_GET: &str = "schedule.get";
+pub const SCHEDULE_PAUSE: &str = "schedule.pause";
+pub const SCHEDULE_RESUME: &str = "schedule.resume";
+pub const SCHEDULE_RUN: &str = "schedule.run";
+pub const SCHEDULE_REMOVE: &str = "schedule.remove";
 pub const PERMISSION_LIST: &str = "permission.list";
 pub const PERMISSION_RESPOND: &str = "permission.respond";
 pub const SUBSCRIBE: &str = "subscribe";
@@ -110,6 +119,66 @@ pub struct WorkspaceCreateParams {
     pub base_ref: Option<String>,
     #[serde(default)]
     pub slug: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleCreateParams {
+    pub name: Option<String>,
+    pub target: ScheduleTargetParams,
+    pub prompt: String,
+    pub cron: String,
+    pub max_runs: Option<u32>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleTargetParams {
+    NewAgent {
+        workspace_id: WorkspaceId,
+        provider: Option<ProviderKind>,
+        profile: Option<String>,
+        model: Option<String>,
+        mode: Option<String>,
+    },
+    Agent {
+        agent_id: AgentId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleKind {
+    NewAgent,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScheduleListParams {
+    pub kind: Option<ScheduleKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleListResult {
+    pub schedules: Vec<ScheduleListEntry>,
+}
+
+/// Listing omits prompt bodies and history, which can be fetched with `schedule.get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleListEntry {
+    pub id: ScheduleId,
+    pub name: Option<String>,
+    pub target: ScheduleTarget,
+    pub cron: String,
+    pub state: ScheduleState,
+    pub next_run_at: Option<i64>,
+    pub max_runs: Option<u32>,
+    pub runs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleIdParams {
+    pub id: ScheduleId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

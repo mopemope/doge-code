@@ -6,7 +6,8 @@ use std::sync::Arc;
 use dgc_protocol::methods::{
     AgentCreateParams, AgentEventsParams, AgentHandoffParams, AgentIdParams, AgentListParams,
     AgentSendParams, PermissionListParams, PermissionRespondParams, ProfileListResult,
-    ProjectAddParams, ProjectRemoveParams, SubscribeParams, UnsubscribeParams,
+    ProjectAddParams, ProjectRemoveParams, ScheduleCreateParams, ScheduleIdParams,
+    ScheduleListParams, ScheduleListResult, SubscribeParams, UnsubscribeParams,
     WorkspaceArchiveParams, WorkspaceCreateParams, WorkspaceListParams,
 };
 use dgc_protocol::model::AgentState;
@@ -14,9 +15,11 @@ use dgc_protocol::rpc::{INTERNAL, INVALID_PARAMS, RpcError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use crate::agent::{AgentError, AgentManager};
 use crate::config::DaemonConfig;
+use crate::schedule::{ScheduleError, ScheduleManager};
 use crate::server::ConnCtx;
 use crate::workspace::WorkspaceManager;
 
@@ -88,6 +91,63 @@ pub async fn workspace_archive(
         }
     }
     encode(&manager.archive_workspace(&params.id, params.force).await?)
+}
+
+impl From<ScheduleError> for RpcError {
+    fn from(err: ScheduleError) -> Self {
+        RpcError::new(err.code(), err.to_string())
+    }
+}
+
+pub async fn schedule_create(
+    schedules: &ScheduleManager,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ScheduleCreateParams = parse(params)?;
+    encode(&schedules.create(params).await?)
+}
+
+pub fn schedule_list(schedules: &ScheduleManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScheduleListParams = parse(params)?;
+    encode(&ScheduleListResult {
+        schedules: schedules.list(params.kind)?,
+    })
+}
+
+pub fn schedule_get(schedules: &ScheduleManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.get(&params.id)?)
+}
+
+pub async fn schedule_pause(schedules: &ScheduleManager, params: Value) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.pause(&params.id).await?)
+}
+
+pub async fn schedule_resume(
+    schedules: &ScheduleManager,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.resume(&params.id).await?)
+}
+
+pub async fn schedule_run(
+    schedules: &ScheduleManager,
+    params: Value,
+    shutdown: watch::Receiver<bool>,
+) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    encode(&schedules.run(params.id, shutdown).await?)
+}
+
+pub async fn schedule_remove(
+    schedules: &ScheduleManager,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ScheduleIdParams = parse(params)?;
+    schedules.remove(&params.id).await?;
+    Ok(json!({}))
 }
 
 pub fn profile_list(config: &DaemonConfig) -> Result<Value, RpcError> {

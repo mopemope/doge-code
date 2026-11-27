@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M5 Task 2（スケジュールと heartbeat）
+- タスク: M5 Task 3（スケジュールと heartbeat の CLI）
 - 状態: 未着手
-- 済んだこと: Task 1 の cron 解析、次回発火時刻の探索、ローカル時刻変換を実装。Linux の検証結果は「検証記録」を参照。
-- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 2 に従い、`Arc<dyn LocalClock>` を使うデーモン側のスケジューラーを実装する。
+- 済んだこと: Task 2 のデーモン側スケジューラー、heartbeat、永続化、プロトコル v3 の RPC を実装。
+- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 3 に従い、CLI と README を追加する。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -97,7 +97,7 @@
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
 | 1 | cron とローカル時刻 | 完了 | `feat(daemon): parse cron expressions in local time` |
-| 2 | スケジュールと heartbeat（デーモン） | 未着手 | `feat(daemon): run schedules and heartbeats` |
+| 2 | スケジュールと heartbeat（デーモン） | 完了 | `feat(daemon): run schedules and heartbeats` |
 | 3 | スケジュールと heartbeat の CLI | 未着手 | `feat(cli): manage schedules and heartbeats` |
 | 4 | ワークスペーススクリプト（デーモン） | 未着手 | `feat(daemon): run trusted workspace scripts from dgc.json` |
 | 5 | スクリプトの CLI | 未着手 | `feat(cli): trust, run and follow workspace scripts` |
@@ -106,6 +106,17 @@
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 Task 2): 新しい RPC と `stop_when_idle` を追加し、プロトコルを v3 に更新する。v2 の hello は `VERSION_MISMATCH`。
+  `schedule.list` は `ScheduleListResult` を返す。本文と履歴は `schedule.get` で取得する。`pause` と `resume` は更新後の `Schedule`、`remove` は空オブジェクトを返す。
+- 2026-11-27 (M5 Task 2): scheduled agent は初回プロンプトの送信に成功してから実行回数に加える。
+  `stop_when_idle` は再開後も有効で、idle かつ待ち行列と権限要求が空ならプロバイダを閉じて stopped にする。中断で idle に戻る場合も同じ。
+  heartbeat の idle 判定はアクターでも行う。停止時はスケジューラーと進行中の手動実行が終わってからエージェントを止める。
+- 2026-11-27 (M5 Task 2): 作成時にプロファイルを展開して設定を保存する。モードを省略した場合は Claude を `manual`、Codex を `workspace-write` に固定する。
+  対象のプロバイダが利用できない場合も登録でき、発火時は失敗種別を記録する。heartbeat は対象が存在し、archived 以外であることを登録時に確認する。
+- 2026-11-27 (M5 Task 2): 次回時刻は Task 1 の `LocalClock` と `CronExpr::next_after` で求める。DST で飛ぶ分は発火せず、繰り返す分は `mktime` が選ぶ一方だけで発火する。
+  停止中などに保存時刻を 120 秒より多く過ぎた場合は `missed` を 1 件記録し、その時点から次回時刻を求める。
+  pause は自動実行を止める。手動実行は paused でも可能で、実行回数が上限に達した場合も既存の `next_run_at` を保持する。
 
 - 2026-11-27 (M5 Task 1): `LocalClock` は `Send + Sync`。検索上限はローカル時刻の 5 暦年後の同じ分とし、2 月 29 日の上限は平年の 2 月末に丸める。
   Vixie cron と同様に、日または曜日のフィールドが `*` で始まる場合は両方の一致を要求する。どちらも `*` で始まらない場合は、日か曜日のいずれかの一致で発火する。
@@ -641,6 +652,13 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 2（Linux、Rust 1.99.0）
+  - RED は新しいスケジュール型・Store API の未実装でコンパイルエラー、`schedule.create` はメソッド未登録、v2 の hello は誤って成功。
+  - `bash scripts/verify.sh test schedule` は 21 件 PASS。`cargo test --locked -p dgc-daemon --test schedule --test store --test server --test agent_manager` は 117 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 681 件）、`bash scripts/verify.sh guidance`（Python 40 件）、
+    `python3 -I scripts/check-sensitive-logging.py` は PASS。初回の全体テストでは既存の偽プロバイダのバージョン検出が 1 回失敗し、単独と全体の再実行で PASS。
+  - 実プロバイダと macOS は未検証。
 
 - 2026-11-27 M5 Task 1 レビュー修正（Linux、Rust 1.99.0）
   - `bash scripts/verify.sh test schedule::` は RED で日・曜日の `*/2` の2件が FAIL、既存10件が PASS。修正後は12件が PASS。

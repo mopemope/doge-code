@@ -66,10 +66,11 @@ Do not weaken these.
   the daemon's environment (an on-demand daemon inherits the environment of the
   command that started it); client environments are never sent over the socket.
 - `tracing` (and so `daemon.log`) never carries prompt, agent or permission
-  text: IDs, states, error kinds only. That text is stored only in the agent's
-  0600 state files (`events.jsonl`, `queue.json`, and the agent record, whose
-  title defaults to the prompt's first line). `check-sensitive-logging.py`
-  enforces this for every `crates/*/src` directory.
+  text: IDs, states, error kinds only. Agent and permission text is stored in
+  the agent's 0600 state files (`events.jsonl`, `queue.json`, and the agent
+  record, whose title defaults to the prompt's first line). Schedule prompts
+  and names are also stored in 0600 `<state>/schedules/<id>.json` records.
+  `check-sensitive-logging.py` enforces this for every `crates/*/src` directory.
 - Worktree deletion only for dgc-owned workspaces whose path is inside the
   managed worktree directory, with the archive safety check (no uncommitted or
   untracked work, no commits outside the base) unless `--force`; destructive

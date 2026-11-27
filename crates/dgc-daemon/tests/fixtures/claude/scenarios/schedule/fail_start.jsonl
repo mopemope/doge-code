@@ -1,0 +1,3 @@
+// Synthetic provider exit during initialization.
+{"expect":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"exit":3}
