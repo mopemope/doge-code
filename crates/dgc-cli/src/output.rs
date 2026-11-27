@@ -268,6 +268,10 @@ fn optional_local_time(time: Option<i64>) -> String {
     time.map_or_else(|| "-".to_owned(), format_local)
 }
 
+fn schedule_next_run(state: ScheduleState, time: Option<i64>) -> String {
+    optional_local_time(time.filter(|_| state != ScheduleState::Paused))
+}
+
 /// `<id>  <name>  <cron>  <state>  <next run>  <runs/max>  <target>`
 pub fn schedule_line(entry: &ScheduleListEntry, auto_approve: bool) -> String {
     format!(
@@ -276,7 +280,7 @@ pub fn schedule_line(entry: &ScheduleListEntry, auto_approve: bool) -> String {
         escape_line(entry.name.as_deref().unwrap_or("-")),
         escape_line(&entry.cron),
         schedule_state_name(entry.state),
-        optional_local_time(entry.next_run_at),
+        schedule_next_run(entry.state, entry.next_run_at),
         schedule_run_count(entry.runs, entry.max_runs),
         schedule_target_label(&entry.target, auto_approve),
     )
@@ -290,7 +294,7 @@ pub fn schedule_details(schedule: &Schedule, auto_approve: bool) -> String {
         optional(&schedule.name),
         escape_line(&schedule.cron),
         schedule_state_name(schedule.state),
-        optional_local_time(schedule.next_run_at),
+        schedule_next_run(schedule.state, schedule.next_run_at),
         schedule_run_count(schedule.runs, schedule.max_runs),
         optional_local_time(schedule.expires_at),
         schedule_target_label(&schedule.target, auto_approve),

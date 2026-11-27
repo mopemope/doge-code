@@ -398,6 +398,14 @@ impl ScheduleManager {
             return self.persist(&mut entry);
         };
         if due > now {
+            // A backward clock adjustment can put an earlier cron match back
+            // in the future. Reschedule without dispatching a run this tick.
+            if let Ok(next) = self.next_run(&schedule.cron, now)
+                && next < due
+            {
+                schedule.next_run_at = Some(next);
+                return self.persist(&mut entry);
+            }
             return Ok(());
         }
         schedule.next_run_at = self.next_run(&schedule.cron, now).ok();

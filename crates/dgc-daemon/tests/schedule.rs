@@ -526,6 +526,27 @@ async fn overdue_runs_are_recorded_missed_not_run() {
 }
 
 #[tokio::test]
+async fn schedule_tick_recomputes_next_run_when_clock_moves_backwards() {
+    let h = Harness::default();
+    let schedule = h
+        .manager
+        .create_at(h.params(), NOW + 3_600)
+        .await
+        .expect("create while clock is ahead");
+    assert_eq!(schedule.next_run_at, Some(DUE + 3_600));
+    h.manager.tick(NOW).await;
+    let stored = h.read(&schedule);
+    assert_eq!(stored.next_run_at, Some(DUE));
+    assert_eq!(stored.state, ScheduleState::Active);
+    assert_eq!(stored.runs, 0);
+    assert!(stored.recent_runs.is_empty());
+    assert!(h.agents.list().expect("list agents").is_empty());
+
+    h.manager.tick(NOW + 1).await;
+    assert_eq!(h.read(&schedule), stored);
+}
+
+#[tokio::test]
 async fn missed_after_restart_records_once() {
     let mut h = Harness::default();
     let schedule = h.create().await;

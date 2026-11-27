@@ -1,6 +1,6 @@
 //! List, trust and run workspace scripts through the daemon.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -9,9 +9,9 @@ use clap::Subcommand;
 use dgc_client::{Client, ClientError};
 use dgc_protocol::ids::WorkspaceId;
 use dgc_protocol::methods::{
-    SCRIPT_LIST, SCRIPT_LOGS, SCRIPT_START, SCRIPT_STOP, SCRIPT_TRUST, ScriptFileState,
-    ScriptListParams, ScriptListResult, ScriptLogsParams, ScriptLogsResult, ScriptNameParams,
-    ScriptTrustParams, ScriptTrustState, WORKSPACE_LIST, WorkspaceListParams,
+    MAX_SCRIPT_LOG_BYTES, SCRIPT_LIST, SCRIPT_LOGS, SCRIPT_START, SCRIPT_STOP, SCRIPT_TRUST,
+    ScriptFileState, ScriptListParams, ScriptListResult, ScriptLogsParams, ScriptLogsResult,
+    ScriptNameParams, ScriptTrustParams, ScriptTrustState, WORKSPACE_LIST, WorkspaceListParams,
 };
 use dgc_protocol::model::Workspace;
 use dgc_protocol::rpc::INVALID_STATE;
@@ -165,17 +165,14 @@ async fn trust(client: &mut Client, workspace_id: WorkspaceId, yes: bool) -> Cli
 
     if !yes {
         let stdin = io::stdin();
-        if !stdin.is_terminal() {
-            return Err("trust requires terminal input. Use --yes to confirm explicitly".into());
-        }
-        print!("Trust these {count} scripts for {project}? [y/N] ");
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        stdin.read_line(&mut answer)?;
-        let answer = answer.trim();
-        if !answer.eq_ignore_ascii_case("y") && !answer.eq_ignore_ascii_case("yes") {
-            return Err("trust cancelled".into());
-        }
+        let stdout = io::stdout();
+        confirm_trust(
+            stdin.lock(),
+            stdout.lock(),
+            stdin.is_terminal(),
+            stdout.is_terminal(),
+            &format!("Trust these {count} scripts for {project}? [y/N] "),
+        )?;
     }
 
     let params = ScriptTrustParams {
@@ -193,6 +190,30 @@ async fn trust(client: &mut Client, workspace_id: WorkspaceId, yes: bool) -> Cli
         Err(error) => return Err(error.into()),
     }
     Ok(())
+}
+
+fn confirm_trust(
+    mut reader: impl BufRead,
+    mut writer: impl Write,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    prompt: &str,
+) -> CliResult<()> {
+    if !stdin_is_terminal || !stdout_is_terminal {
+        return Err(
+            "trust requires terminal input and output. Use --yes to confirm explicitly".into(),
+        );
+    }
+    write!(writer, "{prompt}")?;
+    writer.flush()?;
+    let mut answer = String::new();
+    reader.read_line(&mut answer)?;
+    let answer = answer.trim();
+    if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        Err("trust cancelled".into())
+    }
 }
 
 fn file_problem(list: &ScriptListResult) -> String {
@@ -276,6 +297,57 @@ async fn logs(
             return Ok(());
         }
         params.offset = Some(page.next_offset);
-        tokio::time::sleep(FOLLOW_INTERVAL).await;
+        // The decoded data can grow when the daemon replaces invalid UTF-8.
+        let raw_bytes = page.next_offset.saturating_sub(page.start_offset);
+        if raw_bytes < u64::from(MAX_SCRIPT_LOG_BYTES) {
+            tokio::time::sleep(FOLLOW_INTERVAL).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::confirm_trust;
+
+    #[test]
+    fn script_trust_confirm_accepts_only_affirmative_answers() {
+        let prompt = "Trust these scripts? [y/N] ";
+        for (answer, expected) in [
+            ("y\n", true),
+            ("yes\n", true),
+            ("n\n", false),
+            ("\n", false),
+            ("", false),
+        ] {
+            let mut preview = Vec::new();
+            let result = confirm_trust(answer.as_bytes(), &mut preview, true, true, prompt);
+            assert_eq!(result.is_ok(), expected, "{answer:?}");
+            assert_eq!(preview, prompt.as_bytes());
+        }
+    }
+
+    #[test]
+    fn script_trust_confirm_requires_both_terminals_before_reading() {
+        for (stdin_is_terminal, stdout_is_terminal) in [(false, true), (true, false)] {
+            let mut input = Cursor::new(b"yes\n");
+            let mut output = Vec::new();
+            let result = confirm_trust(
+                &mut input,
+                &mut output,
+                stdin_is_terminal,
+                stdout_is_terminal,
+                "Trust these scripts? [y/N] ",
+            );
+            assert!(
+                result
+                    .expect_err("both streams must be terminals")
+                    .to_string()
+                    .contains("--yes")
+            );
+            assert_eq!(input.position(), 0);
+            assert!(output.is_empty());
+        }
     }
 }

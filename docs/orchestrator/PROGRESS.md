@@ -20,7 +20,7 @@
 
 - タスク: M5 の PR 作成とマージ待ち、その後 M6（エージェント向け MCP）の計画作成
 - 状態: 未着手（M5 の PR は未作成）
-- 済んだこと: M5 Task 6 の偽プロバイダ、実 Claude Haiku、固定ツールチェーンでの受け入れ検証。
+- 済んだこと: M5 Task 6 の偽プロバイダ、実 Claude Haiku、固定ツールチェーンでの受け入れ検証と M5 最終レビューの修正。
 - 次の一手: M5 の変更と検証結果を PR にまとめる。
 - 未コミットの変更: なし
 
@@ -103,14 +103,26 @@
 | 4 | ワークスペーススクリプト（デーモン） | 完了 | `feat(daemon): run trusted workspace scripts from dgc.json` |
 | 5 | スクリプトの CLI | 完了 | `feat(cli): trust, run and follow workspace scripts` |
 | 6 | M5 受け入れ | 完了 | `docs(orchestrator): complete M5 acceptance` |
+| 最終修正 | スクリプトの信頼確認と監査、スケジュールの表示と時計補正 | 完了 | `fix: tighten script trust wording and prompts, and harden schedules` |
 
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
 
+- 2026-11-27 (M5 最終修正): Script trust covers only the exact bytes of `dgc.json`. An agent with
+  workspace write access (for example, Codex in `workspace-write` mode or
+  Claude with allow rules) can change files the commands execute or read,
+  such as `./dev.sh`, `package.json` scripts, `Makefile`, or `build.rs`,
+  without changing `dgc.json`. The next `dgc script start` runs those commands
+  against the changed files with the daemon's environment, outside any sandbox.
+- 2026-11-27 (M5 最終修正): スクリプトの信頼、起動、停止、終了を、適用できるワークスペース ID、スクリプト名、PID、終了コードまたはシグナルで記録する。
+  スクリプトの警告にもワークスペース ID とスクリプト名を付ける。
+- 2026-11-27 (M5 最終修正): active の保存時刻が現在から計算した次の cron 一致より後なら、発火せずに新しい時刻を保存する。
+  paused の次回時刻は保存値と JSON に残し、テキスト表示では `-` とする。
+
 - 2026-11-27 (M5 Task 5): 信頼確認は `script.list` の解析済みの定義と `workspace.list` のパスを表示し、取得済みの原文をそのまま `expected_content` に渡す。
-  確認は端末の標準入力から読み、端末以外では明示の `--yes` が必要。JSON 出力は `script ls` が対応し、原文は含めない。
-- 2026-11-27 (M5 Task 5): `script logs` は末尾 64 KiB、`--follow` は保持中のログの先頭から 500 ms 間隔で読む。
+  確認には標準入力と標準出力の両方が端末である必要があり、どちらかが端末でなければ明示の `--yes` が必要。JSON 出力は `script ls` が対応し、原文は含めない。
+- 2026-11-27 (M5 Task 5): `script logs` は末尾 64 KiB、`--follow` は保持中のログの先頭から読み、上限まで読んだ場合は次をすぐ取得し、短いページの後は 500 ms 待つ。
   回転で失われた範囲を表示し、オフセットの後退や RPC の失敗時は 1 行のエラーで終了する。ログ出力は改行とタブを保持し、ほかの制御文字と bidi 文字をエスケープする。
 
 - 2026-11-27 (M5 Task 4 レビュー修正): `script.logs` は生バイトの `start_offset` を返す。要求位置より後ろなら、ログ回転などで読み飛ばしたデータがある。
@@ -127,7 +139,7 @@
   `script.logs` のオフセットはデーモンの稼働中は回転をまたいで継続し、再起動後は保持されているログの先頭を起点にする。
 
 - 2026-11-27 (M5 Task 3): `heartbeat ls` と `heartbeat show` のテキスト出力は `agent.get` で `auto_approve` を確認する。
-  対象が見つからない場合はエージェント ID を表示する。JSON は既存 RPC の構造を使う。
+  対象が見つからない場合はエージェント ID を表示する。JSON は既存 RPC の構造を使う。`heartbeat create` も登録前に `agent.get` で確認し、対象が自動承認なら登録成功後に schedule と同じ警告を標準エラーに出す。
   CLI の時刻表示は `format_local` で行う。デーモンが独自の `TZ` で動く場合は CLI に同じ設定が必要。
 
 - 2026-11-27 (M5 Task 2): 新しい RPC と `stop_when_idle` を追加し、プロトコルを v3 に更新する。v2 の hello は `VERSION_MISMATCH`。
@@ -679,6 +691,12 @@
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
 
+- 2026-11-27 M5 最終修正（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-cli --test schedule_cli` 7件、`--test script_cli` 11件、`cargo test --locked -p dgc-daemon --test schedule` 25件、`--test script` 21件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 732件）、`bash scripts/verify.sh guidance`（リンク、機密ログチェック、Python 40件）、
+    `bash scripts/verify.sh tui-deps`、`bash scripts/verify.sh msrv`（Rust 1.94.0）が PASS。
+  - 実プロバイダと macOS での検証は未実行。作業フォルダに `final-fix-red-*.log`、`final-fix-green-*.log`、`final-fix-verify-*.log` を保存。
+
 - 2026-11-27 M5 Task 6（Linux、Rust 1.99.0、手動確認の時刻は JST）
   - `cargo build --locked -p dgc-cli -p dgc-daemon --bins` は PASS。偽プロバイダと実 Claude は別々の一時 git リポジトリと `DGC_STATE_ROOT`、作業用 `config.toml` で実施。
   - `dgc schedule create --cron '* * * * *' … --max-runs 1` は 16:37:06 に `started` が1件。`dgc schedule show` は `runs: 1/1`、`state: ended`。
@@ -688,13 +706,16 @@
   - `dgc daemon stop` で 16:38:07.027 に停止し、174.973秒待って 16:41:02 に同じ状態から `dgc daemon run` で再起動。
     16:39:00 の予定時刻から122秒経過しており、`dgc schedule show --json` は `missed` 1件、`runs: 0`、`last_agent_id: null`、次回 16:42 を返した。
   - idle の偽エージェントに `dgc heartbeat create AGENT --cron '* * * * *' --max-runs 1 heartbeat` を登録。
+    シナリオは `heartbeat.jsonl` の作業用コピーを使い、末尾に合成の成功結果ステップを1件追加した。
     16:37:06 に `dgc heartbeat show` が `sent` を表示し、対象ログの `user_message`（`queue`）、2回目の `turn_completed`、`idle` を確認。
   - 16:36:06 に `dgc script trust --workspace WS --yes` → `dgc script start tick --workspace WS`。
     `dgc script logs tick --workspace WS --follow` は `m5 script boot`、`m5 tick 1`、`m5 tick 2` を配信し、16:36:08 に `dgc script stop tick --workspace WS` 後、終了コード0。
     `dgc.json` の整形だけを変えると `script ls` は `trust: changed`、再度の `script start` は `script_untrusted` と終了コード1。
   - 実 Claude Code 2.1.332 は `claude auth status` が `loggedIn: true`。
     `dgc schedule create --cron '0 0 1 1 *' --workspace WS --provider claude --model haiku --max-runs 1 'Reply with the single word OK.'` で 2027-01-01 00:00 を指定し、既定の `manual` と `auto_approve: false` を確認。
-    16:37:12 に `dgc schedule run ID` を1回実行し、16:37:13 に `OK`、`turn_completed` 1件、`idle` → `stopped` を観測。作業用ラッパーは Claude のカスタマイズ、会話保存と組み込みツールを無効にした。
+    16:37:12 に `dgc schedule run ID` を1回実行し、16:37:13 に `OK`、`turn_completed` 1件、`idle` → `stopped` を観測。
+    `claude_path` は `--safe-mode --no-session-persistence --tools ''` を付ける作業用ラッパースクリプトに設定した。
+    実 CLI のツール呼び出しは0件で、実 CLI に対する権限要求の中継は未検証。
   - `script trust`、`start`、`stop`、`logs --follow` の `--json` がいずれも終了コード1で拒否されたため、README の Quick start を修正し、スクリプト系で `--json` を受け付けるのは `script ls` と記載した。
   - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 723件）、`bash scripts/verify.sh guidance`（機密ログチェック、Python 40件）、
     `bash scripts/verify.sh msrv`（Rust 1.94.0）、`bash scripts/verify.sh tui-deps` はすべて PASS。

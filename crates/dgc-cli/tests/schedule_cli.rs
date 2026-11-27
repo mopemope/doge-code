@@ -248,6 +248,35 @@ async fn schedule_create_warns_on_auto_approve() {
 }
 
 #[test]
+fn schedule_paused_next_run_is_hidden_in_text() {
+    let env = ScheduleEnv::new();
+    let created = parse_json(&env.create(&["--provider", "claude", "--json"], "Check in"));
+    let schedule_id = id(&created);
+    let next = created["next_run_at"].as_i64().expect("next run");
+    assert_success(&env.run(&["schedule", "pause", schedule_id]));
+
+    let listed = env.run(&["schedule", "ls"]);
+    let shown = env.run(&["schedule", "show", schedule_id]);
+    for output in [&listed, &shown] {
+        assert_success(output);
+    }
+    assert!(
+        stdout(&listed).contains("  paused  -  "),
+        "{}",
+        stdout(&listed)
+    );
+    assert!(
+        stdout(&shown).lines().any(|line| line == "next_run_at: -"),
+        "{}",
+        stdout(&shown)
+    );
+    let listed = parse_json(&env.run(&["schedule", "ls", "--json"]));
+    let shown = parse_json(&env.run(&["schedule", "show", schedule_id, "--json"]));
+    assert_eq!(listed["schedules"][0]["next_run_at"], next);
+    assert_eq!(shown["next_run_at"], next);
+}
+
+#[test]
 fn expires_in_parses_minutes_hours_days_and_rejects_others() {
     let env = ScheduleEnv::new();
     for (duration, seconds) in [("2m", 120), ("3h", 10_800), ("4d", 345_600)] {
@@ -293,7 +322,7 @@ fn heartbeat_create_ls_rm_round_trip() {
         title: "Fixture agent".to_owned(),
         provider: ProviderKind::Claude,
         model: None,
-        mode: None,
+        mode: Some("auto".to_owned()),
         auto_approve: true,
         stop_when_idle: false,
         provider_session_id: None,
@@ -321,6 +350,12 @@ fn heartbeat_create_ls_rm_round_trip() {
     assert_success(&created);
     let schedule_id = stdout(&created);
     let schedule_id = schedule_id.trim();
+    assert_eq!(
+        String::from_utf8_lossy(&created.stderr),
+        format!(
+            "warning: schedule {schedule_id} runs in auto-approve mode auto: the provider acts without asking for permission\n"
+        )
+    );
     let listed = parse_json(&env.run(&["heartbeat", "ls", "--json"]));
     assert_eq!(id(&listed["schedules"][0]), schedule_id);
     assert_eq!(

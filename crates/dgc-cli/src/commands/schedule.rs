@@ -177,6 +177,12 @@ async fn create(
     options: CreateOptions,
     json: bool,
 ) -> CliResult<()> {
+    let heartbeat_mode = match &target {
+        ScheduleTargetParams::Agent { agent_id } => {
+            agent_auto_approve_mode(client, agent_id).await?
+        }
+        ScheduleTargetParams::NewAgent { .. } => None,
+    };
     let params = ScheduleCreateParams {
         name: options.name,
         target,
@@ -186,17 +192,20 @@ async fn create(
         expires_at: options.expires_in,
     };
     let schedule: Schedule = client.call(SCHEDULE_CREATE, &params).await?;
-    if let ScheduleTarget::NewAgent {
-        auto_approve: true,
-        mode,
-        ..
-    } = &schedule.target
-    {
+    let auto_approve_mode = match &schedule.target {
+        ScheduleTarget::NewAgent {
+            auto_approve: true,
+            mode,
+            ..
+        } => Some(mode.as_deref().unwrap_or("-")),
+        _ => heartbeat_mode.as_deref(),
+    };
+    if let Some(mode) = auto_approve_mode {
         eprintln!(
             "warning: schedule {} runs in auto-approve mode {}: the provider acts \
              without asking for permission",
             schedule.id,
-            output::escape_line(mode.as_deref().unwrap_or("-"))
+            output::escape_line(mode)
         );
     }
     if json {
@@ -245,15 +254,19 @@ async fn target_auto_approve(client: &mut Client, target: &ScheduleTarget) -> Cl
     match target {
         ScheduleTarget::NewAgent { auto_approve, .. } => Ok(*auto_approve),
         ScheduleTarget::Agent { agent_id } => {
-            let params = AgentIdParams {
-                id: agent_id.clone(),
-            };
-            match client.call::<_, Agent>(AGENT_GET, &params).await {
-                Ok(agent) => Ok(agent.auto_approve),
-                Err(ClientError::Rpc(err)) if err.code == NOT_FOUND => Ok(false),
-                Err(err) => Err(err.into()),
-            }
+            Ok(agent_auto_approve_mode(client, agent_id).await?.is_some())
         }
+    }
+}
+
+async fn agent_auto_approve_mode(client: &mut Client, id: &AgentId) -> CliResult<Option<String>> {
+    let params = AgentIdParams { id: id.clone() };
+    match client.call::<_, Agent>(AGENT_GET, &params).await {
+        Ok(agent) => Ok(agent
+            .auto_approve
+            .then(|| agent.mode.unwrap_or_else(|| "-".into()))),
+        Err(ClientError::Rpc(err)) if err.code == NOT_FOUND => Ok(None),
+        Err(err) => Err(err.into()),
     }
 }
 

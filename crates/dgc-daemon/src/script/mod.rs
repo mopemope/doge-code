@@ -258,6 +258,12 @@ impl ScriptManager {
         history.remember(expected_content);
         self.store
             .put_script_trust(&workspace.project_id, &history)?;
+        if file.scripts.is_empty() {
+            tracing::info!(workspace_id = %id, "script trusted");
+        }
+        for script_name in file.scripts.keys() {
+            tracing::info!(workspace_id = %id, script_name, "script trusted");
+        }
         Ok(())
     }
 
@@ -311,8 +317,9 @@ impl ScriptManager {
             cwd: workspace.path,
         };
         let (process, stdout, stderr) = ChildProcess::spawn_raw(spec, &env, cwd_fd)?;
+        let pid = process.pid();
         let (stop, stop_rx) = watch::channel(None);
-        let (execution_tx, execution) = watch::channel(Execution::Running { pid: process.pid() });
+        let (execution_tx, execution) = watch::channel(Execution::Running { pid });
         runs.insert(
             name.to_owned(),
             Run {
@@ -322,7 +329,9 @@ impl ScriptManager {
                 oldest_log_offset: oldest,
             },
         );
+        tracing::info!(workspace_id = %id, script_name = name, pid, "script started");
         tokio::spawn(supervise(
+            (id.clone(), name.to_owned()),
             process,
             stdout,
             stderr,
@@ -425,6 +434,8 @@ async fn stop_all(runs: Vec<Run>, grace: Duration) {
 }
 
 async fn wait_or_stop(
+    workspace_id: &WorkspaceId,
+    script_name: &str,
     process: &mut ChildProcess,
     mut stop: watch::Receiver<Option<Duration>>,
 ) -> Result<ExitStatus, ProcessError> {
@@ -437,11 +448,15 @@ async fn wait_or_stop(
     };
     tokio::select! {
         status = process.wait() => status,
-        grace = grace => process.terminate(grace).await,
+        grace = grace => {
+            tracing::info!(%workspace_id, script_name, pid = process.pid(), "script stopping");
+            process.terminate(grace).await
+        }
     }
 }
 
 async fn supervise(
+    (workspace_id, script_name): (WorkspaceId, String),
     mut process: ChildProcess,
     stdout: ChildStdout,
     stderr: ChildStderr,
@@ -449,10 +464,11 @@ async fn supervise(
     stop: watch::Receiver<Option<Duration>>,
     execution: watch::Sender<Execution>,
 ) {
+    let pid = process.pid();
     let pump = copy_to_log(stdout, stderr, writer);
     tokio::pin!(pump);
     let status = {
-        let wait = wait_or_stop(&mut process, stop);
+        let wait = wait_or_stop(&workspace_id, &script_name, &mut process, stop);
         tokio::pin!(wait);
         tokio::select! {
             status = &mut wait => {
@@ -461,15 +477,15 @@ async fn supervise(
                 // that group retained a pipe.
                 match timeout(DRAIN_GRACE, &mut pump).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => tracing::warn!(error_kind = ?error.kind(), "script log copy failed"),
-                    Err(_) => tracing::warn!(error_kind = "timeout", "script output pipe did not close"),
+                    Ok(Err(error)) => tracing::warn!(%workspace_id, script_name, error_kind = ?error.kind(), "script log copy failed"),
+                    Err(_) => tracing::warn!(%workspace_id, script_name, error_kind = "timeout", "script output pipe did not close"),
                 }
                 Some(status)
             }
             copied = &mut pump => match copied {
                 Ok(()) => Some(wait.await),
                 Err(error) => {
-                    tracing::warn!(error_kind = ?error.kind(), "script log copy failed");
+                    tracing::warn!(%workspace_id, script_name, error_kind = ?error.kind(), "script log copy failed");
                     None
                 }
             }
@@ -482,10 +498,19 @@ async fn supervise(
     // If a wait failed, Drop still owns and kills the group before waiters wake.
     drop(process);
     if status.is_err() {
-        tracing::warn!(error_kind = "process", "script process wait failed");
+        tracing::warn!(%workspace_id, script_name, error_kind = "process", "script process wait failed");
     }
+    let status = status.ok();
+    tracing::info!(
+        %workspace_id,
+        script_name,
+        pid,
+        exit_code = status.and_then(|status| status.code()),
+        signal = status.and_then(|status| status.signal()),
+        "script exited"
+    );
     execution.send_replace(Execution::Exited {
-        status: status.ok(),
+        status,
         ended_at: now_unix(),
     });
 }

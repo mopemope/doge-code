@@ -3,6 +3,8 @@
 mod common;
 
 use std::fs::{self, File};
+use std::io::Write;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::thread::sleep;
@@ -11,7 +13,9 @@ use std::time::{Duration, Instant};
 use common::{TestEnv, assert_success, stdout};
 use dgc_protocol::PROTOCOL_VERSION;
 use dgc_protocol::ids::{ProjectId, WorkspaceId};
-use dgc_protocol::methods::{HELLO, SCRIPT_LIST, SCRIPT_LOGS, SCRIPT_TRUST, WORKSPACE_LIST};
+use dgc_protocol::methods::{
+    HELLO, MAX_SCRIPT_LOG_BYTES, SCRIPT_LIST, SCRIPT_LOGS, SCRIPT_TRUST, WORKSPACE_LIST,
+};
 use dgc_protocol::rpc::{INVALID_PARAMS, INVALID_STATE, Request, Response, RpcError};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -135,21 +139,58 @@ fn script_trust_shows_commands_and_requires_yes_without_tty() {
 }
 
 #[tokio::test]
+async fn script_trust_refuses_if_either_stream_is_redirected_before_trust_rpc() {
+    let env = TestEnv::new();
+    let workspace = WorkspaceId::generate();
+    let args = ["script", "trust", "--workspace", workspace.as_str()];
+    let steps = trust_preview_steps(
+        &workspace,
+        &env.dir.path().join("project"),
+        r#"{"version":1,"scripts":{"hello":{"command":"true"}}}"#,
+    );
+
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: openpty writes the two file descriptors; optional settings are null.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0,
+        "openpty: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: successful openpty returned two distinct descriptors we own.
+    let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+    let mut stdin_redirected = command(&env, &args);
+    stdin_redirected.stdout(slave.try_clone().expect("clone terminal"));
+    let output = exchange_timed(&env, stdin_redirected, steps.to_vec())
+        .await
+        .0;
+    assert!(failure(&output).contains("--yes"));
+
+    master.write_all(b"y\n").expect("write terminal answer");
+    let mut stdout_redirected = command(&env, &args);
+    stdout_redirected.stdin(slave);
+    let output = exchange_timed(&env, stdout_redirected, steps.to_vec())
+        .await
+        .0;
+    assert!(failure(&output).contains("--yes"));
+}
+
+#[tokio::test]
 async fn script_trust_refuses_when_file_changed() {
     // Synthetic responses let the file change deterministically after the snapshot.
     let env = TestEnv::new();
     let workspace = WorkspaceId::generate();
     let content = "{ \"version\": 1, \"scripts\": {\"hello\": {\"command\": \"true\"}} }\n";
     let path = env.dir.path().join("project\u{202e}");
-    let list = json!({
-        "project_name": "project\u{1b}", "file": "ok", "error": null,
-        "trust": "untrusted", "content": content,
-        "scripts": [{"name": "hello", "in_file": true, "command": "true", "state": "not_running"}],
-    });
-    let workspaces = json!({"workspaces": [{
-        "id": workspace, "project_id": ProjectId::generate(), "path": path,
-        "isolation": "local", "state": "active", "owned": false, "created_at": ""
-    }]});
+    let preview_steps = trust_preview_steps(&workspace, &path, content);
     for (code, reason, expected) in [
         (INVALID_STATE, "script_file_changed", "review"),
         (INVALID_PARAMS, "missing", "missing"),
@@ -157,6 +198,12 @@ async fn script_trust_refuses_when_file_changed() {
         (INVALID_PARAMS, "too_large", "too_large"),
         (INVALID_PARAMS, "invalid", "invalid"),
     ] {
+        let mut steps = preview_steps.to_vec();
+        steps.push((
+            SCRIPT_TRUST,
+            json!({"workspace_id": workspace, "expected_content": content}),
+            Err(RpcError::new(code, reason)),
+        ));
         let output = exchange(
             &env,
             &[
@@ -166,23 +213,7 @@ async fn script_trust_refuses_when_file_changed() {
                 workspace.as_str(),
                 "--yes",
             ],
-            vec![
-                (
-                    SCRIPT_LIST,
-                    json!({"workspace_id": workspace}),
-                    Ok(list.clone()),
-                ),
-                (
-                    WORKSPACE_LIST,
-                    json!({"project_id": null}),
-                    Ok(workspaces.clone()),
-                ),
-                (
-                    SCRIPT_TRUST,
-                    json!({"workspace_id": workspace, "expected_content": content}),
-                    Err(RpcError::new(code, reason)),
-                ),
-            ],
+            steps,
         )
         .await;
         let error = failure(&output);
@@ -255,6 +286,48 @@ async fn script_logs_follow_ends_when_script_exits() {
 }
 
 #[tokio::test]
+async fn script_logs_follow_drains_full_pages_before_waiting() {
+    let env = TestEnv::new();
+    let workspace = WorkspaceId::generate();
+    let limit = u64::from(MAX_SCRIPT_LOG_BYTES);
+    let full = "x".repeat(limit as usize);
+    // Invalid bytes are replaced on the daemon side. The resulting string can
+    // exceed the page size even though the page consumed fewer raw bytes.
+    let short_raw_bytes = limit / 2;
+    let short = "\u{fffd}".repeat(short_raw_bytes as usize);
+    let end = limit + short_raw_bytes;
+    let (output, gaps) = exchange_timed(
+        &env,
+        command(
+            &env,
+            &[
+                "script",
+                "logs",
+                "hello",
+                "--workspace",
+                workspace.as_str(),
+                "--follow",
+            ],
+        ),
+        vec![
+            log_page(&workspace, 0, 0, limit, true, &full),
+            log_page(&workspace, limit, limit, end, true, &short),
+            log_page(&workspace, end, end, end, false, ""),
+        ],
+    )
+    .await;
+    assert_success(&output);
+    assert_eq!(stdout(&output), format!("{full}{short}"));
+    let interval = Duration::from_millis(500);
+    assert!(gaps[0] < interval, "waited after full page: {:?}", gaps[0]);
+    assert!(
+        gaps[1] >= interval,
+        "polled too soon after short page: {:?}",
+        gaps[1]
+    );
+}
+
+#[tokio::test]
 async fn script_logs_follow_stops_on_reset_or_not_running() {
     let env = TestEnv::new();
     let workspace = WorkspaceId::generate();
@@ -316,7 +389,94 @@ fn script_ls_json() {
     }
 }
 
+#[test]
+fn script_lifecycle_audit_uses_only_safe_fields() {
+    let env = ScriptEnv::new("printf 'audit-%s' output; exec sleep 30");
+    env.start();
+    let listing = parse_json(&env.run(&["ls", "--json"]));
+    let pid = listing["scripts"][0]["pid"].as_u64().expect("script PID");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = env.run(&["logs", "hello"]);
+        assert_success(&output);
+        if stdout(&output) == "audit-output" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "script did not produce output");
+        sleep(Duration::from_millis(20));
+    }
+    assert_success(&env.run(&["stop", "hello"]));
+    fs::write(
+        env.project_path.join("dgc.json"),
+        r#"{"version":1,"scripts":{"hello":{"command":"exit 23"}}}"#,
+    )
+    .expect("change script");
+    env.start();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while parse_json(&env.run(&["ls", "--json"]))["scripts"][0]["state"] != "exited" {
+        assert!(Instant::now() < deadline, "script did not exit");
+        sleep(Duration::from_millis(20));
+    }
+    let log = fs::read_to_string(env.env.paths.state_dir.join("daemon.log")).expect("daemon log");
+    for (action, fields) in [
+        ("script trusted", vec![]),
+        ("script started", vec![format!("pid={pid}")]),
+        ("script stopping", vec![format!("pid={pid}")]),
+        (
+            "script exited",
+            vec![format!("pid={pid}"), format!("signal={}", libc::SIGTERM)],
+        ),
+        ("script exited", vec!["exit_code=23".to_owned()]),
+    ] {
+        assert!(
+            log.lines().any(|line| line.contains(action)
+                && line.contains(&format!("workspace_id={}", env.workspace))
+                && line.contains("script_name=\"hello\"")
+                && fields.iter().all(|field| line.contains(field))),
+            "missing audit event {action} {fields:?} in {log}"
+        );
+    }
+    assert!(!log.contains("audit-%s") && !log.contains("audit-output") && !log.contains("exit 23"));
+}
+
+#[test]
+fn script_empty_config_trust_is_audited() {
+    let env = ScriptEnv::new(COMMAND);
+    fs::write(
+        env.project_path.join("dgc.json"),
+        r#"{"version":1,"scripts":{}}"#,
+    )
+    .expect("empty script configuration");
+    assert_success(&env.run(&["trust", "--yes"]));
+    let log = fs::read_to_string(env.env.paths.state_dir.join("daemon.log")).expect("daemon log");
+    assert!(
+        log.lines().any(|line| line.contains("script trusted")
+            && line.contains(&format!("workspace_id={}", env.workspace))),
+        "missing audit event for empty dgc.json in {log}"
+    );
+}
+
 type Step = (&'static str, Value, Result<Value, RpcError>);
+
+fn trust_preview_steps(
+    workspace: &WorkspaceId,
+    path: &std::path::Path,
+    content: &str,
+) -> [Step; 2] {
+    let list = json!({
+        "project_name": "project\u{1b}", "file": "ok", "error": null,
+        "trust": "untrusted", "content": content,
+        "scripts": [{"name": "hello", "in_file": true, "command": "true", "state": "not_running"}],
+    });
+    let workspaces = json!({"workspaces": [{
+        "id": workspace, "project_id": ProjectId::generate(), "path": path,
+        "isolation": "local", "state": "active", "owned": false, "created_at": ""
+    }]});
+    [
+        (SCRIPT_LIST, json!({"workspace_id": workspace}), Ok(list)),
+        (WORKSPACE_LIST, json!({"project_id": null}), Ok(workspaces)),
+    ]
+}
 
 fn log_page(
     workspace: &WorkspaceId,
@@ -334,8 +494,17 @@ fn log_page(
 }
 
 async fn exchange(env: &TestEnv, args: &[&str], steps: Vec<Step>) -> Output {
+    exchange_timed(env, command(env, args), steps).await.0
+}
+
+async fn exchange_timed(
+    env: &TestEnv,
+    command: Command,
+    steps: Vec<Step>,
+) -> (Output, Vec<Duration>) {
     fs::create_dir_all(env.paths.socket.parent().expect("socket dir")).expect("mkdir");
     let listener = UnixListener::bind(&env.paths.socket).expect("bind synthetic daemon socket");
+    let mut gaps = Vec::new();
     let server = async {
         let (stream, _) = listener.accept().await.expect("accept CLI");
         let (read, mut write) = stream.into_split();
@@ -345,9 +514,13 @@ async fn exchange(env: &TestEnv, args: &[&str], steps: Vec<Step>) -> Output {
             Value::Null,
             Ok(json!({"protocol_version": PROTOCOL_VERSION, "daemon_pid": 1})),
         );
+        let mut previous_response = None;
         for (method, params, result) in std::iter::once(hello).chain(steps) {
             let mut line = String::new();
             reader.read_line(&mut line).await.expect("read request");
+            if let Some(sent_at) = previous_response {
+                gaps.push(Instant::now().duration_since(sent_at));
+            }
             let request: Request = serde_json::from_str(&line).expect("request JSON");
             assert_eq!(request.method, method);
             if method != HELLO {
@@ -358,6 +531,9 @@ async fn exchange(env: &TestEnv, args: &[&str], steps: Vec<Step>) -> Output {
                 Err(error) => Response::err(request.id, error),
             };
             let reply = serde_json::to_string(&response).expect("response JSON");
+            if method != HELLO {
+                previous_response = Some(Instant::now());
+            }
             write
                 .write_all(format!("{reply}\n").as_bytes())
                 .await
@@ -370,7 +546,7 @@ async fn exchange(env: &TestEnv, args: &[&str], steps: Vec<Step>) -> Output {
             "unexpected next RPC: {trailing}"
         );
     };
-    let mut command = tokio::process::Command::from(command(env, args));
+    let mut command = tokio::process::Command::from(command);
     let output = command.kill_on_drop(true).output();
     let output = timeout(Duration::from_secs(8), async {
         tokio::pin!(server, output);
@@ -386,5 +562,5 @@ async fn exchange(env: &TestEnv, args: &[&str], steps: Vec<Step>) -> Output {
     })
     .await;
     fs::remove_file(&env.paths.socket).expect("unlink synthetic daemon socket");
-    output.expect("script RPC exchange should finish")
+    (output.expect("script RPC exchange should finish"), gaps)
 }

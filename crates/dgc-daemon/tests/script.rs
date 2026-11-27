@@ -1,9 +1,10 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dgc_daemon::agent::AgentManager;
 use dgc_daemon::config::DaemonConfig;
@@ -457,6 +458,15 @@ async fn script_output_goes_to_private_log_and_logs_pages_by_offset() {
         .await;
     assert_eq!(env.exited().await.exit_code, Some(0));
     let path = env.log_path();
+    let workspace_dir = path.parent().expect("workspace log directory");
+    assert_eq!(
+        fs::metadata(workspace_dir)
+            .expect("workspace log directory")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
     assert_private(&path);
     let bytes = fs::read(&path).expect("log");
     assert!(bytes.windows(6).any(|chunk| chunk == b"ab\xff\0cd"));
@@ -713,6 +723,44 @@ async fn stop_kills_the_process_group() {
     assert_eq!(status.exit_code, Some(0));
     // SAFETY: signal 0 only tests the PID's existence.
     assert_eq!(unsafe { libc::kill(child, 0) }, -1);
+}
+
+#[tokio::test]
+async fn shutdown_sigkills_term_ignoring_script_group_after_grace() {
+    let env = Env::new().await;
+    env.start(r#"trap '' TERM; printf '%s\n' "$$" > child.pid; exec sleep 60"#)
+        .await;
+    let pgid = env.child_pid(&env.ws.path).await;
+    let ready = &env.ws.path.join("member.ready");
+    // Keep the member as this test's child so we can reap it and read its
+    // terminating signal, while the daemon still owns the process group.
+    let mut member = tokio::process::Command::new("/bin/sh")
+        .args(["-c", r#"trap '' TERM; touch "$1"; exec sleep 60"#, "sh"])
+        .arg(ready)
+        .process_group(pgid)
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn group member");
+    timeout(WAIT, async {
+        while !ready.exists() {
+            assert!(member.try_wait().expect("poll group member").is_none());
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("group member armed");
+
+    let grace = Duration::from_millis(100);
+    let start = Instant::now();
+    env.scripts.shutdown_all(grace).await;
+    let elapsed = start.elapsed();
+    let member_status = timeout(WAIT, member.wait())
+        .await
+        .expect("group member was left alive")
+        .expect("reap group member");
+    assert!(elapsed >= grace, "shutdown ended after {elapsed:?}");
+    assert_eq!(member_status.signal(), Some(libc::SIGKILL));
+    assert_eq!(env.exited().await.signal, Some(libc::SIGKILL));
 }
 
 #[tokio::test]
