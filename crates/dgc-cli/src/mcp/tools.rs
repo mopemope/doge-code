@@ -1,5 +1,6 @@
 //! Translate the seven scoped tools to daemon calls.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use dgc_client::{Client, ClientError};
@@ -8,21 +9,24 @@ use dgc_protocol::event::{AgentEvent, EventKind};
 use dgc_protocol::ids::AgentId;
 use dgc_protocol::methods::{
     AGENT_ARCHIVE, AGENT_CREATE, AGENT_EVENTS, AGENT_GET, AGENT_INTERRUPT, AGENT_LIST, AGENT_SEND,
-    AgentCreateParams, AgentEventsParams, AgentIdParams, AgentListParams, AgentSendParams,
-    MAX_EVENTS_LIMIT, NOTIFY_EVENT, NOTIFY_LAGGED, SubscribeParams,
+    AgentCreateParams, AgentEventsParams, AgentEventsQuery, AgentIdParams, AgentListParams,
+    AgentSendParams, MAX_EVENTS_LIMIT, NOTIFY_EVENT, NOTIFY_LAGGED, SubscribeParams,
 };
 use dgc_protocol::model::{Agent, AgentState, ProviderKind, SendBehavior};
-use dgc_protocol::rpc::{Notification, VERSION_MISMATCH};
+use dgc_protocol::rpc::{INVALID_PARAMS, NOT_FOUND, Notification, RpcError, VERSION_MISMATCH};
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
+use super::rpc;
 use crate::commands;
+use crate::commands::agent::default_title;
 
 const MAX_AGENT_DEPTH: u32 = 8;
 const DEFAULT_WAIT_SECS: u64 = 60;
 const MAX_WAIT_SECS: u64 = 300;
 const MAX_ANSWER_BYTES: usize = 16 * 1024;
+const MAX_ANSWER_PAGES: usize = 4;
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
@@ -142,7 +146,6 @@ impl Tool {
 }
 
 enum ToolError {
-    UnknownTool,
     InvalidArguments,
     NotDescendant,
     DaemonPaths,
@@ -160,7 +163,6 @@ impl ToolError {
     fn body(self) -> Value {
         // Daemon error messages and deserialization errors can contain user data.
         let kind = match self {
-            Self::UnknownTool => "unknown_tool",
             Self::InvalidArguments => "invalid_arguments",
             Self::NotDescendant => "not_descendant",
             Self::DaemonPaths => "daemon_paths",
@@ -189,41 +191,51 @@ pub fn list() -> Value {
     json!({"tools": tools})
 }
 
-pub async fn call(caller: &AgentId, params: &Value) -> Value {
-    let result = invoke(caller, params).await;
-    let is_error = result.is_err();
-    let body = result.unwrap_or_else(ToolError::body);
-    json!({"content": [{"type": "text", "text": body.to_string()}], "isError": is_error})
-}
-
-async fn invoke(caller: &AgentId, params: &Value) -> Result<Value, ToolError> {
-    let name = params["name"].as_str().ok_or(ToolError::InvalidArguments)?;
+pub async fn call(caller: &AgentId, params: &Value) -> Result<Value, rpc::Error> {
+    let invalid_params = || rpc::Error::new(INVALID_PARAMS, "Invalid params");
+    let name = params["name"].as_str().ok_or_else(invalid_params)?;
     let tool = Tool::ALL
         .into_iter()
         .find(|tool| tool.name() == name)
-        .ok_or(ToolError::UnknownTool)?;
+        .ok_or(rpc::Error::new(INVALID_PARAMS, "Unknown tool"))?;
     let empty = Value::Object(Map::new());
     let args = params.get("arguments").unwrap_or(&empty);
+    if !args.is_object() {
+        return Err(invalid_params());
+    }
+    let result = invoke(caller, tool, args).await;
+    let is_error = result.is_err();
+    let body = result.unwrap_or_else(ToolError::body);
+    Ok(json!({"content": [{"type": "text", "text": body.to_string()}], "isError": is_error}))
+}
+
+fn wait_duration(seconds: Option<u64>) -> Duration {
+    Duration::from_secs(seconds.unwrap_or(DEFAULT_WAIT_SECS).min(MAX_WAIT_SECS))
+}
+
+async fn invoke(caller: &AgentId, tool: Tool, args: &Value) -> Result<Value, ToolError> {
     tool.validate(args)?;
     let paths = commands::resolve_paths().map_err(|_| ToolError::DaemonPaths)?;
     if let Tool::Wait = tool {
         let id = agent_id(args)?;
-        let secs = args["timeout_secs"]
-            .as_u64()
-            .unwrap_or(DEFAULT_WAIT_SECS)
-            .min(MAX_WAIT_SECS);
-        return wait(&paths, caller, &id, Duration::from_secs(secs)).await;
+        return wait(
+            &paths,
+            caller,
+            &id,
+            wait_duration(args["timeout_secs"].as_u64()),
+        )
+        .await;
     }
     timeout(DAEMON_TIMEOUT, async {
         let mut client = Client::connect(&paths).await?;
-        let caller = get(&mut client, caller).await?;
-        match tool {
-            Tool::Create => create(&mut client, caller, args).await,
-            Tool::List => list_descendants(&mut client, &caller).await,
-            Tool::Send | Tool::Get | Tool::Interrupt | Tool::Archive | Tool::Wait => {
-                target_tool(&mut client, &caller, tool, args).await
-            }
+        if let Tool::List = tool {
+            return list_descendants(&mut client, caller).await;
         }
+        let caller = get(&mut client, caller).await?;
+        if let Tool::Create = tool {
+            return create(&mut client, caller, args).await;
+        }
+        target_tool(&mut client, &caller, tool, args).await
     })
     .await
     .map_err(|_| ToolError::DaemonTimeout)?
@@ -249,18 +261,9 @@ async fn create(client: &mut Client, caller: Agent, args: &Value) -> Result<Valu
         .transpose()
         .map_err(|_| ToolError::InvalidArguments)?
         .unwrap_or(caller.provider);
-    let title = args["title"].as_str().map_or_else(
-        || {
-            prompt
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(60)
-                .collect()
-        },
-        str::to_owned,
-    );
+    let title = args["title"]
+        .as_str()
+        .map_or_else(|| default_title(prompt), str::to_owned);
     let params = AgentCreateParams {
         workspace_id: caller.workspace_id,
         title,
@@ -280,6 +283,15 @@ async fn create(client: &mut Client, caller: Agent, args: &Value) -> Result<Valu
     }))
 }
 
+fn ancestry_steps(caller: &Agent, agent: &Agent) -> u32 {
+    // Bound traversal using the recorded relative depth and the largest
+    // daemon configuration value, even if a stored record is malformed.
+    agent
+        .depth
+        .min(MAX_AGENT_DEPTH)
+        .saturating_sub(caller.depth)
+}
+
 async fn is_descendant(
     client: &mut Client,
     caller: &Agent,
@@ -289,11 +301,7 @@ async fn is_descendant(
         return Ok(false);
     }
     let mut parent = agent.parent_id.clone();
-    // Both depths come from the daemon. Also cap traversal if a stored record is malformed.
-    let steps = agent
-        .depth
-        .min(MAX_AGENT_DEPTH)
-        .saturating_sub(caller.depth);
+    let steps = ancestry_steps(caller, agent);
     for step in 0..steps {
         let Some(id) = parent else {
             return Ok(false);
@@ -322,7 +330,7 @@ async fn require_descendant(
     Ok(agent)
 }
 
-async fn list_descendants(client: &mut Client, caller: &Agent) -> Result<Value, ToolError> {
+async fn list_descendants(client: &mut Client, caller_id: &AgentId) -> Result<Value, ToolError> {
     let mut listed: Value = client
         .call(
             AGENT_LIST,
@@ -338,15 +346,30 @@ async fn list_descendants(client: &mut Client, caller: &Agent) -> Result<Value, 
             .unwrap_or_default(),
     )
     .map_err(ClientError::from)?;
-    let mut descendants = Vec::new();
-    for agent in agents {
-        if is_descendant(client, caller, &agent).await? {
-            descendants.push(json!({
+    let by_id: HashMap<_, _> = agents.iter().map(|agent| (&agent.id, agent)).collect();
+    let caller = by_id
+        .get(caller_id)
+        .ok_or_else(|| ClientError::Rpc(RpcError::new(NOT_FOUND, "Caller not found")))?;
+    let descendants: Vec<Value> = agents
+        .iter()
+        .filter(|agent| {
+            let mut parent = agent.parent_id.as_ref();
+            for _ in 0..ancestry_steps(caller, agent) {
+                let Some(id) = parent else { break };
+                if id == caller_id {
+                    return true;
+                }
+                parent = by_id.get(id).and_then(|agent| agent.parent_id.as_ref());
+            }
+            false
+        })
+        .map(|agent| {
+            json!({
                 "agent_id": agent.id, "state": agent.state, "title": agent.title,
                 "provider": agent.provider
-            }));
-        }
-    }
+            })
+        })
+        .collect();
     Ok(json!({"agents": descendants}))
 }
 
@@ -392,7 +415,7 @@ async fn target_tool(
             let _: Value = client.call(method, &AgentIdParams { id }).await?;
             Ok(json!({}))
         }
-        _ => Err(ToolError::UnknownTool),
+        _ => Err(ToolError::InvalidArguments),
     }
 }
 
@@ -426,17 +449,22 @@ async fn wait(
     id: &AgentId,
     duration: Duration,
 ) -> Result<Value, ToolError> {
-    let (mut client, mut notifications, mut agent) = timeout(DAEMON_TIMEOUT, async {
-        // Subscribe before the first get so a transition cannot fall between the two.
-        let notifications = subscribe(paths, id).await?;
+    let setup_deadline = Instant::now() + DAEMON_TIMEOUT;
+    let (mut client, mut notifications, mut agent) = timeout_at(setup_deadline, async {
         let mut client = Client::connect(paths).await?;
         let caller = get(&mut client, caller).await?;
-        let agent = require_descendant(&mut client, &caller, id).await?;
+        require_descendant(&mut client, &caller, id).await?;
+        // Authorization uses only the parent chain. Subscribe before reading
+        // the initial state used for waiting so that no transition is missed.
+        let notifications = subscribe(paths, id).await?;
+        let agent = get(&mut client, id).await?;
         Ok::<_, ToolError>((client, notifications, agent))
     })
     .await
     .map_err(|_| ToolError::DaemonTimeout)??;
 
+    // Initial and final RPCs share one budget outside the state wait.
+    let remaining_margin = setup_deadline.saturating_duration_since(Instant::now());
     let completion = timeout(duration, async {
         while !settled(agent.state) {
             let notice = notifications.recv().await.ok_or(ClientError::Closed)?;
@@ -454,7 +482,7 @@ async fn wait(
     })
     .await;
 
-    timeout(DAEMON_TIMEOUT, async {
+    timeout(remaining_margin, async {
         match completion {
             Ok(done) => done?,
             Err(_) => {
@@ -473,30 +501,64 @@ async fn wait(
 }
 
 async fn snapshot(client: &mut Client, agent: &Agent) -> Result<Value, ToolError> {
-    let params = AgentEventsParams {
-        agent_id: agent.id.clone(),
-        since_seq: 0,
-        limit: MAX_EVENTS_LIMIT,
-        tail: Some(MAX_EVENTS_LIMIT),
-    };
-    let mut result: Value = client.call(AGENT_EVENTS, &params).await?;
-    let events: Vec<AgentEvent> = serde_json::from_value(
-        result
-            .get_mut("events")
-            .map(Value::take)
-            .unwrap_or_default(),
-    )
-    .map_err(ClientError::from)?;
+    let last_answer = read_last_answer(client, &agent.id).await?;
     Ok(json!({
         "state": agent.state, "title": agent.title, "provider": agent.provider,
-        "last_answer": last_answer(&events),
+        "last_answer": last_answer,
         "pending_permission": agent.state == AgentState::WaitingPermission
     }))
 }
 
-fn last_answer(events: &[AgentEvent]) -> String {
-    let mut answer = String::new();
-    for turn in events.rsplit(|event| matches!(event.kind, EventKind::TurnStarted)) {
+async fn read_last_answer(client: &mut Client, id: &AgentId) -> Result<String, ToolError> {
+    let mut events: Vec<AgentEvent> = Vec::new();
+    let mut before = None;
+    for _ in 0..MAX_ANSWER_PAGES {
+        let query = AgentEventsQuery {
+            page: AgentEventsParams {
+                agent_id: id.clone(),
+                since_seq: before.unwrap_or(0),
+                limit: MAX_EVENTS_LIMIT,
+                tail: before.is_none().then_some(MAX_EVENTS_LIMIT),
+            },
+            reverse: before.is_some(),
+        };
+        let mut result: Value = client.call(AGENT_EVENTS, &query).await?;
+        let mut page: Vec<AgentEvent> = serde_json::from_value(
+            result
+                .get_mut("events")
+                .map(Value::take)
+                .unwrap_or_default(),
+        )
+        .map_err(ClientError::from)?;
+        let Some(first) = page.first() else { break };
+        if let Some(before) = before
+            && page.last().and_then(|event| event.seq.checked_add(1)) != Some(before)
+        {
+            // Rotation can remove events between these two requests. A gap
+            // cannot establish that the first visible turn is complete.
+            break;
+        }
+        before = Some(first.seq);
+        page.append(&mut events);
+        events = page;
+        if let Some(answer) = last_complete_answer(&events) {
+            return Ok(answer);
+        }
+        if before == Some(1) {
+            break;
+        }
+    }
+    Ok(String::new())
+}
+
+fn last_complete_answer(events: &[AgentEvent]) -> Option<String> {
+    let mut turn_end = events.len();
+    for (index, event) in events.iter().enumerate().rev() {
+        if !matches!(event.kind, EventKind::TurnStarted) {
+            continue;
+        }
+        let turn = &events[index + 1..turn_end];
+        turn_end = index;
         let Some(end) = turn
             .iter()
             .position(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
@@ -512,23 +574,35 @@ fn last_answer(events: &[AgentEvent]) -> String {
         }) {
             continue;
         }
+        let mut answer = String::new();
         let mut finished_block = false;
         for event in completed {
             if let EventKind::AssistantText { text, final_ } = &event.kind {
-                if finished_block && answer.len() < MAX_ANSWER_BYTES {
+                if finished_block {
                     answer.push('\n');
                 }
                 let end = text.floor_char_boundary(MAX_ANSWER_BYTES - answer.len());
                 answer.push_str(&text[..end]);
                 if end < text.len() || answer.len() == MAX_ANSWER_BYTES {
-                    return answer;
+                    break;
                 }
                 finished_block = *final_;
             }
         }
         if !answer.is_empty() {
-            break;
+            return Some(answer);
         }
     }
-    answer
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_duration_clamps_above_300_seconds() {
+        assert_eq!(wait_duration(Some(301)), Duration::from_secs(300));
+        assert_eq!(wait_duration(Some(u64::MAX)), Duration::from_secs(300));
+    }
 }

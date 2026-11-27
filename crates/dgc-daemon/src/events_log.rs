@@ -162,7 +162,17 @@ impl EventLog {
     /// Return the number of file bytes read as well, for tests.
     #[doc(hidden)]
     pub fn read_tail_with_bytes(&self, n: u32) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
-        read_tail_from([&self.current_path, &self.rotated_path], n)
+        read_tail_from([&self.current_path, &self.rotated_path], n, None)
+    }
+
+    /// Read the page immediately before the exclusive sequence cursor.
+    pub(crate) fn read_before(
+        &self,
+        before: u64,
+        n: u32,
+    ) -> Result<Vec<AgentEvent>, EventLogError> {
+        read_tail_from([&self.current_path, &self.rotated_path], n, Some(before))
+            .map(|(events, _)| events)
     }
 
     /// Rotate the current file away and reopen a fresh one with `open`. State
@@ -251,7 +261,7 @@ pub(crate) fn handoff_history(
     // headers added when it was chunked. The normal response page is smaller.
     let initial_budget = dgc_protocol::MAX_MESSAGE_BYTES + MAX_EVENTS_PAGE_BYTES;
     let first_page = read_page_from([&rotated, &current], 0, limit, initial_budget)?;
-    let (tail, _) = read_tail_from([&current, &rotated], limit)?;
+    let (tail, _) = read_tail_from([&current, &rotated], limit, None)?;
     Ok((first_page, tail))
 }
 
@@ -291,7 +301,11 @@ fn read_page_from(
     Ok(page)
 }
 
-fn read_tail_from(paths: [&Path; 2], n: u32) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
+fn read_tail_from(
+    paths: [&Path; 2],
+    n: u32,
+    before: Option<u64>,
+) -> Result<(Vec<AgentEvent>, u64), EventLogError> {
     let mut page = Vec::new();
     if n == 0 {
         return Ok((page, 0));
@@ -301,6 +315,9 @@ fn read_tail_from(paths: [&Path; 2], n: u32) -> Result<(Vec<AgentEvent>, u64), E
     let mut full = false;
     for path in paths {
         bytes_read += for_each_event_reverse(path, |event, line_len| {
+            if before.is_some_and(|seq| event.seq >= seq) {
+                return true;
+            }
             let cost = line_len + usize::from(!page.is_empty());
             if !page.is_empty() && page_bytes + cost > MAX_EVENTS_PAGE_BYTES {
                 full = true;

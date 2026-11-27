@@ -349,6 +349,10 @@ fn unknown_method_and_notifications() {
     assert_eq!(response["error"]["code"], METHOD_NOT_FOUND);
     assert_eq!(mcp.request("ping", json!({}))["result"], json!({}));
     assert_eq!(
+        mcp.request("server/discover", json!({}))["error"]["code"],
+        METHOD_NOT_FOUND
+    );
+    assert_eq!(
         tool_json(&mcp.call("list_agents", json!({}))),
         json!({"agents":[]})
     );
@@ -412,8 +416,11 @@ fn tools_refuse_non_descendants() {
     let sibling = daemon.agent(Some(&parent), false);
     let unrelated = daemon.agent(None, false);
     let mut mcp = daemon.mcp(&caller);
-    for id in [&caller, &parent, &sibling, &unrelated] {
-        daemon.wait_for_event(id, json!({"type":"state_changed","state":"idle"}));
+    let missing = json!(dgc_protocol::ids::AgentId::generate());
+    for id in [&caller, &parent, &sibling, &unrelated, &missing] {
+        if id != &missing {
+            daemon.wait_for_event(id, json!({"type":"state_changed","state":"idle"}));
+        }
         for tool in [
             "send_agent",
             "get_agent",
@@ -428,9 +435,11 @@ fn tools_refuse_non_descendants() {
             };
             assert_tool_error(&mcp.call(tool, args));
         }
-        assert_eq!(daemon.get(id)["state"], "idle");
-        let tail = daemon.rpc("agent.events", json!({"agent_id":id,"tail":50}));
-        assert!(!tail.to_string().contains(PRIVATE));
+        if id != &missing {
+            assert_eq!(daemon.get(id)["state"], "idle");
+            let tail = daemon.rpc("agent.events", json!({"agent_id":id,"tail":50}));
+            assert!(!tail.to_string().contains(PRIVATE));
+        }
     }
 }
 
@@ -492,7 +501,7 @@ fn wait_agent_times_out() {
 // running state. The archive and shutdown therefore require a live update.
 struct WaitProbe {
     env: TestEnv,
-    running: Receiver<Value>,
+    observations: Receiver<Observation>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -507,7 +516,7 @@ impl WaitProbe {
             .set_nonblocking(true)
             .expect("nonblocking wait probe");
         let daemon_socket = daemon_socket.to_owned();
-        let (observed, running) = mpsc::channel();
+        let (observed, observations) = mpsc::channel();
         let (stop, stopped) = oneshot::channel();
         let thread = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -529,7 +538,7 @@ impl WaitProbe {
         });
         Self {
             env,
-            running,
+            observations,
             stop: Some(stop),
             thread: Some(thread),
         }
@@ -537,12 +546,33 @@ impl WaitProbe {
 
     fn wait_for_running(&self, agent_id: &Value) {
         let deadline = Instant::now() + WAIT;
+        let mut subscribed = false;
         loop {
             let seen = self
-                .running
+                .observations
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("running snapshot from wait");
-            if seen == *agent_id {
+            match seen {
+                Observation::Request(request)
+                    if request["method"] == "subscribe"
+                        && request["params"]["agent_id"] == *agent_id =>
+                {
+                    subscribed = true
+                }
+                Observation::Running(id) if subscribed && id == *agent_id => return,
+                _ => {}
+            }
+        }
+    }
+
+    fn wait_for_subscription_close(&self, agent_id: &Value) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let observed = self
+                .observations
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("cancelled subscription closes");
+            if matches!(observed, Observation::SubscriptionClosed(id) if id == *agent_id) {
                 return;
             }
         }
@@ -558,31 +588,56 @@ impl Drop for WaitProbe {
     }
 }
 
+enum Observation {
+    Request(Value),
+    Running(Value),
+    SubscriptionClosed(Value),
+}
+
 async fn relay(
     client: UnixStream,
     daemon_socket: PathBuf,
-    observed: mpsc::Sender<Value>,
+    observed: mpsc::Sender<Observation>,
 ) -> std::io::Result<()> {
     let daemon = UnixStream::connect(daemon_socket).await?;
-    let (mut caller, mut output) = client.into_split();
+    let (caller, mut output) = client.into_split();
     let (replies, mut input) = daemon.into_split();
     let mut replies = AsyncBufReader::new(replies);
-    let mut line = Vec::new();
-    tokio::select! {
-        result = tokio::io::copy(&mut caller, &mut input) => result.map(|_| ()),
+    let mut requests = AsyncBufReader::new(caller);
+    let mut subscribed_agent = None;
+    let result = tokio::select! {
         result = async {
+            let mut line = Vec::new();
+            while requests.read_until(b'\n', &mut line).await? != 0 {
+                if let Ok(request) = serde_json::from_slice::<Value>(&line) {
+                    if request["method"] == "subscribe" {
+                        subscribed_agent = Some(request["params"]["agent_id"].clone());
+                    }
+                    let _ = observed.send(Observation::Request(request));
+                }
+                input.write_all(&line).await?;
+                line.clear();
+            }
+            Ok(())
+        } => result,
+        result = async {
+            let mut line = Vec::new();
             while replies.read_until(b'\n', &mut line).await? != 0 {
                 output.write_all(&line).await?;
                 if let Ok(response) = serde_json::from_slice::<Value>(&line)
                     && response["result"]["state"] == "running"
                 {
-                    let _ = observed.send(response["result"]["id"].clone());
+                    let _ = observed.send(Observation::Running(response["result"]["id"].clone()));
                 }
                 line.clear();
             }
             Ok(())
         } => result,
+    };
+    if let Some(agent) = subscribed_agent {
+        let _ = observed.send(Observation::SubscriptionClosed(agent));
     }
+    result
 }
 
 #[test]
@@ -672,8 +727,18 @@ fn list_agents_returns_only_descendants() {
     let child = daemon.agent(Some(&caller), false);
     let grandchild = daemon.agent(Some(&child), false);
     daemon.rpc("agent.archive", json!({"id":child}));
-    let mut mcp = daemon.mcp(&caller);
+    let probe = WaitProbe::new(&daemon.env.paths.socket);
+    let mut mcp = Mcp::initialized(&probe.env, caller.as_str().expect("agent id"));
     let result = tool_json(&mcp.call("list_agents", json!({})));
+    let methods: Vec<_> = probe
+        .observations
+        .try_iter()
+        .filter_map(|event| match event {
+            Observation::Request(request) => request["method"].as_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(methods, ["hello", "agent.list"]);
     let agents = result["agents"].as_array().expect("agents");
     let ids: Vec<&Value> = agents.iter().map(|agent| &agent["agent_id"]).collect();
     assert_eq!(ids.len(), 2);
@@ -732,4 +797,212 @@ fn stdout_carries_only_json_rpc() {
         .read_to_string(&mut stderr)
         .expect("read stderr");
     assert!(!stderr.contains(PRIVATE), "{stderr}");
+}
+
+#[test]
+fn mcp_wait_authorizes_before_subscribing_and_reads_after_it() {
+    let daemon = Daemon::running();
+    let parent = daemon.agent(None, true);
+    let child = daemon.agent(Some(&parent), false);
+    let probe = WaitProbe::new(&daemon.env.paths.socket);
+    let mut mcp = Mcp::initialized(&probe.env, parent.as_str().expect("agent id"));
+    let result = tool_json(&mcp.call("wait_agent", json!({"agent_id":child,"timeout_secs":0})));
+    assert_eq!(result["timed_out"], true);
+    let order: Vec<_> = probe
+        .observations
+        .try_iter()
+        .filter_map(|event| match event {
+            Observation::Request(request) if request["method"] == "subscribe" => Some("subscribe"),
+            Observation::Request(request)
+                if request["method"] == "agent.get" && request["params"]["id"] == child =>
+            {
+                Some("get")
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(order.starts_with(&["get", "subscribe", "get"]), "{order:?}");
+}
+
+#[test]
+fn mcp_wait_is_concurrent_and_can_be_cancelled() {
+    let daemon = Daemon::running();
+    let parent = daemon.agent(None, true);
+    let child = daemon.agent(Some(&parent), false);
+    let probe = WaitProbe::new(&daemon.env.paths.socket);
+    let mut mcp = Mcp::initialized(&probe.env, parent.as_str().expect("agent id"));
+    let wait_id = mcp.begin(
+        "tools/call",
+        json!({
+            "name":"wait_agent","arguments":{"agent_id":child,"timeout_secs":u64::MAX}
+        }),
+    );
+    probe.wait_for_running(&child);
+    assert_eq!(mcp.request("ping", json!({}))["result"], json!({}));
+    mcp.write(
+        &json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{
+            "requestId":wait_id,"reason":PRIVATE
+        }}),
+    );
+    assert_eq!(mcp.request("ping", json!({}))["result"], json!({}));
+    probe.wait_for_subscription_close(&child);
+    let result = tool_json(&mcp.call("get_agent", json!({"agent_id":child})));
+    assert_eq!(result["state"], "running");
+    daemon.rpc("agent.archive", json!({"id":child}));
+    assert_eq!(
+        tool_json(&mcp.call("get_agent", json!({"agent_id":child})))["state"],
+        "archived"
+    );
+    assert_eq!(mcp.request("ping", json!({}))["result"], json!({}));
+}
+
+#[test]
+fn mcp_eof_cancels_pending_wait() {
+    let daemon = Daemon::running();
+    let parent = daemon.agent(None, true);
+    let child = daemon.agent(Some(&parent), false);
+    let probe = WaitProbe::new(&daemon.env.paths.socket);
+    let mut mcp = Mcp::initialized(&probe.env, parent.as_str().expect("agent id"));
+    mcp.begin(
+        "tools/call",
+        json!({
+            "name":"wait_agent","arguments":{"agent_id":child,"timeout_secs":300}
+        }),
+    );
+    probe.wait_for_running(&child);
+    drop(mcp.input.take());
+    assert!(matches!(
+        mcp.lines.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert!(mcp.child.wait().expect("MCP exits on EOF").success());
+    assert_eq!(daemon.get(&child)["state"], "running");
+}
+
+#[test]
+fn mcp_recovers_from_oversized_and_unterminated_frames() {
+    let env = TestEnv::new();
+    let agent = dgc_protocol::ids::AgentId::generate();
+    let mut mcp = Mcp::initialized(&env, agent.as_str());
+    let limit = dgc_protocol::MAX_MESSAGE_BYTES;
+    let mut frame = vec![b' '; limit * 3];
+    let embedded_request = br#"{"jsonrpc":"2.0","id":"embedded","method":"ping"}"#;
+    frame.extend_from_slice(embedded_request);
+    mcp.raw(&frame);
+    let response = mcp.read();
+    assert_eq!(response["error"]["code"], PARSE_ERROR);
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(mcp.request("ping", json!({}))["result"], json!({}));
+    mcp.input
+        .as_mut()
+        .expect("stdin")
+        .write_all(embedded_request)
+        .expect("write partial frame");
+    drop(mcp.input.take());
+    let response = mcp.read();
+    assert_eq!(response["error"]["code"], PARSE_ERROR);
+    assert_eq!(response["id"], Value::Null);
+    assert!(matches!(
+        mcp.lines.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert!(
+        mcp.child
+            .wait()
+            .expect("MCP exits after parse error")
+            .success()
+    );
+}
+
+#[test]
+fn malformed_tools_call_uses_json_rpc_error() {
+    let env = TestEnv::new();
+    let agent = dgc_protocol::ids::AgentId::generate();
+    let mut mcp = Mcp::initialized(&env, agent.as_str());
+    for params in [
+        json!({"name":PRIVATE}),
+        json!({}),
+        json!({"name":42}),
+        json!({"name":"list_agents","arguments":null}),
+        json!({"name":"list_agents","arguments":[]}),
+    ] {
+        let response = mcp.request("tools/call", params);
+        assert_eq!(response["error"]["code"], INVALID_PARAMS, "{response}");
+        assert!(!response.to_string().contains(PRIVATE));
+    }
+}
+
+#[test]
+fn mcp_reads_last_answer_across_event_pages() {
+    // Both turns exceed the daemon's page budget. The second stays in progress.
+    let block = "x".repeat(160 * 1024);
+    let daemon = Daemon::new(|env| {
+        let mut steps = vec![
+            json!({"expect":{"type":"user"}}),
+            json!({"send":{"type":"system","subtype":"init","session_id":"mcp-test-long"}}),
+            assistant_text("beginning of completed answer"),
+        ];
+        steps.extend((0..6).map(|_| assistant_text(&block)));
+        steps.extend([
+            json!({"send":{"type":"result","subtype":"success","is_error":false,"session_id":"mcp-test-long"}}),
+            json!({"expect":{"type":"user"}}),
+        ]);
+        steps.extend((0..6).map(|_| assistant_text(&block)));
+        steps.push(assistant_text("unfinished marker"));
+        steps.push(json!({"expect_eof":true}));
+        fake_scenario(env, steps)
+    });
+    let parent = daemon.agent(None, true);
+    let child = daemon.agent(Some(&parent), false);
+    let mut mcp = daemon.mcp(&parent);
+    let first = tool_json(&mcp.call("wait_agent", json!({"agent_id":child})));
+    let expected = format!("beginning of completed answer\n{block}");
+    assert_eq!(first["last_answer"], &expected[..16 * 1024]);
+    tool_json(&mcp.call("send_agent", json!({"agent_id":child,"text":"next"})));
+    daemon.wait_for_event(
+        &child,
+        json!({"type":"assistant_text","text":"unfinished marker","final":true}),
+    );
+    let second = tool_json(&mcp.call("get_agent", json!({"agent_id":child})));
+    assert_eq!(second["state"], "running");
+    assert_eq!(second["last_answer"], first["last_answer"]);
+}
+
+#[test]
+fn mcp_skips_completed_turn_with_error_before_tail_page() {
+    let chunk = "failed output".repeat(13 * 1024);
+    let daemon = Daemon::new(|env| {
+        let success = json!({
+            "send":{"type":"result","subtype":"success","is_error":false,"session_id":"mcp-test-before-error"}
+        });
+        let mut steps = vec![
+            json!({"expect":{"type":"user"}}),
+            json!({"send":{"type":"system","subtype":"init","session_id":"mcp-test-before-error"}}),
+            assistant_text("previous clean answer"),
+            success.clone(),
+            json!({"expect":{"type":"user"}}),
+            json!({"send":{"type":"assistant","is_api_error_message":true,"error":"synthetic error before long output"}}),
+        ];
+        steps.extend((0..6).map(|_| assistant_text(&chunk)));
+        steps.push(success);
+        steps.push(json!({"expect_eof":true}));
+        fake_scenario(env, steps)
+    });
+    let parent = daemon.agent(None, true);
+    let child = daemon.agent(Some(&parent), false);
+    let mut mcp = daemon.mcp(&parent);
+    let first = tool_json(&mcp.call("wait_agent", json!({"agent_id":child})));
+    assert_eq!(first["last_answer"], "previous clean answer");
+    tool_json(&mcp.call("send_agent", json!({"agent_id":child,"text":"next"})));
+    let result = tool_json(&mcp.call("wait_agent", json!({"agent_id":child})));
+    assert_eq!(result["state"], "idle");
+    assert_eq!(result["last_answer"], "previous clean answer");
+    let tail = daemon.rpc("agent.events", json!({"agent_id":child,"tail":1000}));
+    assert!(
+        !tail["events"]
+            .as_array()
+            .expect("tail")
+            .iter()
+            .any(|event| event["kind"]["type"] == "error")
+    );
 }

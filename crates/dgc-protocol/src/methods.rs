@@ -270,6 +270,17 @@ impl AgentEventsParams {
     }
 }
 
+/// Wire parameters for `agent.events`, including optional backward paging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEventsQuery {
+    #[serde(flatten)]
+    pub page: AgentEventsParams,
+    /// When true, return the newest events strictly before `since_seq`, in
+    /// ascending order. Uses `limit` and cannot be combined with `tail`.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRespondParams {
     pub id: PermissionId,

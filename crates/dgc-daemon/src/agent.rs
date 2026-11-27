@@ -54,7 +54,7 @@ mod actor;
 
 use self::actor::{Command, Launch, Start, register, run_actor};
 use crate::config::{DaemonConfig, ProfileConfig};
-use crate::events_log::EventLog;
+use crate::events_log::{EventLog, EventLogError};
 use crate::paths::{DaemonPaths, ensure_private_dir};
 use crate::provider::{McpLaunch, ProviderAdapter, ProviderError};
 use crate::store::{Store, write_atomic};
@@ -1027,15 +1027,31 @@ impl AgentManager {
 
     /// One page of stored events, from a sequence cursor or the end of the log.
     pub fn events_page(&self, params: &AgentEventsParams) -> Result<Vec<AgentEvent>, AgentError> {
+        self.read_events(params, |log| match params.tail {
+            Some(n) => log.read_tail(n.min(MAX_EVENTS_LIMIT)),
+            None => log.read_page(params.since_seq, params.clamped_limit()),
+        })
+    }
+
+    pub(crate) fn events_before(
+        &self,
+        params: &AgentEventsParams,
+    ) -> Result<Vec<AgentEvent>, AgentError> {
+        self.read_events(params, |log| {
+            log.read_before(params.since_seq, params.clamped_limit())
+        })
+    }
+
+    fn read_events(
+        &self,
+        params: &AgentEventsParams,
+        read: impl FnOnce(&EventLog) -> Result<Vec<AgentEvent>, EventLogError>,
+    ) -> Result<Vec<AgentEvent>, AgentError> {
         self.load(&params.agent_id)?;
         let slot = self.shared.log_slot(&params.agent_id);
         let mut slot = lock(&slot);
         let log = self.shared.open_log(&params.agent_id, &mut slot)?;
-        match params.tail {
-            Some(n) => log.read_tail(n.min(MAX_EVENTS_LIMIT)),
-            None => log.read_page(params.since_seq, params.clamped_limit()),
-        }
-        .map_err(storage)
+        read(log).map_err(storage)
     }
 
     /// At daemon start no provider process exists: mark agents stored as

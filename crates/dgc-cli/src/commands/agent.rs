@@ -232,7 +232,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn default_title(prompt: &str) -> String {
+pub(crate) fn default_title(prompt: &str) -> String {
     prompt
         .lines()
         .next()

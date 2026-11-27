@@ -270,7 +270,7 @@ impl ProviderAdapter for CodexAdapter {
                     ("command", command),
                     ("args", argv),
                     ("env", env),
-                    ("tool_timeout_sec", Toml::Integer(330)),
+                    ("tool_timeout_sec", Toml::Integer(360)),
                 ] {
                     args.extend(["-c".to_owned(), format!("mcp_servers.dgc.{key}={value}")]);
                 }

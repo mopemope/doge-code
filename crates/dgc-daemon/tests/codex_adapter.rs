@@ -124,7 +124,7 @@ async fn codex_launch_args_include_mcp_overrides_only_when_enabled() {
         json!({
             "mcp_servers": {"dgc": {"command": command, "args": args,
                                    "env": {"HOME": "/tmp/dgc home", "DGC_STATE_ROOT": state_root},
-                                   "tool_timeout_sec": 330}}
+                                   "tool_timeout_sec": 360}}
         })
     );
     assert_eq!(launch_args(&dir, None).await, ["app-server"]);

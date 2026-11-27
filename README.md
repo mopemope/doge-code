@@ -185,8 +185,10 @@ MCP tool calls within that UID. Permission requests still go to the user.
 
 `wait_agent` returns when the descendant becomes idle, stopped, failed,
 archived, or needs permission. It waits 60 seconds by default and up to 300
-seconds. `get_agent` and `wait_agent` include up to 16 KiB of the most recent
-completed answer available in the event tail.
+seconds. Other MCP requests can proceed during the wait. Clients can cancel
+a pending MCP call with `notifications/cancelled`.
+`get_agent` and `wait_agent` include up to 16 KiB of the most recent clean,
+completed answer found within four event pages.
 
 ### Launch profiles
 

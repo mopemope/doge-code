@@ -1646,6 +1646,35 @@ async fn events_tail_param_returns_last_n() {
 }
 
 #[tokio::test]
+async fn events_reverse_cursor_excludes_upper_bound() {
+    let mut h = Harness::new(DEFAULT);
+    let (agent, session) = h.running("first").await;
+    for _ in 0..6 {
+        session
+            .emit(ProviderEvent::Event(EventKind::AssistantText {
+                text: "x".repeat(160 * 1024),
+                final_: true,
+            }))
+            .await;
+    }
+    session.emit(turn_completed()).await;
+    h.wait_state(&agent.id, AgentState::Idle).await;
+    let request = |params| {
+        let response =
+            dgc_daemon::handlers::agent_events(&h.manager, params).expect("agent.events");
+        serde_json::from_value::<Vec<AgentEvent>>(response["events"].clone()).expect("events")
+    };
+    let tail = request(serde_json::json!({"agent_id":agent.id,"tail":1000}));
+    let before = tail.first().expect("tail events").seq;
+    let page = request(serde_json::json!({
+        "agent_id":agent.id,"since_seq":before,"limit":1000,"reverse":true
+    }));
+    assert_eq!(page.last().expect("previous page").seq + 1, before);
+    let budget = dgc_protocol::methods::MAX_EVENTS_PAGE_BYTES;
+    assert!(serde_json::to_vec(&page).expect("page JSON").len() <= budget);
+}
+
+#[tokio::test]
 async fn buffered_turn_completed_is_applied_before_a_later_command() {
     let mut h = Harness::new(DEFAULT);
     let (agent, mut session) = h.running("first").await;

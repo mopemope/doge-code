@@ -80,8 +80,11 @@ Subscriptions (`subscription.rs`) forward `event` notifications for one agent
 or all agents. A one-agent subscription can backfill from `since_seq` before
 going live without gaps or duplicates. A client that cannot keep up gets one
 `lagged` notification and the subscription ends; it recovers with `agent.events`
-and subscribes again. `agent.events` pages are bounded by count and bytes, so
-clients page until an empty page.
+and subscribes again. `agent.events` pages are bounded by count and bytes.
+Forward pages start after `since_seq`. With `reverse: true`, a page contains
+the newest events strictly before `since_seq` in ascending sequence order.
+Use the first event's sequence as the next backward cursor. `tail` reads
+the newest page and is incompatible with `reverse: true`.
 
 ## Provider adapters
 

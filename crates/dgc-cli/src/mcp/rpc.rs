@@ -35,7 +35,12 @@ pub fn success(id: Value, result: Value) -> Value {
     json!({"jsonrpc": JSONRPC_VERSION, "id": id, "result": result})
 }
 
-pub type Message = Result<Option<Request>, Value>;
+pub enum Inbound {
+    Request(Request),
+    Cancel(Value),
+}
+
+pub type Message = Result<Option<Inbound>, Value>;
 
 pub fn read(input: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<Option<Message>> {
     line.clear();
@@ -47,24 +52,26 @@ pub fn read(input: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<Option<M
         return Ok(None);
     }
     let Some(bytes) = line.strip_suffix(b"\n") else {
-        // Never interpret a partial or oversized frame as a request.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid MCP frame length",
-        ));
+        // Drain the remaining bytes without allocating a buffer for them.
+        input.skip_until(b'\n')?;
+        return Ok(Some(Err(parse_error())));
     };
     let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid MCP frame length",
-        ));
+        return Ok(Some(Err(parse_error())));
     }
     Ok(Some(parse(bytes)))
 }
 
+fn parse_error() -> Value {
+    Error::new(PARSE_ERROR, "Parse error").response(Value::Null)
+}
+
+fn valid_id(id: &Value) -> bool {
+    id.is_string() || id.is_i64() || id.is_u64()
+}
+
 fn parse(bytes: &[u8]) -> Message {
-    let parse_error = || Error::new(PARSE_ERROR, "Parse error").response(Value::Null);
     if bytes.contains(&b'\r') {
         return Err(parse_error());
     }
@@ -79,19 +86,23 @@ fn parse(bytes: &[u8]) -> Message {
     let Some(Value::String(method)) = message.remove("method") else {
         return Err(invalid_request());
     };
-    // The server only handles requests. In particular, a notification cannot
-    // invoke a tool even if it names the tools/call method.
+    let params = message.remove("params").unwrap_or_else(|| json!({}));
     let Some(id) = message.remove("id") else {
-        return Ok(None);
+        return Ok(
+            if method == "notifications/cancelled" && valid_id(&params["requestId"]) {
+                Some(Inbound::Cancel(params["requestId"].clone()))
+            } else {
+                None
+            },
+        );
     };
-    if !(id.is_string() || id.is_i64() || id.is_u64()) {
+    if !valid_id(&id) {
         return Err(invalid_request());
     }
-    let params = message.remove("params").unwrap_or_else(|| json!({}));
     if !params.is_object() {
         return Err(Error::new(INVALID_PARAMS, "Invalid params").response(id));
     }
-    Ok(Some(Request { id, method, params }))
+    Ok(Some(Inbound::Request(Request { id, method, params })))
 }
 
 pub fn write(output: &mut impl Write, message: &Value) -> io::Result<()> {

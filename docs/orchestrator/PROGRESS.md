@@ -20,7 +20,7 @@
 
 - タスク: M6 Task 3（CLI と TUI での表示と有効化）
 - 状態: 未着手
-- 済んだこと: Task 2 で stdio MCP サーバー、子孫への 7 ツール、待機の終了処理を実装。
+- 済んだこと: Task 2 で stdio MCP サーバーと子孫への 7 ツールを実装。レビュー対応で呼び出しの並行処理、キャンセル、回答の逆向きページ取得を追加。
 - 次の一手: Task 2 のコントローラーレビュー後、Task 3 で `--mcp` と CLI/TUI の親子表示を実装する。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
@@ -123,8 +123,17 @@
   公式仕様の現行版 `2026-07-28` ではハンドシェイクが廃止された。対応する両版で JSON-RPC バッチは廃止済みのため拒否する。stdio は UTF-8 の 1 行 1 メッセージとする。
   2026-11-27 参照。[MCP 仕様](https://modelcontextprotocol.io/specification) [2026-07-28 の変更点](https://modelcontextprotocol.io/specification/2026-07-28/changelog) [バッチの廃止](https://modelcontextprotocol.io/specification/2025-06-18/changelog) [stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) [バージョン交渉](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
 - 2026-11-27 (M6 Task 2): `dgc mcp` は標準のパス解決と `Client::connect` を使う。`list_agents` はアーカイブ済みも含む子孫の ID、状態、タイトル、プロバイダを返す。
-  `wait_agent` は購読してから状態を読み、`lagged` では購読を作り直す。指定秒数は 300 に切り詰め、接続・取得には別途それぞれ最大 15 秒の猶予を設ける。
-  `last_answer` はイベント末尾ページから完了したターンを選び、失敗やレート制限を記録したターンは飛ばす。
+  `wait_agent` は子孫であることを確認してから購読し、購読後に待機に使う状態を読む。`lagged` では購読を作り直す。指定秒数は 300 に切り詰める。
+  `last_answer` は最大 4 ページを調べ、開始と完了が記録された直近の正常な回答を返す。
+
+- 2026-11-27 (M6 Task 2 レビュー対応): 対応版は `2025-11-25` と `2025-06-18`。両方式対応のクライアントは stdio の `server/discover` に対する `-32601` を受けて `initialize` に切り替える。
+  `2026-07-28` 専用のクライアントは接続できない。`2025-03-26` はバッチ対応が必要なため対応版に含めない。
+  2026-11-27 参照。[バージョンの互換性](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) [バッチの廃止](https://modelcontextprotocol.io/specification/2025-06-18/changelog)
+- 2026-11-27 (M6 Task 2 レビュー対応): ツール呼び出しをリクエスト ID ごとに実行し、`notifications/cancelled` で中断する。stdin の EOF で処理中の呼び出しを中断する。未知のツールと壊れた呼び出しの外形には `-32602` を返す。
+  2026-11-27 参照。[キャンセル](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation) [ツールのエラー](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+- 2026-11-27 (M6 Task 2 レビュー対応): Codex の `tool_timeout_sec` を 330 秒から 360 秒に延長する。MCP は状態待機を最大 300 秒、開始時と結果取得の RPC を合算で最大 15 秒に制限する。 [Codex Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+- 2026-11-27 (M6 Task 2 レビュー対応): `agent.events` に `reverse: true` を追加し、この場合の `since_seq` は排他的な上限とする。既存の前方ページと `tail` の契約を維持し、各方向で既存のページ上限を共用する。
+  これにより、サイズが不均一なイベントでもページ間の連続性を保つ。
 
 - 2026-11-27 (M6 Task 1): Claude の `--mcp-config` は単一引数のインライン JSON を使う。
   既存のユーザー MCP 設定も読み込むよう `--strict-mcp-config` は付けない。2026-11-27 参照。[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
@@ -724,6 +733,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 2 レビュー対応（Linux、Rust 1.99.0）
+  - MCP で待機中の応答と EOF、フレーム処理、ツールエラー、逆方向の履歴取得、購読順と一覧 RPC に関する回帰を修正前に確認した。Codex の 330 秒と逆方向カーソルの未対応も RED で確認した。
+  - `cargo test --locked -p dgc-cli --test mcp` 19 件、`cargo test --locked -p dgc-daemon --test codex_adapter` 30 件、`cargo test --locked -p dgc-daemon --test agent_manager events_` 2 件、`bash scripts/verify.sh test wait_duration_clamps_above_300_seconds` 1 件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 766 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログチェック、Python 40 件）が PASS。ログは `task-2-fix1-{red,green,verify}-*.log`。実プロバイダと macOS 実機は未検証。
 
 - 2026-11-27 M6 Task 2（Linux、Rust 1.99.0）
   - `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` 後、`cargo test --locked -p dgc-cli --test mcp` は実装前に 12 件失敗、実装後に 12 件 PASS。テストは一時状態ルート内で実デーモンと偽プロバイダを使用。
