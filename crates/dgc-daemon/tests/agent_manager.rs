@@ -5,6 +5,10 @@
 //! methods the manager called.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -221,6 +225,15 @@ impl Harness {
     fn with_config(options: Options, config: DaemonConfig) -> Self {
         let dir = tempdir().expect("tempdir");
         let paths = DaemonPaths::under(dir.path());
+        Self::with_paths(dir, paths, options, config)
+    }
+
+    fn with_paths(
+        dir: TempDir,
+        paths: DaemonPaths,
+        options: Options,
+        config: DaemonConfig,
+    ) -> Self {
         let store = Arc::new(Store::open(&paths.state_dir).expect("store"));
         let ws_path = dir.path().join("ws");
         std::fs::create_dir_all(&ws_path).expect("ws dir");
@@ -1005,7 +1018,22 @@ async fn resume_keeps_mcp() {
         "XDG_RUNTIME_DIR",
     ]
     .into_iter()
-    .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_owned(), value)))
+    .filter_map(|key| {
+        let value = std::env::var(key).ok()?;
+        match key {
+            "DGC_STATE_ROOT" if !value.is_empty() => Some((
+                key.to_owned(),
+                std::path::absolute(value)
+                    .expect("absolute root")
+                    .into_os_string()
+                    .into_string()
+                    .expect("UTF-8 root"),
+            )),
+            "DGC_STATE_ROOT" => None,
+            _ if Path::new(&value).is_absolute() => Some((key.to_owned(), value)),
+            _ => None,
+        }
+    })
     .collect();
     assert_eq!(
         launch.env.iter().cloned().collect::<BTreeMap<_, _>>(),
@@ -1030,6 +1058,108 @@ async fn resume_keeps_mcp() {
     assert_eq!(resumed_launch.args, launch.args);
     assert_eq!(resumed_launch.env, launch.env);
     h.manager.shutdown_all(WAIT).await;
+}
+
+const MCP_ENV_TEST_CHILD: &str = "DGC_AGENT_MANAGER_MCP_TEST_CHILD";
+
+/// Run a single test with its own cwd and environment. The rest of the suite
+/// can continue to use the process environment concurrently.
+fn run_mcp_env_test(test: &str, configure: impl FnOnce(&mut Command)) {
+    let dir = tempdir().expect("daemon cwd");
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test, "--nocapture"])
+        .current_dir(dir.path())
+        .env_clear()
+        .env(MCP_ENV_TEST_CHILD, "1");
+    configure(&mut command);
+    let output = command.output().expect("run MCP environment test");
+    assert!(
+        output.status.success(),
+        "{test} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn mcp_relative_state_root_uses_daemon_cwd() {
+    if std::env::var_os(MCP_ENV_TEST_CHILD).is_none() {
+        run_mcp_env_test("mcp_relative_state_root_uses_daemon_cwd", |command| {
+            command
+                .env("DGC_STATE_ROOT", "relative root")
+                .env("HOME", "relative-home")
+                .env("XDG_STATE_HOME", "relative-state")
+                .env("XDG_CONFIG_HOME", "")
+                .env("XDG_DATA_HOME", "/test-data")
+                .env("XDG_RUNTIME_DIR", "relative-runtime")
+                .env("UNRELATED", "ignored");
+        });
+        return;
+    }
+
+    let daemon_cwd = std::env::current_dir().expect("daemon cwd");
+    let relative_root = std::env::var_os("DGC_STATE_ROOT").expect("relative root");
+    let paths = DaemonPaths::under(Path::new(&relative_root));
+    let mut h = Harness::with_paths(
+        tempdir().expect("workspace dir"),
+        paths,
+        DEFAULT,
+        DaemonConfig::default(),
+    );
+    h.manager
+        .create(AgentCreateParams {
+            mcp: true,
+            ..h.create_params("MCP")
+        })
+        .await
+        .expect("create MCP agent");
+    let mut session = h.next_session().await;
+    assert_eq!(session.next_call().await, Call::SendUser("MCP".to_owned()));
+    assert_ne!(session.spec.cwd, daemon_cwd);
+    let launch = session.spec.mcp.expect("MCP launch");
+    let env: BTreeMap<_, _> = launch.env.into_iter().collect();
+    let root = Path::new(&env["DGC_STATE_ROOT"]);
+    assert_eq!(root, daemon_cwd.join(relative_root));
+    assert_eq!(
+        DaemonPaths::under(root).socket,
+        daemon_cwd.join(&h.paths.socket)
+    );
+    assert_eq!(env.len(), 2, "only the state root and an absolute XDG path");
+    assert_eq!(env["XDG_DATA_HOME"], "/test-data");
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn mcp_non_utf8_environment_reports_invalid_state() {
+    if std::env::var_os(MCP_ENV_TEST_CHILD).is_none() {
+        run_mcp_env_test(
+            "mcp_non_utf8_environment_reports_invalid_state",
+            |command| {
+                command.env(
+                    "DGC_STATE_ROOT",
+                    OsString::from_vec(b"private-value-\xff".to_vec()),
+                );
+            },
+        );
+        return;
+    }
+
+    let h = Harness::new(DEFAULT);
+    let err = h
+        .manager
+        .create(AgentCreateParams {
+            mcp: true,
+            ..h.create_params("MCP")
+        })
+        .await
+        .expect_err("non-UTF-8 environment");
+    assert_eq!(err.code(), dgc_protocol::rpc::INVALID_STATE);
+    assert_eq!(
+        err.to_string(),
+        "cannot attach the dgc MCP server: a daemon path environment variable is not UTF-8"
+    );
+    assert!(h.manager.list().expect("agents").is_empty());
 }
 
 #[tokio::test]
@@ -2160,33 +2290,37 @@ async fn handoff_creates_agent_in_same_workspace_with_label() {
     .expect("handoff profile");
     let mut h = Harness::with_config(DEFAULT, config);
     let (source, mut source_session) = h.running("first").await;
-    let result = handoff_rpc(
-        &h,
+    for params in [
         serde_json::json!({
             "agent_id": source.id, "profile": "handoff", "dry_run": false
         }),
-    )
-    .await
-    .expect("handoff");
-    let mut target = h.next_session().await;
-    let agent: Agent = serde_json::from_value(result["agent"].clone()).expect("agent");
-    assert_ne!(agent.id, source.id);
-    assert_eq!(agent.title, "handoff: t");
-    assert_eq!(agent.workspace_id, source.workspace_id);
-    assert_eq!(
-        agent.labels.get("handoff_from").map(String::as_str),
-        Some(source.id.as_str())
-    );
-    assert!(agent.parent_id.is_none());
-    assert_eq!(agent.depth, 0);
-    assert!(!agent.mcp);
-    assert!(agent.auto_approve);
-    assert_eq!(target.spec.cwd, h.workspace.path);
-    assert!(target.spec.mcp.is_none());
-    assert_eq!(
-        target.next_call().await,
-        Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
-    );
+        serde_json::json!({
+            "agent_id": source.id, "provider": "codex", "mode": "full-access", "dry_run": false
+        }),
+    ] {
+        let result = handoff_rpc(&h, params).await.expect("handoff");
+        let mut target = h.next_session().await;
+        let agent: Agent = serde_json::from_value(result["agent"].clone()).expect("agent");
+        assert_ne!(agent.id, source.id);
+        assert_eq!(agent.title, "handoff: t");
+        assert_eq!(agent.workspace_id, source.workspace_id);
+        assert_eq!(
+            agent.labels.get("handoff_from").map(String::as_str),
+            Some(source.id.as_str())
+        );
+        assert!(agent.parent_id.is_none());
+        assert_eq!(agent.depth, 0);
+        assert!(!agent.mcp);
+        assert_eq!(agent.provider, ProviderKind::Codex);
+        assert_eq!(agent.mode.as_deref(), Some("full-access"));
+        assert!(agent.auto_approve);
+        assert_eq!(target.spec.cwd, h.workspace.path);
+        assert!(target.spec.mcp.is_none());
+        assert_eq!(
+            target.next_call().await,
+            Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
+        );
+    }
     assert_eq!(
         h.manager.get(&source.id).expect("source").state,
         AgentState::Running

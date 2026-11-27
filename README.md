@@ -101,6 +101,10 @@ agents. Providers inherit the daemon's environment, and a daemon started on
 demand inherits the environment of the command that started it; to change the
 environment, restart the daemon.
 
+For agents with dgc MCP enabled, `dgc` is a reserved MCP server name. A custom
+`[mcp_servers.dgc]` in Codex or `mcpServers.dgc` in Claude can merge with or
+override the attached server's configuration.
+
 When the daemon stops it ends every agent's provider process; after a restart
 those agents show as `stopped` and `dgc resume` continues them from their
 provider session. Permission requests pending at shutdown are lost.

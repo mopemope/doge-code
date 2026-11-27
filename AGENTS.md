@@ -116,7 +116,7 @@ output text in errors; `Exited` once on unexpected exit; no `TurnCompleted` or
 `PermissionRequested` for a turn after `interrupt` returns; bounded time for
 every method. Base wire behavior on recorded fixtures and record the tested CLI
 version.
-Add the dgc MCP launch arguments only when `AgentSpec.mcp` is set and keep other user MCP servers available.
+Add the dgc MCP launch arguments only when `AgentSpec.mcp` is set and keep other user MCP servers available. Reserve the server name `dgc` because a user's `[mcp_servers.dgc]` (Codex) or `mcpServers.dgc` (Claude) can merge with or override the attachment.
 
 ## Tests
 

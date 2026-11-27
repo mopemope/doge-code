@@ -105,6 +105,8 @@ pub enum AgentError {
     /// `workspace_archived`.
     #[error("operation not allowed in state {state}")]
     InvalidState { state: String },
+    #[error(transparent)]
+    McpLaunch(#[from] McpLaunchError),
     #[error("{}", HANDOFF_CHANGED)]
     HandoffChanged,
     #[error("{0}")]
@@ -120,7 +122,7 @@ impl AgentError {
     pub fn code(&self) -> i32 {
         match self {
             Self::NotFound(_) => NOT_FOUND,
-            Self::InvalidState { .. } | Self::HandoffChanged => INVALID_STATE,
+            Self::InvalidState { .. } | Self::McpLaunch(_) | Self::HandoffChanged => INVALID_STATE,
             Self::InvalidParams(_) => INVALID_PARAMS,
             Self::Provider(_) | Self::Storage(_) => INTERNAL,
         }
@@ -131,6 +133,18 @@ impl AgentError {
             state: state_label(state).to_owned(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum McpLaunchError {
+    #[error("cannot attach the dgc MCP server: daemon executable path is unavailable or not UTF-8")]
+    ExecutableUnavailable,
+    #[error("cannot attach the dgc MCP server: a daemon path environment variable is not UTF-8")]
+    EnvironmentNotUtf8,
+    #[error(
+        "cannot attach the dgc MCP server: could not resolve DGC_STATE_ROOT to an absolute path"
+    )]
+    StateRootUnavailable,
 }
 
 fn state_label(state: AgentState) -> &'static str {
@@ -459,6 +473,43 @@ pub struct AgentManager {
     profiles: BTreeMap<String, ProfileConfig>,
     max_agent_depth: u32,
     mcp_program: Option<PathBuf>,
+    mcp_env: Result<Vec<(String, String)>, McpLaunchError>,
+}
+
+fn mcp_environment() -> Result<Vec<(String, String)>, McpLaunchError> {
+    let mut paths = Vec::new();
+    // The provider runs in the workspace. Resolve the override in the
+    // daemon's cwd so its meaning survives a change of cwd.
+    if let Some(root) = std::env::var_os("DGC_STATE_ROOT").filter(|root| !root.is_empty()) {
+        let absolute =
+            std::path::absolute(root).map_err(|_| McpLaunchError::StateRootUnavailable)?;
+        paths.push(("DGC_STATE_ROOT", absolute));
+    }
+    // DaemonPaths ignores empty and relative home and XDG paths.
+    for name in [
+        "HOME",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
+        if let Some(path) = std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            paths.push((name, path));
+        }
+    }
+    paths
+        .into_iter()
+        .map(|(name, path)| {
+            let value = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| McpLaunchError::EnvironmentNotUtf8)?;
+            Ok((name.to_owned(), value))
+        })
+        .collect()
 }
 
 impl AgentManager {
@@ -483,7 +534,10 @@ impl AgentManager {
             timeouts: ProviderTimeouts::default(),
             profiles: config.profiles,
             max_agent_depth: config.max_agent_depth,
-            mcp_program: std::env::current_exe().ok(),
+            mcp_program: std::env::current_exe()
+                .ok()
+                .filter(|path| path.to_str().is_some()),
+            mcp_env: mcp_environment(),
         }
     }
 
@@ -605,30 +659,12 @@ impl AgentManager {
         let command = self
             .mcp_program
             .as_ref()
-            .filter(|path| path.to_str().is_some())
-            .ok_or_else(|| AgentError::InvalidState {
-                state: "mcp_executable_unavailable".to_owned(),
-            })?;
-        let mut env = Vec::new();
-        for name in [
-            "DGC_STATE_ROOT",
-            "HOME",
-            "XDG_STATE_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_RUNTIME_DIR",
-        ] {
-            if let Some(value) = std::env::var_os(name) {
-                let value = value.into_string().map_err(|_| AgentError::InvalidState {
-                    state: "mcp_environment_not_utf8".to_owned(),
-                })?;
-                env.push((name.to_owned(), value));
-            }
-        }
+            .ok_or(McpLaunchError::ExecutableUnavailable)?;
+        let env = self.mcp_env.as_ref().map_err(|&err| err)?;
         Ok(Some(McpLaunch {
             command: command.clone(),
             args: vec!["mcp".to_owned(), "--agent".to_owned(), id.to_string()],
-            env,
+            env: env.clone(),
         }))
     }
 
@@ -1054,5 +1090,35 @@ impl AgentManager {
                 warn!(agent_id = %id, "agent did not shut down in time");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_unavailable_executable_reports_invalid_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = DaemonPaths::under(dir.path());
+        let store = Arc::new(Store::open(&paths.state_dir).expect("store"));
+        let mut manager = AgentManager::new(store, paths, DaemonConfig::default(), HashMap::new());
+        manager.mcp_program = None;
+
+        let id = AgentId::generate();
+        assert!(
+            manager
+                .mcp_launch(&id, false)
+                .expect("MCP disabled")
+                .is_none()
+        );
+        let err = manager
+            .mcp_launch(&id, true)
+            .expect_err("unavailable executable");
+        assert_eq!(err.code(), INVALID_STATE);
+        assert_eq!(
+            err.to_string(),
+            "cannot attach the dgc MCP server: daemon executable path is unavailable or not UTF-8"
+        );
     }
 }

@@ -20,7 +20,7 @@
 
 - タスク: M6 Task 2（`dgc mcp` サーバー）
 - 状態: 未着手
-- 済んだこと: Task 1 でプロトコル v4、親子の作成規則、MCP 起動引数と resume での設定復元を実装。
+- 済んだこと: Task 1 でプロトコル v4、親子の作成規則、MCP 起動引数と resume での設定復元を実装。レビュー対応で相対状態ルートを起動時に絶対化。
 - 次の一手: Task 1 のコントローラーレビュー後、Task 2 で stdio MCP サーバーと子孫操作を実装する。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
@@ -127,8 +127,12 @@
 - 2026-11-27 (M6 Task 1): `codex-cli 0.172.0` の `codex mcp list -c …` を一時 `HOME` と `CODEX_HOME` で認証情報なしで実行。終了コード 0。
   一覧で `dgc`、コマンド `/tmp/dgc bin/dgc`、引数 `mcp --agent test-agent`、環境変数 `DGC_STATE_ROOT=*****` / `HOME=*****`、状態 `enabled` を確認。
   `--json` では `transport.type = "stdio"`、引数配列、サンプル環境変数の値、`tool_timeout_sec = 330.0` を確認。一時ディレクトリ下の PATH エイリアス作成を省略する警告は出たが、設定は読み取れた。
-- 2026-11-27 (M6 Task 1): MCP には、デーモンに存在する `DGC_STATE_ROOT`、`HOME`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_RUNTIME_DIR` だけを明示する。起動時に解決した実行ファイルを使い、実行ファイルを指定できない場合は `INVALID_STATE`（`mcp_executable_unavailable`）を返す。JSON/TOML で表現できない非 UTF-8 の環境値は `mcp_environment_not_utf8` で拒否する。
-  開発用の `DGC_STATE_ROOT` は、プロバイダとデーモンの作業ディレクトリが異なる場合にも同じ場所を指すよう、MCP 接続の検証では絶対パスを使う。
+- 2026-11-27 (M6 Task 1 レビュー対応): MCP に渡す非空の `DGC_STATE_ROOT` は、デーモン起動時に `std::path::absolute` でデーモンの作業ディレクトリを基準に解決する。
+  `HOME`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_RUNTIME_DIR` は `DaemonPaths` と同様に絶対パスだけを使う。MCP の起動構成にはこの 6 変数以外を含めない。
+  状態ルートや実行ファイルを解決できない場合、およびパスを UTF-8 で表現できない場合は、値を含まない専用の文面で `INVALID_STATE` を返す。2026-11-27 参照。[Rust std::path::absolute](https://doc.rust-lang.org/std/path/fn.absolute.html)
+  MCP サーバー名 `dgc` は予約名とする。プロバイダの同名設定と混合または上書きされ得るため、README と AGENTS.md に記載した。
+  2026-11-27 参照。[Codex Config basics](https://learn.chatgpt.com/docs/config-file/config-basic) [Claude Code MCP](https://code.claude.com/docs/en/mcp)
+- 2026-11-27 (M6 Task 1): MCP には起動時に解決したデーモンの実行ファイルを使う。
   スケジュールと引き継ぎで作るエージェントは、プロファイルを指定した場合も `mcp = false`、`depth = 0`、`parent_id = None`。
   旧エージェントレコードに MCP と深さのフィールドがなければ `false` と `0` で読み込む。
 
@@ -713,6 +717,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 1 レビュー対応（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-daemon --test agent_manager mcp_` と `cargo test --locked -p dgc-daemon --lib mcp_unavailable_executable_reports_invalid_state` で、未解決の相対パスと従来の状態メッセージを RED で確認。
+  - `cargo test --locked -p dgc-daemon --test agent_manager --test claude_adapter --test codex_adapter --test server` は 139 件 PASS。実行ファイルの専用エラーを検証する単体テストも PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 745 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログチェック、Python 40 件）が PASS。作業フォルダに `task-1-fix1-{red,green,verify}-*.log` を保存。
 
 - 2026-11-27 M6 Task 1（Linux、Rust 1.99.0）
   - `cargo test --locked -p dgc-daemon --test agent_manager --test claude_adapter --test codex_adapter --test server` は、実装前に型とフィールドの未定義で RED、実装後に 137 件 PASS。
