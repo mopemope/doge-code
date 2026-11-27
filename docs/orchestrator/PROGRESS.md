@@ -691,6 +691,8 @@
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
 
+- 2026-11-27 M5 macOS PTY 修正（Linux、Rust 1.99.0）: `cargo test --locked -p dgc-cli --test script_cli`（11件）、`cargo fmt --all`、`bash scripts/verify.sh rust`（732件）、`bash scripts/verify.sh guidance`（Python 40件）、`cargo check --locked --workspace --all-targets --target aarch64-apple-darwin` が PASS。macOS 実機のテストは未実行。
+
 - 2026-11-27 M5 最終修正（Linux、Rust 1.99.0）
   - `cargo test --locked -p dgc-cli --test schedule_cli` 7件、`--test script_cli` 11件、`cargo test --locked -p dgc-daemon --test schedule` 25件、`--test script` 21件が PASS。
   - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 732件）、`bash scripts/verify.sh guidance`（リンク、機密ログチェック、Python 40件）、

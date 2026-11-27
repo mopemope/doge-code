@@ -157,8 +157,8 @@ async fn script_trust_refuses_if_either_stream_is_redirected_before_trust_rpc() 
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         },
         0,
