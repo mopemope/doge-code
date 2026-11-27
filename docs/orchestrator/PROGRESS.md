@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M5 の計画作成
-- 状態: 未着手
-- 済んだこと: M0〜M3 マージ済み（#183〜#186）。M4 は PR #187（develop 向け）でレビュー待ち。M4 の実装、受け入れ、最終レビュー修正が完了。合成シナリオの提案・再確認と、実プロバイダ間の 1 回の引き継ぎを確認した。
-- 次の一手: M4 の PR をマージ後、M5（スケジュール、heartbeat、ワークスペーススクリプト: dgc.json + 内容ハッシュでの信頼確認、停止中に過ぎたスケジュールはスキップ）の計画を作成する。M4 の保留指摘から前提になるものを選ぶ
+- タスク: M5 Task 1（cron とローカル時刻）
+- 状態: 計画作成済み（ユーザーのレビュー待ち）
+- 済んだこと: M0〜M4 マージ済み（#183〜#187）。M5 計画 `docs/superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md` を作成。
+- 次の一手: 計画のレビュー後、Task 1 から順に実装する。M4 の保留指摘で M5 の前提になるものは無いと判断した（⇄ の永続化は M5 の範囲外のまま）
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -31,8 +31,8 @@
 | M1 | デーモン中核と CLI（`dgc-next`） | 完了（PR #184 マージ済み） | m1-daemon |
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
-| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了 | m4-profiles-handoff |
-| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 未着手 | 未作成 |
+| M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 作業中 | m5-schedules-scripts |
 | M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
 
 ## タスク
@@ -91,6 +91,17 @@
 | 4 | 引き継ぎ（デーモン、CLI、TUI） | 完了 | `feat: suggest and run a handoff to another provider` |
 | 5 | M4 受け入れ | 完了 | `docs(orchestrator): complete M4 acceptance` |
 | 6 | M4 最終レビュー修正 | 完了 | `fix: stop treating Claude overage as a limit and refuse mismatched daemons` |
+
+### M5
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | cron とローカル時刻 | 未着手 | `feat(daemon): parse cron expressions in local time` |
+| 2 | スケジュールと heartbeat（デーモン） | 未着手 | `feat(daemon): run schedules and heartbeats` |
+| 3 | スケジュールと heartbeat の CLI | 未着手 | `feat(cli): manage schedules and heartbeats` |
+| 4 | ワークスペーススクリプト（デーモン） | 未着手 | `feat(daemon): run trusted workspace scripts from dgc.json` |
+| 5 | スクリプトの CLI | 未着手 | `feat(cli): trust, run and follow workspace scripts` |
+| 6 | M5 受け入れ | 未着手 | `docs(orchestrator): complete M5 acceptance` |
 
 ## 決定事項
 
