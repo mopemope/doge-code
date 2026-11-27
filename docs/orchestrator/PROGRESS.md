@@ -17,10 +17,10 @@
 
 ## 現在の作業
 
-- タスク: M5 Task 1（cron とローカル時刻）
-- 状態: 計画作成済み（ユーザーのレビュー待ち）
-- 済んだこと: M0〜M4 マージ済み（#183〜#187）。M5 計画 `docs/superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md` を作成。
-- 次の一手: 計画のレビュー後、Task 1 から順に実装する。M4 の保留指摘で M5 の前提になるものは無いと判断した（⇄ の永続化は M5 の範囲外のまま）
+- タスク: M5 Task 2（スケジュールと heartbeat）
+- 状態: 未着手
+- 済んだこと: Task 1 の cron 解析、次回発火時刻の探索、ローカル時刻変換を実装。Linux の検証結果は「検証記録」を参照。
+- 次の一手: [M5 計画](../superpowers/plans/2026-11-27-orchestrator-m5-schedules-scripts.md)の Task 2 に従い、`Arc<dyn LocalClock>` を使うデーモン側のスケジューラーを実装する。
 - 未コミットの変更: なし
 
 ## マイルストーン
@@ -96,7 +96,7 @@
 
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
-| 1 | cron とローカル時刻 | 未着手 | `feat(daemon): parse cron expressions in local time` |
+| 1 | cron とローカル時刻 | 完了 | `feat(daemon): parse cron expressions in local time` |
 | 2 | スケジュールと heartbeat（デーモン） | 未着手 | `feat(daemon): run schedules and heartbeats` |
 | 3 | スケジュールと heartbeat の CLI | 未着手 | `feat(cli): manage schedules and heartbeats` |
 | 4 | ワークスペーススクリプト（デーモン） | 未着手 | `feat(daemon): run trusted workspace scripts from dgc.json` |
@@ -106,6 +106,11 @@
 ## 決定事項
 
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M5 Task 1): `LocalClock` は `Send + Sync`。検索上限はローカル時刻の 5 暦年後の同じ分とし、2 月 29 日の上限は平年の 2 月末に丸める。
+  日と曜日の OR 条件では、フィールド全体が `*` の場合をワイルドカードとして扱う。
+  `SystemClock` は既存の `libc` を使う。glibc の繰り返し時刻の選択が直前の変換に左右されるため、ロック内で 1970-01-02 の正午を変換した後、`tm_isdst = -1` で対象の時刻を変換する。
+  変換できない Unix 秒は `to_local` で月 0 を返す。cron の探索はそこで終了し、表示には元の Unix 秒を含むエラー文を出す。
 
 - 2026-11-26 (M4 最終レビュー決定): Claude の `rate_limit_event` は `status` / `overageStatus` が `allowed` / `allowed_warning`、または `isUsingOverage` が `true` のとき通知を抑止する。HTTP 429 は引き続き検知する。
 - 2026-11-26 (M4 最終レビュー決定): プロトコルを 2 に更新する。バージョン不一致は `dgc daemon stop` を案内し、停止コマンドはインスタンスロックの保持と有効な PID を確認して `SIGTERM` を送る。
@@ -636,6 +641,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M5 Task 1（Linux、Rust 1.99.0）
+  - RED の `bash scripts/verify.sh test schedule::` は未実装の型と関数でコンパイルエラー。GREEN は新規 10 件 PASS。
+  - 固定の時刻を先に変換しない場合、`bash scripts/verify.sh test system_clock_selects_same_repeated_time_after_other_conversions` は同じ壁時計時刻に別の Unix 秒を返して FAIL。修正後は GREEN の 10 件に含めて確認。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（Clippy、Rust 659 件）、`bash scripts/verify.sh guidance`（Python 40 件）が PASS。macOS は未検証。
 
 - 2026-11-27 M4 最終レビュー修正（Linux、Rust 1.99.0）
   - RED で Claude の追加使用の誤検知と合成回答の誤分類、両方の hello 不一致、旧デーモンの停止エラー、完了済み回答の欠落、

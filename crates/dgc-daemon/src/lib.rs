@@ -10,6 +10,7 @@ pub mod lock;
 pub mod paths;
 pub mod process;
 pub mod provider;
+pub mod schedule;
 pub mod server;
 pub mod store;
 pub mod subscription;
