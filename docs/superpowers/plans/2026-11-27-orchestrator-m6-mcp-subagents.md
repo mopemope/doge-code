@@ -219,3 +219,20 @@
   - ユーザーのログインは CLI の認証をそのまま使う。資格情報はログにも記録にも残さない。
 - [ ] **Step 3: 全検証を通す** — fmt、`verify.sh rust`、guidance、msrv、tui-deps を通し、README と PROGRESS を更新する。
 - [ ] **Step 4: コミット** `docs(orchestrator): complete M6 acceptance`。PROGRESS の M6 を完了にし、「現在の作業」をフェーズ A の総括（残りの保留指摘の整理）とフェーズ B の設計準備にする。
+
+### Task 5: Codex の MCP elicitation を権限要求として中継する（受け入れで判明した不足）
+
+M6 受け入れ（Task 4）で判明: Codex 0.172.0 は MCP ツール呼び出しの前に `mcpServer/elicitation/request` を送る。現行アダプタは `-32601` を返すため、Codex 側でツール呼び出しが取り消され、子を作れない。設計の受け入れ条件（Claude / Codex から MCP 経由でサブエージェントを起動）を満たすため、この要求をユーザーへの権限要求として中継する。dgc は代わりに承認しない。
+
+**Files:** `crates/dgc-daemon/src/provider/codex.rs`、`crates/dgc-daemon/tests/codex_adapter.rs`、合成シナリオ `crates/dgc-daemon/tests/fixtures/codex/scenarios/mcp_elicitation_*.jsonl`（形は `codex app-server generate-json-schema` の出力と公式ドキュメントから。合成と明記）、fixtures README、README、PROGRESS。
+
+**Interfaces（Produces）:**
+- 承認型の elicitation（MCP ツール呼び出しの承認。スキーマ上の判別方法は実装時に確定し PROGRESS に記録）→ `PermissionRequested { kind: tool, summary: "<server>: <tool> <引数要約>" }`。ユーザーの allow → `accept`、deny → `decline`。interrupt・shutdown → `cancel`（既存の権限要求と同じ規則）。
+- 入力フォーム型（任意のフィールドを要求するもの）は中継しない。`decline`（またはスキーマ上の拒否）で応答し、`Error` イベント（種別のみ、本文なし）を出す。
+- 要約は既存の 4 KiB 上限とエスケープに従う。生の要求は既存の `raw` 上限に従う。
+- `dgc` 以外の MCP サーバーの承認型 elicitation も同じ規則で中継する（ユーザーが判断する）。
+
+- [ ] **Step 1: テスト** — `codex_mcp_elicitation_is_relayed_as_permission`（allow → accept、deny → decline）、`codex_mcp_elicitation_cancelled_on_interrupt`、`codex_form_elicitation_is_declined_with_error`、`codex_elicitation_summary_is_bounded_and_escaped`。
+- [ ] **Step 2–4:** 失敗確認 → 実装 → 通過。
+- [ ] **Step 5: 実プロバイダで確認** — Task 4 と同じ条件（最も安いモデル、自動承認なし、使い捨てリポジトリ、`dgc permit` で dgc の MCP ツールだけ許可）で、Codex の親が子を作り `OK` を受け取ることを確認し、PROGRESS 検証記録を更新する。
+- [ ] **Step 6: コミット** `feat(daemon): relay Codex MCP elicitations as permission requests`
