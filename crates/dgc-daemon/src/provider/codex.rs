@@ -40,7 +40,8 @@
 //!   - `interrupt` → nothing without a running turn. Otherwise approvals of
 //!     that turn still pending are answered with the Deny mapping (`decline`
 //!     where offered, else `cancel`; a permission-profile request grants
-//!     nothing; the manager counts them cancelled),
+//!     nothing; MCP tool approvals answer `cancel`; the manager counts them
+//!     cancelled),
 //!     then `turn/interrupt {threadId, turnId}`. Once it is answered (`{}`, or
 //!     error -32600 "no active turn" when the turn ended first), that turn's
 //!     `turn/completed`, notifications and approvals are dropped (approvals
@@ -69,8 +70,9 @@
 //!     request has no diff), `item/permissions/requestApproval` → Other
 //!     (summary = `permissions: <network access / read|write paths>
 //!     (reason: ...)`; schema-derived, not recorded). `provider_request_id` is
-//!     the server's request id as JSON text (e.g. `"0"`). Other server
-//!     requests (e.g. `mcpServer/elicitation/request`) get the JSON-RPC error
+//!     the server's request id as JSON text (e.g. `"0"`).
+//!     `mcpServer/elicitation/request` → Tool for Codex tool approvals;
+//!     other elicitations are declined. Other server requests get the JSON-RPC error
 //!     -32601 and an `Error` event naming the method.
 //!   - A terminal `error` with `usageLimitExceeded` or `rateLimitExceeded`,
 //!     or an `account/rateLimits/updated` with a reached type, → `RateLimited`
@@ -178,6 +180,10 @@ mod wire {
     /// its scope (`turn` or `session`).
     pub(super) fn permissions_grant(id: &Value, permissions: &Value, scope: &str) -> Value {
         json!({"id": id, "result": {"permissions": permissions, "scope": scope}})
+    }
+
+    pub(super) fn elicitation(id: &Value, action: &str) -> Value {
+        json!({"id": id, "result": {"action": action, "content": null}})
     }
 
     /// Answer to a server request dgc does not handle.
@@ -361,6 +367,8 @@ enum ApprovalRequest {
         /// The request's `permissions` profile.
         requested: Value,
     },
+    /// MCP tool approval, answered with an action and no form content.
+    Elicitation,
 }
 
 impl Approval {
@@ -369,7 +377,7 @@ impl Approval {
             ApprovalRequest::Decision { offered } => offered
                 .as_ref()
                 .is_none_or(|offered| offered.iter().any(|d| d == decision)),
-            ApprovalRequest::Permissions { .. } => false,
+            ApprovalRequest::Permissions { .. } | ApprovalRequest::Elicitation => false,
         }
     }
 
@@ -396,6 +404,19 @@ impl Approval {
                 }
                 Decision::Deny => wire::permissions_grant(&self.server_id, &json!({}), "turn"),
             },
+            ApprovalRequest::Elicitation => match d {
+                Decision::Allow | Decision::AllowForSession => {
+                    wire::elicitation(&self.server_id, "accept")
+                }
+                Decision::Deny => wire::elicitation(&self.server_id, "decline"),
+            },
+        }
+    }
+
+    fn cancel(&self) -> Value {
+        match self.request {
+            ApprovalRequest::Elicitation => wire::elicitation(&self.server_id, "cancel"),
+            _ => self.answer(Decision::Deny),
         }
     }
 }
@@ -763,7 +784,7 @@ impl ProviderSession for CodexSession {
                 // Outstanding requests are cancelled; answer them so the
                 // server does not wait on them.
                 for approval in &outstanding {
-                    self.shared.write(&approval.answer(Decision::Deny)).await?;
+                    self.shared.write(&approval.cancel()).await?;
                 }
                 let params = json!({"threadId": self.thread_id, "turnId": turn_id});
                 let rpc = Rpc::TurnInterrupt {
@@ -812,6 +833,21 @@ impl ProviderSession for CodexSession {
             if let Some(reader) = self.reader.take() {
                 reader.abort();
                 let _ = timeout(READER_STOP_WAIT, reader).await;
+            }
+            let approvals = std::mem::take(&mut self.shared.state().approvals);
+            let cancel_elicitations = async {
+                for approval in approvals.into_values() {
+                    if matches!(approval.request, ApprovalRequest::Elicitation) {
+                        self.shared.write(&approval.cancel()).await?;
+                    }
+                }
+                Ok::<_, ProviderError>(())
+            };
+            if !matches!(
+                timeout(WRITE_TIMEOUT, cancel_elicitations).await,
+                Ok(Ok(()))
+            ) {
+                debug!("could not cancel outstanding codex MCP elicitations");
             }
             // Closing stdin asks the server to exit.
             if let Ok(mut stdin) = timeout(WRITE_TIMEOUT, self.shared.stdin.lock()).await {
@@ -1263,10 +1299,21 @@ async fn server_request(
     id: &Value,
     params: &Value,
 ) -> Vec<ProviderEvent> {
-    let kind = match method {
-        "item/commandExecution/requestApproval" => PermissionKind::Command,
-        "item/fileChange/requestApproval" => PermissionKind::FileChange,
-        "item/permissions/requestApproval" => PermissionKind::Other,
+    let (kind, tool_summary) = match method {
+        "item/commandExecution/requestApproval" => (PermissionKind::Command, None),
+        "item/fileChange/requestApproval" => (PermissionKind::FileChange, None),
+        "item/permissions/requestApproval" => (PermissionKind::Other, None),
+        "mcpServer/elicitation/request" => {
+            let Some(summary) = elicitation_summary(params) else {
+                if let Err(error) = shared.write(&wire::elicitation(id, "decline")).await {
+                    debug!(%error, "could not decline codex MCP elicitation");
+                }
+                return vec![ProviderEvent::Event(EventKind::Error {
+                    message: "unsupported Codex MCP elicitation".to_owned(),
+                })];
+            };
+            (PermissionKind::Tool, Some(summary))
+        }
         _ => {
             debug!(method, "refusing unsupported codex server request");
             if let Err(error) = shared.write(&wire::method_not_found(id)).await {
@@ -1279,6 +1326,7 @@ async fn server_request(
     };
     let provider_request_id = id.to_string();
     let request = match kind {
+        PermissionKind::Tool => ApprovalRequest::Elicitation,
         PermissionKind::Other => ApprovalRequest::Permissions {
             requested: params["permissions"].clone(),
         },
@@ -1291,18 +1339,28 @@ async fn server_request(
             }),
         },
     };
-    let approval = Approval {
-        server_id: id.clone(),
-        turn_id: params["turnId"].as_str().unwrap_or("").to_owned(),
-        request,
-    };
-    {
+    let approval = {
         let mut state = shared.state();
-        if !state.ignores_turn(&approval.turn_id) {
+        let turn_id = params["turnId"].as_str();
+        // App-server may omit the turn for an elicitation. Bind it to
+        // the active turn so normal interruption and completion apply.
+        let turn_id = if kind == PermissionKind::Tool {
+            turn_id.or(state.current_turn.as_deref())
+        } else {
+            turn_id
+        };
+        let active = kind != PermissionKind::Tool
+            || (turn_id.is_some() && turn_id == state.current_turn.as_deref());
+        let approval = Approval {
+            server_id: id.clone(),
+            turn_id: turn_id.unwrap_or("").to_owned(),
+            request,
+        };
+        if active && !state.ignores_turn(&approval.turn_id) {
             let item = params["itemId"]
                 .as_str()
                 .and_then(|item_id| state.items.get(item_id));
-            let summary = match kind {
+            let summary = tool_summary.unwrap_or_else(|| match kind {
                 PermissionKind::Command => params["command"]
                     .as_str()
                     .map(str::to_owned)
@@ -1313,7 +1371,7 @@ async fn server_request(
                     .map(|item| item.summary.clone())
                     .filter(|summary| !summary.is_empty())
                     .unwrap_or_else(|| "file change".to_owned()),
-            };
+            });
             state
                 .approvals
                 .insert(provider_request_id.clone(), approval);
@@ -1324,13 +1382,48 @@ async fn server_request(
                 raw: params.clone(),
             }];
         }
-    }
-    // The turn is being interrupted: the request is cancelled.
-    debug!(request_id = %provider_request_id, "cancelling approval request of interrupted codex turn");
-    if let Err(error) = shared.write(&approval.answer(Decision::Deny)).await {
+        approval
+    };
+    debug!(request_id = %provider_request_id, "cancelling approval request outside an active codex turn");
+    if let Err(error) = shared.write(&approval.cancel()).await {
         debug!(%error, "could not cancel codex approval request");
     }
     Vec::new()
+}
+
+/// Codex marks its tool approvals within ordinary MCP forms. Require the
+/// marker and an empty schema so accepting never submits user input.
+fn elicitation_summary(params: &Value) -> Option<String> {
+    let meta = &params["_meta"];
+    let schema = &params["requestedSchema"];
+    if params["mode"] != "form"
+        || meta["codex_approval_kind"] != "mcp_tool_call"
+        || !matches!(
+            meta["codex_requires_user_input"],
+            Value::Null | Value::Bool(false)
+        )
+        || schema["type"] != "object"
+        || !schema["properties"]
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        || !(schema["required"].is_null()
+            || schema["required"].as_array().is_some_and(Vec::is_empty))
+    {
+        return None;
+    }
+    let server = params["serverName"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())?;
+    let tool = meta["tool_name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())?;
+    // JSON shows the argument boundaries and escapes in-string controls.
+    // The CLI and TUI also escape terminal controls and bidi characters.
+    let arguments = match &meta["tool_params"] {
+        Value::Null => "{}".to_owned(),
+        params => params.to_string(),
+    };
+    Some(format!("{server}: {tool} {arguments}"))
 }
 
 /// `permissions: <what>[, <what>...] (reason: <reason>)` for an

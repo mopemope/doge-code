@@ -331,6 +331,28 @@ dgc → `{"method":"turn/start","id":3,"params":{"threadId":"..","input":[{"type
 （accept なら commandExecution `status:"completed"`、decline なら fileChange `status:"declined"`）。
 decline 後もターンは続き、モデルが返答して `turn/completed status:"completed"` で終わる。
 
+### MCP elicitation（合成）
+
+Codex CLI 0.172.0 の `codex app-server generate-json-schema` で生成した
+`McpServerElicitationRequestParams` と `McpServerElicitationRequestResponse` に基づく。
+`mcpServer/elicitation/request` は `threadId` と `serverName` が必須で、
+`turnId` と `environmentId` は省略または null にできる。フォームは `message` と
+`requestedSchema` を持ち、URL 型は `message`、`url`、`elicitationId` を持つ。
+通常フォームの `mode` は `form`。生成スキーマには拡張フォームの
+`openai/form`、`openaiForm` もある。応答の `action` は `accept`、`decline`、
+`cancel` のいずれかで、入力を送らない応答の `content` は null。
+2026-11-27 に参照。[Codex App Server の MCP elicitation](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests)
+
+Codex のツール承認は通常フォームとして送られ、`requestedSchema`
+は `{"type":"object","properties":{}}`、`_meta.codex_approval_kind` は
+`mcp_tool_call`。`_meta.tool_name` がツール名、任意の `_meta.tool_params`
+が引数を示す。`codex_requires_user_input` が true の要求と、フィールドのある要求は
+入力として扱う。2026-11-27 に参照。[Codex 0.172.0 の承認要求生成](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L2391-L2426) [承認メタデータの定義](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/protocol/src/mcp_approval_meta.rs)
+
+`mcp_elicitation_*.jsonl` はこのスキーマと公式ソースに基づく合成シナリオ。
+dgc と別の MCP サーバーの承認、ユーザーによる拒否、中断・終了による取り消し、
+入力フォームの拒否、および要約と元データの上限を検証する。
+
 ### 中断
 
 dgc → `{"method":"turn/interrupt","id":4,"params":{"threadId":"..","turnId":".."}}`

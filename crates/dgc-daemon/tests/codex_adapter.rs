@@ -18,11 +18,14 @@ use dgc_daemon::provider::{AgentSpec, McpLaunch, ProviderAdapter, ProviderEvent,
 use dgc_daemon::store::Store;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
-use dgc_protocol::methods::{AgentCreateParams, AgentEventsParams, AgentSendParams};
+use dgc_protocol::methods::{
+    AgentCreateParams, AgentEventsParams, AgentSendParams, PermissionRespondParams,
+};
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, SendBehavior,
     SendOutcome, Workspace, WorkspaceState,
 };
+use dgc_protocol::{MAX_PERMISSION_RAW_BYTES, MAX_SUMMARY_BYTES};
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
@@ -743,6 +746,201 @@ async fn codex_unknown_server_request_is_rejected() {
     assert_eq!(events[2], text("pong", true));
     assert!(matches!(events[3], ProviderEvent::TurnCompleted { .. }));
     shutdown_quietly(session).await;
+}
+
+async fn elicitation_approval(session: &mut Box<dyn ProviderSession>) -> ProviderEvent {
+    let mut events = events_until(session, |event| {
+        matches!(
+            event,
+            ProviderEvent::PermissionRequested { .. }
+                | ProviderEvent::Event(EventKind::Error { .. })
+        )
+    })
+    .await;
+    let approval = events.pop().expect("approval or error");
+    assert!(
+        matches!(approval, ProviderEvent::PermissionRequested { .. }),
+        "expected MCP tool approval, got {approval:?}"
+    );
+    approval
+}
+
+#[tokio::test]
+async fn codex_mcp_elicitation_is_relayed_as_permission() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_decisions");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    for (id, summary, tool, decision) in [
+        (
+            "0",
+            r#"dgc: create_agent {"prompt":"Reply OK."}"#,
+            "create_agent",
+            Decision::Allow,
+        ),
+        (
+            r#""other-request""#,
+            r#"calendar: create_event {"title":"Test event"}"#,
+            "create_event",
+            Decision::Deny,
+        ),
+    ] {
+        let ProviderEvent::PermissionRequested {
+            provider_request_id,
+            kind,
+            summary: actual,
+            raw,
+        } = elicitation_approval(&mut session).await
+        else {
+            unreachable!("elicitation_approval requires PermissionRequested");
+        };
+        assert_eq!(provider_request_id, id);
+        assert_eq!(kind, PermissionKind::Tool);
+        assert_eq!(actual, summary);
+        assert_eq!(raw["_meta"]["tool_name"], tool);
+        session
+            .respond_permission(id, decision)
+            .await
+            .expect("respond");
+    }
+    let events = turn_events(&mut session).await;
+    assert_eq!(events[0], text("pong", true), "{events:?}");
+    assert!(matches!(events[1], ProviderEvent::TurnCompleted { .. }));
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_mcp_elicitation_cancelled_on_interrupt() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_interrupt");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    elicitation_approval(&mut session).await;
+    timeout(EVENT_WAIT, session.interrupt())
+        .await
+        .expect("interrupt did not finish")
+        .expect("interrupt");
+    assert!(
+        session
+            .respond_permission("0", Decision::Allow)
+            .await
+            .is_err()
+    );
+    session.send_user(PONG).await.expect("send next turn");
+    let events = turn_events(&mut session).await;
+    assert!(matches!(
+        events.as_slice(),
+        [ProviderEvent::TurnCompleted { .. }]
+    ));
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_mcp_elicitation_cancelled_on_shutdown() {
+    let dir = tempdir().expect("tempdir");
+    let completion = dir.path().join("fake-exit");
+    // The session accepts any child exit status on shutdown. Record the
+    // fixture's status to check that it received cancel before stdin closed.
+    let adapter = CodexAdapter::with_program(
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_owned(),
+            r#"completion=$1; shift; "$0" "$@"; printf '%s' "$?" > "$completion""#.to_owned(),
+            env!("CARGO_BIN_EXE_dgc-fake-provider").to_owned(),
+            completion.display().to_string(),
+            scenario("mcp_elicitation_shutdown").display().to_string(),
+        ],
+    );
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    elicitation_approval(&mut session).await;
+    shutdown_quietly(session).await;
+    assert_eq!(
+        std::fs::read_to_string(completion).expect("fake exit status"),
+        "0"
+    );
+}
+
+#[tokio::test]
+async fn codex_form_elicitation_is_declined_with_error() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_form");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    let events = turn_events(&mut session).await;
+    assert!(matches!(events[0], ProviderEvent::SessionStarted { .. }));
+    for event in &events[1..6] {
+        assert_eq!(
+            *event,
+            ProviderEvent::Event(EventKind::Error {
+                message: "unsupported Codex MCP elicitation".to_owned(),
+            })
+        );
+    }
+    assert_eq!(events[6], text("pong", true), "{events:?}");
+    assert!(matches!(events[7], ProviderEvent::TurnCompleted { .. }));
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_elicitation_summary_is_bounded_and_escaped() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = std::fs::read_to_string(scenario("mcp_elicitation_bounds")).expect("scenario");
+    let path = dir.path().join("mcp_elicitation_bounds.jsonl");
+    std::fs::write(
+        &path,
+        fixture.replace("LONG_ARGUMENT", &"あ".repeat(MAX_PERMISSION_RAW_BYTES)),
+    )
+    .expect("write large scenario");
+    let adapter = CodexAdapter::with_program(
+        PathBuf::from(env!("CARGO_BIN_EXE_dgc-fake-provider")),
+        vec![path.display().to_string()],
+    );
+    let harness = Harness::new(adapter);
+    let agent = harness.create(None, PONG).await;
+    let outcome = timeout(EVENT_WAIT, async {
+        loop {
+            if let Some(permission) = harness
+                .manager
+                .pending_permissions(Some(agent.id.clone()))
+                .pop()
+            {
+                break Some(permission);
+            }
+            if !harness.error_messages(&agent.id).is_empty() {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("wait for permission");
+    if let Some(permission) = &outcome {
+        harness
+            .manager
+            .respond_permission(PermissionRespondParams {
+                id: permission.id.clone(),
+                decision: Decision::Deny,
+            })
+            .await
+            .expect("deny");
+        harness
+            .wait_state(&agent.id, AgentState::Idle, EVENT_WAIT)
+            .await;
+    }
+    harness.manager.shutdown_all(EVENT_WAIT).await;
+    let permission = outcome.expect("expected MCP tool approval");
+    assert_eq!(permission.kind, PermissionKind::Tool);
+    assert!(
+        permission
+            .summary
+            .starts_with(r#"dgc: create_agent {"prompt":"\u001b"#)
+    );
+    assert!(permission.summary.contains(r"\n"));
+    assert!(!permission.summary.chars().any(char::is_control));
+    assert!(permission.summary.contains("…(truncated, "));
+    assert!(permission.summary.len() <= MAX_SUMMARY_BYTES);
+    assert_eq!(permission.raw, json!({"truncated": true}));
 }
 
 /// Synthetic (shapes from the 0.172.0 schema): `item/permissions/requestApproval`
