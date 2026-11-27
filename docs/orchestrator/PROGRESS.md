@@ -20,6 +20,7 @@
 
 - タスク: M6 の PR 作成とマージ待ち、その後フェーズ A の総括（残りの保留指摘の整理）とフェーズ B の設計準備
 - 済んだこと: M6 Task 5 で Codex の MCP ツール承認を中継し、レビュー対応で MCP の起動必須と都度承認を本番の起動引数に追加した。実機でも本番の起動引数で `create_agent` と `wait_agent` を個別に許可し、子の `OK` を確認した。
+  M6 最終レビューで子の既定モードを明示し、`agent.create` のモデル検証、Codex elicitation のエラー記録、MCP 内部エラーの応答を追加した。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
@@ -112,11 +113,15 @@
 | 3 | CLI と TUI での表示と有効化 | 完了 | `feat(cli): enable MCP per agent and show sub-agent trees` |
 | 4 | M6 受け入れ | 完了（Codex の追加対応は Task 5） | `docs(orchestrator): complete M6 acceptance` |
 | 5 | Codex の MCP elicitation を権限要求として中継 | 完了 | `feat(daemon): relay Codex MCP elicitations as permission requests`、`fix(daemon): require the dgc MCP server and prompt for its tools under Codex` |
+| 最終修正 | 子の既定モード、モデル検証、Codex elicitation と MCP 内部エラーの応答 | 完了 | `fix: pin sub-agent modes and tighten MCP edges` |
 
 ## 決定事項
 
 - 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M6 最終レビュー裁定): プロファイル解決後もモード未指定の子は、スケジュールと共通の既定値（Claude `manual`、Codex `workspace-write`）を起動と保存に使う。モード未指定のルートは従来の起動経路を使う。`agent.create` のモデルは先頭 `-` と UTF-8 で 256 バイトを超す値を `INVALID_PARAMS` で拒否する。2026-11-27 参照。[Claude Code の権限モード](https://code.claude.com/docs/en/permissions#permission-modes) [Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference)
+- 2026-11-27 (M6 最終レビュー裁定): Codex は有効なターンに結び付かない MCP elicitation に `cancel` を返し、フォームの `decline` と同じ固定文面の `Error` を記録する。MCP のツールタスクがパニックした場合は Tokio のタスク ID から対応するリクエスト ID を取得し、固定文面で JSON-RPC `-32603` を返す。2026-11-27 参照。[Codex App Server](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests) [Tokio JoinSet](https://docs.rs/tokio/1.53.3/tokio/task/struct.JoinSet.html#method.join_next_with_id) [JSON-RPC 2.0](https://www.jsonrpc.org/specification#error_object)
 
 - 2026-11-27 (M6 Task 5 レビュー裁定): Codex の MCP 有効時は、起動引数に `-c mcp_servers.dgc.required=true` を加える。サーバーの起動失敗は `thread/start` または再開の失敗になる。ユーザー承認モードでは `-c mcp_servers.dgc.default_tools_approval_mode="prompt"` も加え、ツールごとに許可を求める。`full-access` の承認ポリシーは `never` のため、都度承認の追加はユーザー承認モードに限る。両設定の適用範囲は起動した Codex プロセス。2026-11-27 参照。[Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [Codex App Server](https://learn.chatgpt.com/docs/app-server#mcp-servers) [Codex 0.172.0 の承認処理](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L1919-L1933)
 
@@ -150,6 +155,7 @@
   既存のユーザー MCP 設定も読み込むよう `--strict-mcp-config` は付けない。2026-11-27 参照。[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 - 2026-11-27 (M6 Task 1): Codex の `app-server` の前に `-c` と `mcp_servers.dgc.<key>=<TOML value>` の組を 4 件渡す。
   `command` は文字列、`args` は文字列配列、`env` はインラインテーブル、`tool_timeout_sec` は整数の `330`。
+  後続の Task 2 レビュー対応で `tool_timeout_sec` は `360` に、Task 5 レビュー裁定で `required=true` とユーザー承認モードの `default_tools_approval_mode="prompt"` が追加された。
   2026-11-27 参照。[Codex Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)、[Codex Advanced Configuration](https://learn.chatgpt.com/docs/config-file/config-advanced)
 - 2026-11-27 (M6 Task 1): `codex-cli 0.172.0` の `codex mcp list -c …` を一時 `HOME` と `CODEX_HOME` で認証情報なしで実行。終了コード 0。
   一覧で `dgc`、コマンド `/tmp/dgc bin/dgc`、引数 `mcp --agent test-agent`、環境変数 `DGC_STATE_ROOT=*****` / `HOME=*****`、状態 `enabled` を確認。
@@ -744,6 +750,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 最終レビュー修正（Linux、Rust 1.99.0）
+  - RED/GREEN で子の起動モードと保存値、ターン外 elicitation の固定エラー、モデル検証、MCP パニック後のリクエスト ID 付き応答を確認した。対象の `agent_manager` 56 件、`claude_adapter` 24 件、`codex_adapter` 37 件、MCP の結合 20 件・単体 2 件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 790 件）、`guidance`（機密ログ検査、Python 40 件）、`tui-deps`、`msrv`（Rust 1.94.0）が PASS。作業フォルダに `final-fix-*.log` を保存。
+  - この修正では偽プロバイダを使用した。実プロバイダ CLI と macOS の再検証は未実施。
 
 - 2026-11-27 M6 Task 5 レビュー対応（Linux、Rust 1.99.0）
   - RED は起動引数の不足と必須 MCP が欠けた状態での `Idle` 到達を検出した。GREEN は `cargo test --locked -p dgc-daemon --test codex_adapter --test agent_manager` で 90 件 PASS。`full-access` と通常モード、MCP 無効時の引数、必須サーバー失敗時の `Failed` と Error、フォームの拒否、および次ターン中に届いた旧ターン要求の取り消しを確認した。セッション許可の単体テストも PASS。

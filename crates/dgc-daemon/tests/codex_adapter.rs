@@ -846,7 +846,14 @@ async fn codex_mcp_elicitation_cancelled_on_interrupt() {
     })
     .await;
     assert!(
-        matches!(events.as_slice(), [ProviderEvent::TurnCompleted { .. }]),
+        matches!(
+            events.as_slice(),
+            [
+                ProviderEvent::Event(EventKind::Error { message: first }),
+                ProviderEvent::Event(EventKind::Error { message: second }),
+                ProviderEvent::TurnCompleted { .. },
+            ] if first == "unsupported Codex MCP elicitation" && first == second
+        ),
         "{events:?}"
     );
     shutdown_quietly(session).await;
@@ -911,6 +918,47 @@ async fn codex_form_elicitation_is_declined_with_error() {
     }
     assert_eq!(*answer, text("pong", true), "{events:?}");
     shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_inactive_elicitation_is_cancelled_with_error() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_inactive");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    let events = turn_events(&mut session).await;
+    assert!(matches!(
+        events.as_slice(),
+        [
+            ProviderEvent::SessionStarted { .. },
+            ProviderEvent::TurnCompleted { .. }
+        ]
+    ));
+
+    // The fixture exits successfully only after checking the cancel reply.
+    let mut events = Vec::new();
+    loop {
+        let event = timeout(EVENT_WAIT, session.events().recv())
+            .await
+            .expect("event deadline")
+            .expect("provider event");
+        if let ProviderEvent::Exited {
+            success,
+            stderr_tail,
+        } = event
+        {
+            assert!(success, "fake did not receive cancel: {stderr_tail}");
+            break;
+        }
+        events.push(event);
+    }
+    shutdown_quietly(session).await;
+    assert_eq!(
+        events,
+        [ProviderEvent::Event(EventKind::Error {
+            message: "unsupported Codex MCP elicitation".to_owned(),
+        })]
+    );
 }
 
 #[tokio::test]

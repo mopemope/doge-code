@@ -56,7 +56,7 @@ use self::actor::{Command, Launch, Start, register, run_actor};
 use crate::config::{DaemonConfig, ProfileConfig};
 use crate::events_log::{EventLog, EventLogError};
 use crate::paths::{DaemonPaths, ensure_private_dir};
-use crate::provider::{McpLaunch, ProviderAdapter, ProviderError};
+use crate::provider::{McpLaunch, ProviderAdapter, ProviderError, non_auto_default_mode};
 use crate::store::{Store, write_atomic};
 use crate::time::now_rfc3339;
 
@@ -69,6 +69,7 @@ const QUEUE_FILE: &str = "queue.json";
 const MAX_IDLE_LOG_HANDLES: usize = 64;
 /// Directory under the state dir holding agent records (same as `Store`).
 const AGENTS_DIR: &str = "agents";
+const MAX_MODEL_BYTES: usize = 256;
 /// How long archive (and a failing agent) waits for its session to end.
 const SESSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// Extra time `shutdown_all` gives actors beyond the session grace.
@@ -683,6 +684,18 @@ impl AgentManager {
         options: CreateOptions,
     ) -> Result<Agent, AgentError> {
         let kind = self.resolve_profile(&mut params)?;
+        if params
+            .model
+            .as_ref()
+            .is_some_and(|model| model.starts_with('-') || model.len() > MAX_MODEL_BYTES)
+        {
+            return Err(AgentError::InvalidParams(
+                "model must be at most 256 bytes and must not start with '-'".to_owned(),
+            ));
+        }
+        if params.parent_id.is_some() && params.mode.is_none() {
+            params.mode = Some(non_auto_default_mode(kind).to_owned());
+        }
         let workspace = self.active_workspace(&params.workspace_id)?;
         let adapter = self.adapter(kind)?;
         let auto_approve = adapter

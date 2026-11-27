@@ -72,8 +72,10 @@ dgc send AGENT --behavior queue "Then update the changelog"
 dgc                                        # the terminal UI
 ```
 
-Use the global `--json` flag for machine-readable output. Among workspace
-script commands, `dgc script ls` is the only one that accepts `--json`.
+Use the global `--json` flag for machine-readable output. It escapes DEL, C1
+controls, and bidirectional formatting characters inside strings as `\uXXXX`,
+preserving the values in valid JSON. Among workspace script commands,
+`dgc script ls` is the only one that accepts `--json`.
 `daemon start` and `daemon stop` always print text, and the TUI requires
 interactive terminal output. The CLI starts the daemon on demand, so you rarely
 need the daemon commands.
@@ -151,6 +153,7 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   opt-out.
   `--follow` then prints its events until it is idle, stopped, failed or
   archived; the exit status is 0 only when it ended idle.
+- `--model` accepts up to 256 UTF-8 bytes and cannot begin with `-`.
 - `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
   `bypassPermissions`, `manual`, `dontAsk`, `plan`. Codex: `read-only`,
   `workspace-write` (default; sandboxed commands inside the workspace run
@@ -203,12 +206,33 @@ cancel a pending MCP call with `notifications/cancelled`.
 `last_answer` is the most recent clean, completed answer found within four
 event pages, limited to 16 KiB at a UTF-8 character boundary.
 
+A tool failure returns `isError: true` and a JSON object in `content[0].text`
+with a `kind` field and, for two kinds, an integer `code` field. For example,
+`{"kind":"daemon_rpc","code":-32602}` reports invalid daemon parameters.
+
+| `kind` | Meaning |
+|---|---|
+| `invalid_arguments` | The tool arguments failed validation. |
+| `not_descendant` | The target is outside the calling agent's descendants. |
+| `daemon_paths` | The daemon paths could not be resolved. |
+| `daemon_unavailable` | The daemon is unavailable. |
+| `daemon_disconnected` | The connection to the daemon closed. |
+| `daemon_timeout` | The daemon handshake or RPC timed out. |
+| `daemon_io` | Daemon communication failed with an I/O error. |
+| `daemon_protocol` | The daemon protocol exchange failed. |
+| `daemon_rpc` | The daemon returned an RPC error. `code` is its error code. |
+| `daemon_version_mismatch` | The daemon protocol version differs. `code` is `-32010`. |
+
+A tool task that panics returns JSON-RPC error `-32603` with the request ID
+and the message `Internal error`.
+
 The daemon requires a child to share the workspace of an existing, unarchived
 parent. A root has depth 0, and its children are one level deeper than their
 parent. The top-level `max_agent_depth` in daemon `config.toml` defaults to 3
-and accepts 1–8. A child at the depth limit cannot enable MCP. A child can
-use an auto-approve mode only if its parent also uses one. After a parent is
-archived, its children keep their state and can continue independently.
+and accepts 1–8. A child at the depth limit cannot enable MCP. If no mode is
+specified, Claude children use `manual` and Codex children use `workspace-write`.
+A child can use an auto-approve mode only if its parent also uses one. After
+a parent is archived, its children keep their state and can continue independently.
 Every tool other than `create_agent` operates only on descendants of the
 calling agent.
 
@@ -223,8 +247,9 @@ approval requests from parents and children through the usual CLI and TUI
 permission controls. Codex MCP tool approvals show the server, tool and
 argument summary. Use `dgc permit ls`, then `dgc permit allow ID` or
 `dgc permit deny ID`. An approval covers one call, including when the
-session option is chosen. dgc declines MCP input forms and URL requests
-and records an error in the agent's events. The local socket's peer UID
+session option is chosen. dgc declines MCP input forms and URL requests,
+cancels tool approval requests outside an active turn, and records an error
+in the agent's events for those requests. The local socket's peer UID
 is the security boundary. The parent/child and descendant rules are
 guardrails within that UID.
 
@@ -249,7 +274,9 @@ notes = "Runs commands and edits files without asking"
 
 Names contain 1–32 ASCII letters, digits, underscores, or hyphens. `provider`
 must be `claude` or `codex`. `model`, `mode`, and `notes` are optional
-strings. `mcp` is an optional boolean that defaults to false. The daemon checks
+strings. `mcp` is an optional boolean that defaults to false. The profile's
+`mcp = true` enables MCP for `dgc run` and the TUI's new-agent dialog only.
+Handoff and scheduled launches start with MCP disabled. The daemon checks
 profile names, fields, and provider modes at startup, even when a provider CLI
 is unavailable.
 

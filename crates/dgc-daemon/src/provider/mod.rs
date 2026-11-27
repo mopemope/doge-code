@@ -39,6 +39,14 @@ use dgc_protocol::model::{Decision, PermissionKind, ProviderKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+/// Explicit mode for launches that must not inherit provider defaults.
+pub(crate) fn non_auto_default_mode(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Claude => "manual",
+        ProviderKind::Codex => "workspace-write",
+    }
+}
+
 /// Validate a provider mode and classify auto-approval without a running CLI.
 pub fn validate_mode(kind: ProviderKind, mode: Option<&str>) -> Result<bool, String> {
     match kind {

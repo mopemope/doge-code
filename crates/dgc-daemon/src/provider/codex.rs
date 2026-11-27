@@ -1319,9 +1319,7 @@ async fn server_request(
                 if let Err(error) = shared.write(&wire::elicitation(id, "decline")).await {
                     debug!(%error, "could not decline codex MCP elicitation");
                 }
-                return vec![ProviderEvent::Event(EventKind::Error {
-                    message: "unsupported Codex MCP elicitation".to_owned(),
-                })];
+                return vec![unsupported_elicitation_event()];
             };
             (PermissionKind::Tool, Some(summary))
         }
@@ -1399,7 +1397,17 @@ async fn server_request(
     if let Err(error) = shared.write(&approval.cancel()).await {
         debug!(%error, "could not cancel codex approval request");
     }
-    Vec::new()
+    if kind == PermissionKind::Tool {
+        vec![unsupported_elicitation_event()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn unsupported_elicitation_event() -> ProviderEvent {
+    ProviderEvent::Event(EventKind::Error {
+        message: "unsupported Codex MCP elicitation".to_owned(),
+    })
 }
 
 /// Codex marks its tool approvals within ordinary MCP forms. Require the

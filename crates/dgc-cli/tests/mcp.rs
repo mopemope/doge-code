@@ -3,6 +3,7 @@ mod common;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener as StdListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
@@ -29,9 +30,15 @@ struct Daemon {
 
 impl Daemon {
     fn new(scenario: impl FnOnce(&TestEnv) -> PathBuf) -> Self {
+        Self::with_claude(|env| {
+            write_wrapper(env.dir.path(), "claude", CLAUDE_VERSION, &scenario(env))
+        })
+    }
+
+    fn with_claude(wrapper: impl FnOnce(&TestEnv) -> PathBuf) -> Self {
         let env = TestEnv::new();
         assert!(env.dir.path().is_absolute());
-        let claude = write_wrapper(env.dir.path(), "claude", CLAUDE_VERSION, &scenario(&env));
+        let claude = wrapper(&env);
         fs::create_dir_all(env.paths.config_file.parent().expect("config dir"))
             .expect("config dir");
         fs::write(
@@ -365,7 +372,7 @@ fn create_agent_makes_child_in_parent_workspace_with_parent_provider() {
     let mut mcp = daemon.mcp(&parent);
     let result = tool_json(&mcp.call("create_agent", json!({"prompt":"child\nnext line"})));
     assert_eq!(result["provider"], "claude");
-    assert_eq!(result["mode"], Value::Null);
+    assert_eq!(result["mode"], "manual");
     assert_eq!(result["auto_approve"], false);
     let child = daemon.get(&result["agent_id"]);
     assert_eq!(child["workspace_id"], daemon.workspace);
@@ -385,6 +392,67 @@ fn create_agent_makes_child_in_parent_workspace_with_parent_provider() {
 }
 
 #[test]
+fn create_without_mode_pins_child_modes_claude_argv() {
+    let daemon = Daemon::with_claude(|env| {
+        let dir = env.dir.path();
+        let fake = write_wrapper(dir, "claude-fake", CLAUDE_VERSION, &scenario("claude_turn"));
+        let wrapper = dir.join("claude");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" != '--version' ]; then printf '%s\\0' \"$@\" > '{}' || exit 1; fi\n\
+                 exec '{}' \"$@\"\n",
+                dir.join("claude.argv").display(),
+                fake.display(),
+            ),
+        )
+        .expect("write argv wrapper");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("chmod wrapper");
+        wrapper
+    });
+    let permission_mode = |id: &Value| {
+        // Each launch writes argv before the fake emits its first event. Wait
+        // for idle before reading argv or launching the next agent.
+        daemon.wait_for_event(id, json!({"type":"state_changed", "state":"idle"}));
+        let argv = fs::read_to_string(daemon.env.dir.path().join("claude.argv")).expect("argv");
+        let mut argv = argv.split_terminator('\0');
+        argv.find(|arg| *arg == "--permission-mode")
+            .and_then(|_| argv.next())
+            .map(str::to_owned)
+    };
+
+    let launched = daemon.env.run(&[
+        "--json",
+        "run",
+        "--workspace",
+        daemon.workspace.as_str().expect("workspace id"),
+        "--provider",
+        "claude",
+        "--mcp",
+        "root",
+    ]);
+    assert_success(&launched);
+    let root_record: Value = serde_json::from_str(&stdout(&launched)).expect("root record");
+    let root = root_record["id"].clone();
+    assert_eq!(permission_mode(&root), None);
+    assert_eq!(daemon.get(&root)["mode"], Value::Null);
+
+    let child = daemon.agent(Some(&root), false);
+    assert_eq!(permission_mode(&child).as_deref(), Some("manual"));
+    assert_eq!(daemon.get(&child)["mode"], "manual");
+    assert_eq!(daemon.get(&child)["auto_approve"], false);
+
+    let mut mcp = daemon.mcp(&root);
+    let result = tool_json(&mcp.call("create_agent", json!({"prompt":"child"})));
+    let child = &result["agent_id"];
+    assert_eq!(permission_mode(child).as_deref(), Some("manual"));
+    assert_eq!(daemon.get(child)["mode"], "manual");
+    assert_eq!(result["mode"], "manual");
+    assert_eq!(result["auto_approve"], false);
+}
+
+#[test]
 fn create_agent_refusals_are_tool_errors_without_prompt_text() {
     let daemon = Daemon::idle();
     let root = daemon.agent(None, true);
@@ -395,6 +463,7 @@ fn create_agent_refusals_are_tool_errors_without_prompt_text() {
         json!({"prompt":PRIVATE,"mode":PRIVATE}),
         json!({"prompt":PRIVATE,"mode":"bypassPermissions"}),
         json!({"prompt":PRIVATE,"mcp":true}),
+        json!({"prompt":PRIVATE,"model":format!("-{PRIVATE}")}),
     ] {
         let result = mcp.call("create_agent", args);
         assert_tool_error(&result);

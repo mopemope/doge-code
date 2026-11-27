@@ -519,6 +519,112 @@ async fn child_cannot_be_more_permissive_than_parent() {
 }
 
 #[tokio::test]
+async fn create_without_mode_pins_child_modes_after_profile_resolution() {
+    let config = toml::from_str(
+        "[profiles.inherit]\nprovider = 'codex'\n\
+         [profiles.explicit]\nprovider = 'codex'\nmode = 'full-access'\n",
+    )
+    .expect("config");
+    let mut h = Harness::with_config(DEFAULT, config);
+    let root = h.create("root").await;
+    let root_session = h.next_session().await;
+    let mut modes = vec![(root.mode, root_session.spec.mode, None, root.auto_approve)];
+    for (profile, expected) in [("inherit", "workspace-write"), ("explicit", "full-access")] {
+        let parent = h
+            .manager
+            .create(AgentCreateParams {
+                mode: Some("full-access".to_owned()),
+                ..h.create_params("auto-approve parent")
+            })
+            .await
+            .expect("parent");
+        h.next_session().await;
+        let child = h
+            .manager
+            .create(AgentCreateParams {
+                provider: None,
+                profile: Some(profile.to_owned()),
+                parent_id: Some(parent.id),
+                ..h.create_params("child")
+            })
+            .await
+            .expect("child");
+        let session = h.next_session().await;
+        let stored = h
+            .store
+            .get_agent(&child.id)
+            .expect("store")
+            .expect("child record");
+        modes.push((
+            stored.mode,
+            session.spec.mode,
+            Some(expected),
+            stored.auto_approve,
+        ));
+    }
+    h.manager.shutdown_all(WAIT).await;
+    for (recorded, launched, expected, auto_approve) in modes {
+        assert_eq!(recorded.as_deref(), expected);
+        assert_eq!(launched.as_deref(), expected);
+        assert_eq!(auto_approve, expected == Some("full-access"));
+    }
+}
+
+#[tokio::test]
+async fn create_rejects_invalid_model_after_profile_resolution() {
+    let config =
+        toml::from_str("[profiles.model]\nprovider = 'codex'\nmodel = '-private-profile-model'\n")
+            .expect("config");
+    let h = Harness::with_config(DEFAULT, config);
+    let root = h.create("parent").await;
+    let too_long = "é".repeat(129);
+    let mut results = Vec::new();
+    for (model, profile, parent_id, rejected) in [
+        (Some("-private-model"), None, None, "-private-model"),
+        (
+            Some(too_long.as_str()),
+            None,
+            Some(root.id),
+            too_long.as_str(),
+        ),
+        (None, Some("model"), None, "-private-profile-model"),
+    ] {
+        let result = h
+            .manager
+            .create(AgentCreateParams {
+                model: model.map(str::to_owned),
+                profile: profile.map(str::to_owned),
+                parent_id,
+                ..h.create_params("invalid model")
+            })
+            .await;
+        results.push((result, rejected));
+    }
+    let max = "é".repeat(128);
+    let accepted = h
+        .manager
+        .create(AgentCreateParams {
+            model: Some(max.clone()),
+            profile: Some("model".to_owned()),
+            ..h.create_params("valid override")
+        })
+        .await;
+    let count = h.manager.list().expect("agent records").len();
+    h.manager.shutdown_all(WAIT).await;
+
+    for (result, rejected) in results {
+        let error = result.expect_err("invalid model must be refused");
+        assert_eq!(error.code(), dgc_protocol::rpc::INVALID_PARAMS);
+        assert!(!error.to_string().contains(rejected));
+    }
+    assert_eq!(
+        accepted.expect("valid override").model.as_deref(),
+        Some(max.as_str())
+    );
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
 async fn child_requires_live_parent_in_same_workspace() {
     let h = Harness::new(DEFAULT);
     let parent = h.create("parent").await;
