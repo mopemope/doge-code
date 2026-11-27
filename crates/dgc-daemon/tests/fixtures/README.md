@@ -83,6 +83,15 @@ codex app-server        # stdio JSON-RPC（--listen stdio:// が既定）
 
 使用ターン数: Claude 8（うち参考 1）、Codex 9（うち参考 1、エラー 1）。
 
+### M6 の MCP 起動引数
+
+MCP が有効なとき、Claude には `--mcp-config` と stdio サーバー
+`dgc` のインライン JSON を渡す。Codex には `app-server` の前に
+`mcp_servers.dgc` の `command`、`args`、`env`、`tool_timeout_sec`
+を `-c` で渡す。アダプタテストは既存のシナリオを再生しながら、
+実際の起動引数を取得して内容と MCP 無効時の完全一致を確認する。
+公式資料と Codex CLI での読み取り結果は [進捗の決定事項](../../../../docs/orchestrator/PROGRESS.md#決定事項) に記録。
+
 ---
 
 ## Wire notes: Claude Code 2.1.332（stream-json）

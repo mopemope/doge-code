@@ -14,7 +14,7 @@ use dgc_daemon::agent::AgentManager;
 use dgc_daemon::config::DaemonConfig;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::codex::CodexAdapter;
-use dgc_daemon::provider::{AgentSpec, ProviderAdapter, ProviderEvent, ProviderSession};
+use dgc_daemon::provider::{AgentSpec, McpLaunch, ProviderAdapter, ProviderEvent, ProviderSession};
 use dgc_daemon::store::Store;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
@@ -27,6 +27,9 @@ use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
 
+#[path = "support/provider_args.rs"]
+mod provider_args;
+use provider_args::{capture_args, read_args};
 #[path = "support/provider_events.rs"]
 mod provider_events;
 use provider_events::{assert_no_rate_limited, rate_limited_details};
@@ -56,7 +59,81 @@ fn spec(dir: &TempDir, mode: Option<&str>, resume: Option<&str>) -> AgentSpec {
         model: Some(MODEL.to_owned()),
         mode: mode.map(str::to_owned),
         resume_session_id: resume.map(str::to_owned),
+        mcp: None,
     }
+}
+
+async fn launch_args(dir: &TempDir, mcp: Option<McpLaunch>) -> Vec<String> {
+    let capture = dir.path().join("codex.argv");
+    let (program, prefix) = capture_args(&capture, &scenario("simple_turn"));
+    let adapter = CodexAdapter::with_program(program, prefix);
+    let session = start(
+        &adapter,
+        AgentSpec {
+            mcp,
+            ..spec(dir, None, None)
+        },
+    )
+    .await;
+    shutdown_quietly(session).await;
+    read_args(&capture)
+}
+
+#[tokio::test]
+async fn codex_launch_args_include_mcp_overrides_only_when_enabled() {
+    let dir = tempdir().expect("tempdir");
+    let command = dir.path().join("dgc \"bin\" \\ path");
+    let args = vec![
+        "mcp".to_owned(),
+        "--agent".to_owned(),
+        "test-agent".to_owned(),
+    ];
+    let state_root = "/tmp/dgc state\nwith a newline\u{7f}";
+    let argv = launch_args(
+        &dir,
+        Some(McpLaunch {
+            command: command.clone(),
+            args: args.clone(),
+            env: vec![
+                ("HOME".to_owned(), "/tmp/dgc home".to_owned()),
+                ("DGC_STATE_ROOT".to_owned(), state_root.to_owned()),
+            ],
+        }),
+    )
+    .await;
+    let (app_server, overrides) = argv.split_last().expect("app-server argument");
+    assert_eq!(app_server, "app-server");
+    assert_eq!(overrides.len(), 8);
+    let (pairs, _) = overrides.as_chunks::<2>();
+    let mut settings = String::new();
+    for (pair, key) in pairs
+        .iter()
+        .zip(["command", "args", "env", "tool_timeout_sec"])
+    {
+        assert_eq!(pair[0], "-c");
+        assert!(
+            pair[1].starts_with(&format!("mcp_servers.dgc.{key}=")),
+            "{pair:?}"
+        );
+        settings.push_str(&pair[1]);
+        settings.push('\n');
+    }
+    let parsed: toml::Value = toml::from_str(&settings).expect("inline MCP TOML");
+    assert_eq!(
+        serde_json::to_value(parsed).expect("MCP settings"),
+        json!({
+            "mcp_servers": {"dgc": {"command": command, "args": args,
+                                   "env": {"HOME": "/tmp/dgc home", "DGC_STATE_ROOT": state_root},
+                                   "tool_timeout_sec": 330}}
+        })
+    );
+    assert_eq!(launch_args(&dir, None).await, ["app-server"]);
+}
+
+#[tokio::test]
+async fn agents_without_mcp_keep_their_launch_args() {
+    let dir = tempdir().expect("tempdir");
+    assert_eq!(launch_args(&dir, None).await, ["app-server"]);
 }
 
 async fn start(adapter: &CodexAdapter, spec: AgentSpec) -> Box<dyn ProviderSession> {
@@ -824,6 +901,7 @@ impl Harness {
                 initial_prompt: prompt.to_owned(),
                 labels: BTreeMap::new(),
                 parent_id: None,
+                mcp: false,
             })
             .await
             .expect("create")

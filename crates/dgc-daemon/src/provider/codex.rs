@@ -255,6 +255,26 @@ impl ProviderAdapter for CodexAdapter {
         Box::pin(async move {
             let policy = policy(spec.mode.as_deref()).map_err(ProviderError::Spawn)?;
             let mut args = self.prefix_args.clone();
+            if let Some(mcp) = &spec.mcp {
+                use toml::Value as Toml;
+                let command = Toml::String(mcp.command_str()?.to_owned());
+                let argv = Toml::Array(mcp.args.iter().cloned().map(Toml::String).collect());
+                let env = Toml::Table(
+                    mcp.env
+                        .iter()
+                        .cloned()
+                        .map(|(key, value)| (key, Toml::String(value)))
+                        .collect(),
+                );
+                for (key, value) in [
+                    ("command", command),
+                    ("args", argv),
+                    ("env", env),
+                    ("tool_timeout_sec", Toml::Integer(330)),
+                ] {
+                    args.extend(["-c".to_owned(), format!("mcp_servers.dgc.{key}={value}")]);
+                }
+            }
             args.push(wire::APP_SERVER.to_owned());
             let child = ChildSpec {
                 program: self.program.clone(),

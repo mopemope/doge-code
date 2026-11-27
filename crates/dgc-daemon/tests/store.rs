@@ -56,6 +56,8 @@ fn sample_agent(workspace_id: &WorkspaceId) -> Agent {
         provider_session_id: Some("sess-1".into()),
         state: AgentState::Idle,
         parent_id: None,
+        mcp: false,
+        depth: 0,
         labels,
         created_at: "2026-11-25T00:00:00Z".into(),
         last_error: None,

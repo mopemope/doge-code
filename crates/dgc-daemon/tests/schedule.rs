@@ -186,6 +186,7 @@ impl Harness {
                 initial_prompt: "first turn".into(),
                 labels: BTreeMap::new(),
                 parent_id: None,
+                mcp: false,
             })
             .await
             .expect("create target")
@@ -363,6 +364,7 @@ fn profile(mode: &str, model: &str) -> DaemonConfig {
                 model: Some(model.into()),
                 mode: Some(mode.into()),
                 notes: None,
+                mcp: Some(true),
             },
         )]),
         ..DaemonConfig::default()
@@ -408,6 +410,9 @@ async fn schedule_snapshots_profile_at_creation() {
     assert_eq!(agent.mode.as_deref(), Some("manual"));
     assert_eq!(agent.model.as_deref(), Some("haiku"));
     assert!(!agent.auto_approve);
+    assert!(!agent.mcp);
+    assert_eq!(agent.depth, 0);
+    assert!(agent.parent_id.is_none());
 }
 
 #[tokio::test]

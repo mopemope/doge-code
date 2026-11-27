@@ -161,6 +161,7 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   failed agent, reusing its provider session when available). If the provider
   failed to start, resume sends the original prompt from the queue. A resumed
   agent created by a schedule stays available for follow-up input.
+  Children retain their own state when their parent is archived.
 - `dgc send ID [--behavior queue|steer|interrupt] TEXT` prints the outcome:
   `sent` (the agent was idle), `queued` (sent when the turn ends), `steered`,
   or `interrupted_and_sent` (also used when a provider cannot steer). An
@@ -595,12 +596,14 @@ experiments).
 | Schedule and heartbeat records | `$XDG_STATE_HOME/dgc/schedules/` |
 | Workspace script output | `$XDG_STATE_HOME/dgc/scripts/` |
 | Trusted `dgc.json` snapshots | `$XDG_STATE_HOME/dgc/script-trust/` |
-| Config (`claude_path`, `codex_path`, `events_max_bytes`, `profiles`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
+| Config (`claude_path`, `codex_path`, `events_max_bytes`, `max_agent_depth`, `profiles`) | `$XDG_CONFIG_HOME/dgc/config.toml` |
 | Managed worktrees | `$XDG_DATA_HOME/dgc/worktrees` (`~/.local/share/dgc/worktrees`) |
 
 Each agent's events are in `agents/<id>/events.jsonl` under the state
 directory, rotated at `events_max_bytes` (default 32 MiB). The socket path must
 stay under 100 bytes (`sockaddr_un` limit), so keep `DGC_STATE_ROOT` short.
+The top-level `max_agent_depth` setting defaults to 3 and accepts 1 through 8.
+Root agents have depth 0.
 
 | Variable | Effect |
 |---|---|
@@ -615,7 +618,7 @@ stay under 100 bytes (`sockaddr_un` limit), so keep `DGC_STATE_ROOT` short.
 - The trust boundary is your UID: any process running as you can drive agents,
   including the agents themselves (they can answer permission requests through
   the socket). Agents started by dgc are trusted to the extent their provider
-  mode allows.
+  mode allows. Parent/child checks govern agent creation within that UID.
 - dgc never reads provider credential files, and the daemon log never contains
   prompt or agent text. Provider children inherit the daemon's environment
   (including any API keys in it). Prompts and agent output are stored as-is in

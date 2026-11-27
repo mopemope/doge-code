@@ -56,7 +56,7 @@ use self::actor::{Command, Launch, Start, register, run_actor};
 use crate::config::{DaemonConfig, ProfileConfig};
 use crate::events_log::EventLog;
 use crate::paths::{DaemonPaths, ensure_private_dir};
-use crate::provider::{ProviderAdapter, ProviderError};
+use crate::provider::{McpLaunch, ProviderAdapter, ProviderError};
 use crate::store::{Store, write_atomic};
 use crate::time::now_rfc3339;
 
@@ -457,6 +457,8 @@ pub struct AgentManager {
     adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>>,
     timeouts: ProviderTimeouts,
     profiles: BTreeMap<String, ProfileConfig>,
+    max_agent_depth: u32,
+    mcp_program: Option<PathBuf>,
 }
 
 impl AgentManager {
@@ -480,6 +482,8 @@ impl AgentManager {
             adapters,
             timeouts: ProviderTimeouts::default(),
             profiles: config.profiles,
+            max_agent_depth: config.max_agent_depth,
+            mcp_program: std::env::current_exe().ok(),
         }
     }
 
@@ -548,7 +552,84 @@ impl AgentManager {
         if params.mode.is_none() {
             params.mode.clone_from(&profile.mode);
         }
+        params.mcp |= profile.mcp.unwrap_or_default();
         Ok(profile.provider)
+    }
+
+    fn child_depth(
+        &self,
+        params: &AgentCreateParams,
+        auto_approve: bool,
+    ) -> Result<u32, AgentError> {
+        let Some(parent_id) = &params.parent_id else {
+            return Ok(0);
+        };
+        let parent = self.load(parent_id).map_err(|err| match err {
+            AgentError::NotFound(_) => {
+                AgentError::InvalidParams("parent agent not found".to_owned())
+            }
+            other => other,
+        })?;
+        if parent.state == AgentState::Archived {
+            return Err(AgentError::InvalidParams(
+                "parent agent is archived".to_owned(),
+            ));
+        }
+        if parent.workspace_id != params.workspace_id {
+            return Err(AgentError::InvalidParams(
+                "parent agent is in a different workspace".to_owned(),
+            ));
+        }
+        if auto_approve && !parent.auto_approve {
+            return Err(AgentError::InvalidParams(
+                "parent agent does not use auto-approval".to_owned(),
+            ));
+        }
+        let depth = parent
+            .depth
+            .checked_add(1)
+            .filter(|depth| *depth <= self.max_agent_depth)
+            .ok_or_else(|| AgentError::InvalidParams("child exceeds max_agent_depth".to_owned()))?;
+        if params.mcp && depth == self.max_agent_depth {
+            return Err(AgentError::InvalidParams(
+                "MCP is unavailable at max_agent_depth".to_owned(),
+            ));
+        }
+        Ok(depth)
+    }
+
+    fn mcp_launch(&self, id: &AgentId, enabled: bool) -> Result<Option<McpLaunch>, AgentError> {
+        if !enabled {
+            return Ok(None);
+        }
+        let command = self
+            .mcp_program
+            .as_ref()
+            .filter(|path| path.to_str().is_some())
+            .ok_or_else(|| AgentError::InvalidState {
+                state: "mcp_executable_unavailable".to_owned(),
+            })?;
+        let mut env = Vec::new();
+        for name in [
+            "DGC_STATE_ROOT",
+            "HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_RUNTIME_DIR",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                let value = value.into_string().map_err(|_| AgentError::InvalidState {
+                    state: "mcp_environment_not_utf8".to_owned(),
+                })?;
+                env.push((name.to_owned(), value));
+            }
+        }
+        Ok(Some(McpLaunch {
+            command: command.clone(),
+            args: vec!["mcp".to_owned(), "--agent".to_owned(), id.to_string()],
+            env,
+        }))
     }
 
     /// Store a new agent, record its initial prompt and start it. Returns once
@@ -571,8 +652,14 @@ impl AgentManager {
         let auto_approve = adapter
             .validate_mode(params.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
+        let id = AgentId::generate();
+        // Final archive transitions also hold this lock. Keep the parent
+        // check and the first stored child record in the same critical section.
+        let live = lock(&self.shared.live);
+        let depth = self.child_depth(&params, auto_approve)?;
+        let mcp = self.mcp_launch(&id, params.mcp)?;
         let mut agent = Agent {
-            id: AgentId::generate(),
+            id,
             workspace_id: params.workspace_id,
             title: params.title,
             provider: kind,
@@ -583,11 +670,14 @@ impl AgentManager {
             provider_session_id: None,
             state: AgentState::Starting,
             parent_id: params.parent_id,
+            mcp: params.mcp,
+            depth,
             labels: params.labels,
             created_at: now_rfc3339(),
             last_error: None,
         };
         self.shared.put_agent(&agent)?;
+        drop(live);
         let recorded = self
             .shared
             .emit(
@@ -621,6 +711,7 @@ impl AgentManager {
             adapter,
             agent: agent.clone(),
             cwd: workspace.path,
+            mcp,
             started,
             start: Start::Create {
                 prompt: params.initial_prompt,
@@ -660,8 +751,13 @@ impl AgentManager {
             initial_prompt: String::new(),
             labels: BTreeMap::from([("handoff_from".to_owned(), source.id.to_string())]),
             parent_id: None,
+            mcp: false,
         };
         let provider = self.resolve_profile(&mut create)?;
+        // Handoffs use resolved provider settings and start as standalone agents.
+        create.provider = Some(provider);
+        create.profile = None;
+        create.mcp = false;
         self.adapter(provider)?
             .validate_mode(create.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
@@ -715,7 +811,7 @@ impl AgentManager {
     /// queued message, if any, is sent; otherwise the agent becomes idle.
     /// A manual resume keeps the session available for follow-up input.
     pub async fn resume(&self, id: &AgentId) -> Result<Agent, AgentError> {
-        let (agent, cwd, adapter, queue, commands) = {
+        let (agent, cwd, adapter, mcp, queue, commands) = {
             let mut live = lock(&self.shared.live);
             let mut agent = self.load(id)?;
             if live.contains_key(id)
@@ -725,18 +821,20 @@ impl AgentManager {
             }
             let workspace = self.active_workspace(&agent.workspace_id)?;
             let adapter = self.adapter(agent.provider)?;
+            let mcp = self.mcp_launch(&agent.id, agent.mcp)?;
             let queue = load_queue(&self.shared.queue_path(id))?;
             agent.last_error = None;
             agent.stop_when_idle = false;
             self.shared.store_state(&mut agent, AgentState::Starting)?;
             let commands = self.shared.register_live(&mut live, id);
-            (agent, workspace.path, adapter, queue, commands)
+            (agent, workspace.path, adapter, mcp, queue, commands)
         };
         info!(agent_id = %agent.id, queued = queue.len(), "agent resuming");
         let launch = Launch {
             adapter,
             agent: agent.clone(),
             cwd,
+            mcp,
             started: None,
             start: Start::Resume,
             queue,

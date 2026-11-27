@@ -10,7 +10,7 @@ pub mod model;
 pub mod rpc;
 
 /// Major version of the daemon socket protocol. Clients and daemon must agree.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Upper bound for one newline-delimited protocol message, in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;

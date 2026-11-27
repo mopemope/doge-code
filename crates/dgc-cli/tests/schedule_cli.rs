@@ -328,6 +328,8 @@ fn heartbeat_create_ls_rm_round_trip() {
         provider_session_id: None,
         state: AgentState::Stopped,
         parent_id: None,
+        mcp: false,
+        depth: 0,
         labels: Default::default(),
         created_at: "2026-11-27T00:00:00Z".to_owned(),
         last_error: None,

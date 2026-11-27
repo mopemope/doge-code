@@ -24,7 +24,7 @@ use super::{
     provider, save_queue,
 };
 use crate::provider::{
-    AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
+    AgentSpec, BoxFut, McpLaunch, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
 };
 use crate::time::now_rfc3339;
 
@@ -97,6 +97,7 @@ pub(super) struct Launch {
     pub(super) agent: Agent,
     /// Workspace path.
     pub(super) cwd: PathBuf,
+    pub(super) mcp: Option<McpLaunch>,
     pub(super) start: Start,
     pub(super) started: Option<oneshot::Sender<Result<(), AgentError>>>,
     pub(super) queue: VecDeque<QueueItem>,
@@ -114,6 +115,7 @@ pub(super) async fn run_actor(
         adapter,
         mut agent,
         cwd,
+        mcp,
         start,
         started,
         mut queue,
@@ -129,6 +131,7 @@ pub(super) async fn run_actor(
         model: agent.model.clone(),
         mode: agent.mode.clone(),
         resume_session_id,
+        mcp,
     };
     let queue_path = shared.queue_path(&agent.id);
     let session = match bounded(timeouts.start, "start", adapter.start(spec)).await {

@@ -18,10 +18,10 @@
 
 ## 現在の作業
 
-- タスク: M6 Task 1（親子の規則と MCP の付与）
-- 状態: 計画作成済み（`docs/superpowers/plans/2026-11-27-orchestrator-m6-mcp-subagents.md`）
-- 済んだこと: M0〜M5 マージ済み（#183〜#188）。M6 のユーザー決定（MCP はサブエージェント操作のみ、子のモードは親より緩くしない、MCP は明示したエージェントだけ、子は親と同じワークスペース）を反映した計画を作成。
-- 次の一手: Task 1 から順に実装する（実装は Codex gpt-6.2-sol xhigh、レビューは Claude）。
+- タスク: M6 Task 2（`dgc mcp` サーバー）
+- 状態: 未着手
+- 済んだこと: Task 1 でプロトコル v4、親子の作成規則、MCP 起動引数と resume での設定復元を実装。
+- 次の一手: Task 1 のコントローラーレビュー後、Task 2 で stdio MCP サーバーと子孫操作を実装する。
 - 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
@@ -109,7 +109,7 @@
 
 | # | タスク | 状態 | コミット |
 |---|---|---|---|
-| 1 | 親子の規則と MCP の付与（デーモン） | 未着手 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
+| 1 | 親子の規則と MCP の付与（デーモン） | 完了 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
 | 2 | `dgc mcp`（MCP サーバー） | 未着手 | `feat(cli): serve sub-agent tools over MCP` |
 | 3 | CLI と TUI での表示と有効化 | 未着手 | `feat(cli): enable MCP per agent and show sub-agent trees` |
 | 4 | M6 受け入れ | 未着手 | `docs(orchestrator): complete M6 acceptance` |
@@ -118,6 +118,19 @@
 
 - 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M6 Task 1): Claude の `--mcp-config` は単一引数のインライン JSON を使う。
+  既存のユーザー MCP 設定も読み込むよう `--strict-mcp-config` は付けない。2026-11-27 参照。[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+- 2026-11-27 (M6 Task 1): Codex の `app-server` の前に `-c` と `mcp_servers.dgc.<key>=<TOML value>` の組を 4 件渡す。
+  `command` は文字列、`args` は文字列配列、`env` はインラインテーブル、`tool_timeout_sec` は整数の `330`。
+  2026-11-27 参照。[Codex Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)、[Codex Advanced Configuration](https://learn.chatgpt.com/docs/config-file/config-advanced)
+- 2026-11-27 (M6 Task 1): `codex-cli 0.172.0` の `codex mcp list -c …` を一時 `HOME` と `CODEX_HOME` で認証情報なしで実行。終了コード 0。
+  一覧で `dgc`、コマンド `/tmp/dgc bin/dgc`、引数 `mcp --agent test-agent`、環境変数 `DGC_STATE_ROOT=*****` / `HOME=*****`、状態 `enabled` を確認。
+  `--json` では `transport.type = "stdio"`、引数配列、サンプル環境変数の値、`tool_timeout_sec = 330.0` を確認。一時ディレクトリ下の PATH エイリアス作成を省略する警告は出たが、設定は読み取れた。
+- 2026-11-27 (M6 Task 1): MCP には、デーモンに存在する `DGC_STATE_ROOT`、`HOME`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_RUNTIME_DIR` だけを明示する。起動時に解決した実行ファイルを使い、実行ファイルを指定できない場合は `INVALID_STATE`（`mcp_executable_unavailable`）を返す。JSON/TOML で表現できない非 UTF-8 の環境値は `mcp_environment_not_utf8` で拒否する。
+  開発用の `DGC_STATE_ROOT` は、プロバイダとデーモンの作業ディレクトリが異なる場合にも同じ場所を指すよう、MCP 接続の検証では絶対パスを使う。
+  スケジュールと引き継ぎで作るエージェントは、プロファイルを指定した場合も `mcp = false`、`depth = 0`、`parent_id = None`。
+  旧エージェントレコードに MCP と深さのフィールドがなければ `false` と `0` で読み込む。
 
 - 2026-11-27 (M5 最終修正): Script trust covers only the exact bytes of `dgc.json`. An agent with
   workspace write access (for example, Codex in `workspace-write` mode or
@@ -700,6 +713,11 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 Task 1（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-daemon --test agent_manager --test claude_adapter --test codex_adapter --test server` は、実装前に型とフィールドの未定義で RED、実装後に 137 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 742 件）、`bash scripts/verify.sh guidance`（リンク、機密ログチェック、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
+  - Codex 0.172.0 の `mcp list` は認証情報なしの設定読み取りで PASS。実プロバイダとの MCP 接続と macOS 実機テストは未実行。ログは作業フォルダの `task-1-{red,green,verify}-*.log`。
 
 - 2026-11-27 M5 Linux CI（62c6dfd）: 子が親から継承した TERM ハンドラを解除する前に TERM を受け、親が `wait` 中に猶予切れで SIGKILL された。子自身が `exec` 後に改行付き PID を公開するようテストを修正。dash の負荷試験で shutdown と stop は各 2/200 → 0/200、archive と SIGKILL の検証は各 0/200 → 0/200。トレース付きでは archive も 1/200 → 0/200。Rust 1.99.0 の `verify.sh rust`（732件）と `verify.sh guidance`（Python 40件）が PASS。macOS 実機は未検証。
 

@@ -1008,6 +1008,8 @@ mod tests {
             provider_session_id: None,
             state,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: Default::default(),
             created_at: created_at.to_owned(),
             last_error: None,

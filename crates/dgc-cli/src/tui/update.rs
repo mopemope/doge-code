@@ -1135,6 +1135,7 @@ fn submit_agent(state: &mut AppState, fx: &mut Vec<Effect>) {
         initial_prompt: prompt,
         labels: Default::default(),
         parent_id: None,
+        mcp: false,
     };
     match call(
         RequestTag::CreateAgent,
@@ -1283,6 +1284,8 @@ mod tests {
             provider_session_id: None,
             state: AgentState::Idle,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: Default::default(),
             created_at: created_at.to_owned(),
             last_error: None,
@@ -2660,6 +2663,7 @@ mod tests {
                     "initial_prompt": "fix the testplease",
                     "labels": {},
                     "parent_id": null,
+                    "mcp": false,
                 }),
             }]
         );

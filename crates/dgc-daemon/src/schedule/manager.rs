@@ -652,6 +652,7 @@ fn agent_params(
         initial_prompt: String::new(),
         labels: BTreeMap::new(),
         parent_id: None,
+        mcp: false,
     }
 }
 

@@ -141,6 +141,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
                 initial_prompt: prompt,
                 labels: Default::default(),
                 parent_id: None,
+                mcp: false,
             };
             let agent: Agent = client.call(AGENT_CREATE, &params).await?;
             warn_auto_approve(&agent);

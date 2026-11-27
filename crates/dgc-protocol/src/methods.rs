@@ -205,6 +205,8 @@ pub struct AgentCreateParams {
     pub labels: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub parent_id: Option<AgentId>,
+    #[serde(default)]
+    pub mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

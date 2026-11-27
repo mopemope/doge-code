@@ -547,6 +547,8 @@ mod tests {
             provider_session_id: None,
             state: AgentState::Idle,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: Default::default(),
             created_at: String::new(),
             last_error: Some("e\r".into()),

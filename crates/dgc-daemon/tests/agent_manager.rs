@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dgc_daemon::agent::{AgentError, AgentManager, CreateOptions, ProviderTimeouts};
-use dgc_daemon::config::DaemonConfig;
+use dgc_daemon::config::{DaemonConfig, ProfileConfig};
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::{
     AgentSpec, BoxFut, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
@@ -215,6 +215,10 @@ const DEFAULT: Options = Options {
 
 impl Harness {
     fn new(options: Options) -> Self {
+        Self::with_config(options, DaemonConfig::default())
+    }
+
+    fn with_config(options: Options, config: DaemonConfig) -> Self {
         let dir = tempdir().expect("tempdir");
         let paths = DaemonPaths::under(dir.path());
         let store = Arc::new(Store::open(&paths.state_dir).expect("store"));
@@ -233,7 +237,7 @@ impl Harness {
         };
         store.put_workspace(&workspace).expect("put workspace");
         let (sessions_tx, sessions) = mpsc::unbounded_channel();
-        let manager = new_manager(&store, &paths, options, sessions_tx);
+        let manager = new_manager(&store, &paths, options, sessions_tx, config);
         Self {
             _dir: dir,
             paths,
@@ -251,19 +255,24 @@ impl Harness {
             .expect("adapter dropped")
     }
 
+    fn create_params(&self, prompt: &str) -> AgentCreateParams {
+        AgentCreateParams {
+            workspace_id: self.workspace.id.clone(),
+            title: "t".to_owned(),
+            provider: Some(ProviderKind::Codex),
+            profile: None,
+            model: Some("m1".to_owned()),
+            mode: None,
+            initial_prompt: prompt.to_owned(),
+            labels: BTreeMap::new(),
+            parent_id: None,
+            mcp: false,
+        }
+    }
+
     async fn create(&self, prompt: &str) -> Agent {
         self.manager
-            .create(AgentCreateParams {
-                workspace_id: self.workspace.id.clone(),
-                title: "t".to_owned(),
-                provider: Some(ProviderKind::Codex),
-                profile: None,
-                model: Some("m1".to_owned()),
-                mode: None,
-                initial_prompt: prompt.to_owned(),
-                labels: BTreeMap::new(),
-                parent_id: None,
-            })
+            .create(self.create_params(prompt))
             .await
             .expect("create")
     }
@@ -342,6 +351,7 @@ fn new_manager(
     paths: &DaemonPaths,
     options: Options,
     sessions: mpsc::UnboundedSender<SessionHandle>,
+    config: DaemonConfig,
 ) -> AgentManager {
     let adapter: Arc<dyn ProviderAdapter> = Arc::new(ScriptedAdapter {
         steer_supported: options.steer_supported,
@@ -352,16 +362,12 @@ fn new_manager(
     });
     let mut adapters = HashMap::new();
     adapters.insert(ProviderKind::Codex, adapter);
-    AgentManager::new(
-        Arc::clone(store),
-        paths.clone(),
-        DaemonConfig::default(),
-        adapters,
+    AgentManager::new(Arc::clone(store), paths.clone(), config, adapters).with_timeouts(
+        ProviderTimeouts {
+            start: TEST_PROVIDER_TIMEOUT,
+            call: TEST_PROVIDER_TIMEOUT,
+        },
     )
-    .with_timeouts(ProviderTimeouts {
-        start: TEST_PROVIDER_TIMEOUT,
-        call: TEST_PROVIDER_TIMEOUT,
-    })
 }
 
 fn state_changes(events: &[EventKind]) -> Vec<AgentState> {
@@ -450,6 +456,162 @@ async fn create_runs_initial_prompt_then_idle() {
 }
 
 #[tokio::test]
+async fn child_cannot_be_more_permissive_than_parent() {
+    let config = DaemonConfig {
+        profiles: BTreeMap::from([(
+            "auto".to_owned(),
+            ProfileConfig {
+                provider: ProviderKind::Codex,
+                model: None,
+                mode: Some("full-access".to_owned()),
+                notes: None,
+                mcp: None,
+            },
+        )]),
+        ..DaemonConfig::default()
+    };
+    let h = Harness::with_config(DEFAULT, config);
+    let parent = h.create("safe parent").await;
+    let mut child = AgentCreateParams {
+        parent_id: Some(parent.id),
+        mode: Some("full-access".to_owned()),
+        ..h.create_params("child")
+    };
+    for use_profile in [false, true] {
+        if use_profile {
+            child.mode = None;
+            child.profile = Some("auto".to_owned());
+        }
+        let err = h
+            .manager
+            .create(child.clone())
+            .await
+            .expect_err("unsafe child");
+        assert_eq!(err.code(), dgc_protocol::rpc::INVALID_PARAMS);
+    }
+
+    let parent = h
+        .manager
+        .create(AgentCreateParams {
+            mode: Some("full-access".to_owned()),
+            ..h.create_params("auto-approve parent")
+        })
+        .await
+        .expect("auto-approve parent");
+    child.parent_id = Some(parent.id.clone());
+    let child = h.manager.create(child).await.expect("allowed child");
+    assert!(child.auto_approve);
+    assert_eq!(child.parent_id, Some(parent.id));
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn child_requires_live_parent_in_same_workspace() {
+    let h = Harness::new(DEFAULT);
+    let parent = h.create("parent").await;
+    let other_workspace = Workspace {
+        id: WorkspaceId::generate(),
+        ..h.workspace.clone()
+    };
+    h.store
+        .put_workspace(&other_workspace)
+        .expect("other workspace");
+    let child = AgentCreateParams {
+        parent_id: Some(parent.id.clone()),
+        ..h.create_params("child")
+    };
+    for params in [
+        AgentCreateParams {
+            parent_id: Some(AgentId::generate()),
+            ..child.clone()
+        },
+        AgentCreateParams {
+            workspace_id: other_workspace.id,
+            ..child.clone()
+        },
+    ] {
+        let err = h.manager.create(params).await.expect_err("invalid parent");
+        assert_eq!(err.code(), dgc_protocol::rpc::INVALID_PARAMS);
+    }
+
+    let survivor = h.manager.create(child.clone()).await.expect("valid child");
+    h.manager.archive(&parent.id).await.expect("archive parent");
+    let err = h.manager.create(child).await.expect_err("archived parent");
+    assert_eq!(err.code(), dgc_protocol::rpc::INVALID_PARAMS);
+    assert_ne!(
+        h.manager.get(&survivor.id).expect("child retained").state,
+        AgentState::Archived
+    );
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn depth_limit_and_mcp_at_limit_are_refused() {
+    let h = Harness::new(DEFAULT);
+    assert_eq!(DaemonConfig::default().max_agent_depth, 3);
+    let mut parent = h.create("root").await;
+    assert_eq!(parent.depth, 0);
+    for depth in 1..=3 {
+        let mut child = AgentCreateParams {
+            parent_id: Some(parent.id),
+            mcp: true,
+            ..h.create_params("child")
+        };
+        if depth == 3 {
+            let err = h
+                .manager
+                .create(child.clone())
+                .await
+                .expect_err("MCP at limit");
+            assert_eq!(err.code(), dgc_protocol::rpc::INVALID_PARAMS);
+            child.mcp = false;
+        }
+        parent = h.manager.create(child).await.expect("child within limit");
+        assert_eq!(parent.depth, depth);
+        assert_eq!(parent.mcp, depth < 3);
+    }
+    let err = h
+        .manager
+        .create(AgentCreateParams {
+            parent_id: Some(parent.id),
+            ..h.create_params("too deep")
+        })
+        .await
+        .expect_err("depth four");
+    assert_eq!(err.code(), dgc_protocol::rpc::INVALID_PARAMS);
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
+async fn profile_mcp_applies_and_explicit_flag_wins() {
+    let config = toml::from_str(
+        "[profiles.enabled]\nprovider = 'codex'\nmcp = true\n\
+         [profiles.disabled]\nprovider = 'codex'\nmcp = false\n",
+    )
+    .expect("profiles");
+    let mut h = Harness::with_config(DEFAULT, config);
+    for (profile, mcp, expected) in [
+        ("enabled", false, true),
+        ("disabled", false, false),
+        ("disabled", true, true),
+    ] {
+        let agent = h
+            .manager
+            .create(AgentCreateParams {
+                provider: None,
+                profile: Some(profile.to_owned()),
+                mcp,
+                ..h.create_params("profile")
+            })
+            .await
+            .expect("profile launch");
+        assert_eq!(agent.mcp, expected);
+        assert_eq!(h.next_session().await.spec.mcp.is_some(), expected);
+    }
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
 async fn create_validates_workspace_provider_and_mode() {
     let h = Harness::new(DEFAULT);
     let params = |workspace_id: WorkspaceId, provider, mode: Option<&str>| AgentCreateParams {
@@ -462,6 +624,7 @@ async fn create_validates_workspace_provider_and_mode() {
         initial_prompt: "p".to_owned(),
         labels: BTreeMap::new(),
         parent_id: None,
+        mcp: false,
     };
     let ws = h.workspace.id.clone();
 
@@ -815,6 +978,61 @@ async fn resume_uses_provider_session_id() {
 }
 
 #[tokio::test]
+async fn resume_keeps_mcp() {
+    let mut h = Harness::new(DEFAULT);
+    let agent = h
+        .manager
+        .create(AgentCreateParams {
+            mcp: true,
+            ..h.create_params("MCP")
+        })
+        .await
+        .expect("create MCP agent");
+    let mut session = h.next_session().await;
+    assert_eq!(session.next_call().await, Call::SendUser("MCP".to_owned()));
+    let launch = session.spec.mcp.as_ref().expect("initial MCP launch");
+    assert_eq!(
+        launch.command,
+        std::env::current_exe().expect("test executable")
+    );
+    assert_eq!(launch.args, ["mcp", "--agent", agent.id.as_str()]);
+    let expected_env: BTreeMap<_, _> = [
+        "DGC_STATE_ROOT",
+        "HOME",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_owned(), value)))
+    .collect();
+    assert_eq!(
+        launch.env.iter().cloned().collect::<BTreeMap<_, _>>(),
+        expected_env
+    );
+    session
+        .emit(ProviderEvent::Exited {
+            success: false,
+            stderr_tail: String::new(),
+        })
+        .await;
+    assert!(h.wait_state(&agent.id, AgentState::Failed).await.mcp);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    h.manager = new_manager(&h.store, &h.paths, DEFAULT, tx, DaemonConfig::default());
+    h.sessions = rx;
+    let resumed = h.manager.resume(&agent.id).await.expect("resume MCP agent");
+    assert!(resumed.mcp);
+    let resumed = h.next_session().await;
+    let resumed_launch = resumed.spec.mcp.expect("resumed MCP launch");
+    assert_eq!(resumed_launch.command, launch.command);
+    assert_eq!(resumed_launch.args, launch.args);
+    assert_eq!(resumed_launch.env, launch.env);
+    h.manager.shutdown_all(WAIT).await;
+}
+
+#[tokio::test]
 async fn send_to_failed_agent_is_invalid_state() {
     let h = Harness::new(Options {
         fail_start: true,
@@ -923,6 +1141,8 @@ async fn restart_recovery_marks_running_as_stopped() {
             provider_session_id: Some("sess".to_owned()),
             state,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: BTreeMap::new(),
             created_at: "2026-11-25T00:00:00.000Z".to_owned(),
             last_error: None,
@@ -932,7 +1152,13 @@ async fn restart_recovery_marks_running_as_stopped() {
     }
 
     let (sessions_tx, _sessions) = mpsc::unbounded_channel();
-    let manager = new_manager(&store, &paths, DEFAULT, sessions_tx);
+    let manager = new_manager(
+        &store,
+        &paths,
+        DEFAULT,
+        sessions_tx,
+        DaemonConfig::default(),
+    );
     manager.recover_on_startup().expect("recover");
 
     for (id, before) in ids {
@@ -1231,7 +1457,7 @@ async fn failed_start_keeps_initial_prompt_for_resume() {
         assert_eq!(h.queue_texts(&agent.id), ["recover this prompt"]);
 
         let (tx, rx) = mpsc::unbounded_channel();
-        h.manager = new_manager(&h.store, &h.paths, DEFAULT, tx);
+        h.manager = new_manager(&h.store, &h.paths, DEFAULT, tx, DaemonConfig::default());
         h.sessions = rx;
         h.manager.resume(&agent.id).await.expect("resume");
         let mut session = h.next_session().await;
@@ -1324,6 +1550,7 @@ async fn scheduled_agent_handles_a_waiting_send_before_stopping() {
                 initial_prompt: "scheduled turn".into(),
                 labels: BTreeMap::new(),
                 parent_id: None,
+                mcp: false,
             },
             CreateOptions {
                 stop_when_idle: true,
@@ -1677,6 +1904,8 @@ fn stored_handoff_source(h: &Harness, provider: ProviderKind, events: Vec<EventK
             provider_session_id: Some("source-only-session".to_owned()),
             state: AgentState::Stopped,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: BTreeMap::new(),
             created_at: String::new(),
             last_error: None,
@@ -1925,12 +2154,16 @@ async fn handoff_dry_run_checks_target_availability_before_reading_logs() {
 
 #[tokio::test]
 async fn handoff_creates_agent_in_same_workspace_with_label() {
-    let mut h = Harness::new(DEFAULT);
+    let config = toml::from_str(
+        "[profiles.handoff]\nprovider = 'codex'\nmode = 'full-access'\nmcp = true\n",
+    )
+    .expect("handoff profile");
+    let mut h = Harness::with_config(DEFAULT, config);
     let (source, mut source_session) = h.running("first").await;
     let result = handoff_rpc(
         &h,
         serde_json::json!({
-            "agent_id": source.id, "provider": "codex", "mode": "full-access", "dry_run": false
+            "agent_id": source.id, "profile": "handoff", "dry_run": false
         }),
     )
     .await
@@ -1945,8 +2178,11 @@ async fn handoff_creates_agent_in_same_workspace_with_label() {
         Some(source.id.as_str())
     );
     assert!(agent.parent_id.is_none());
+    assert_eq!(agent.depth, 0);
+    assert!(!agent.mcp);
     assert!(agent.auto_approve);
     assert_eq!(target.spec.cwd, h.workspace.path);
+    assert!(target.spec.mcp.is_none());
     assert_eq!(
         target.next_call().await,
         Call::SendUser(result["prompt"].as_str().expect("prompt").to_owned())
@@ -2289,6 +2525,7 @@ async fn handoff_reading_a_cold_log_does_not_block_unrelated_appends() {
                 initial_prompt: "unrelated append".to_owned(),
                 labels: BTreeMap::new(),
                 parent_id: None,
+                mcp: false,
             }));
         appended.send(result).expect("report creation");
     });
