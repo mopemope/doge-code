@@ -20,7 +20,8 @@
 
 - フェーズ A の M0〜M6 は実装済み。M6 の [PR #189](https://github.com/mopemope/doge-code/pull/189) は 2026-11-28 に develop へマージされた（`540b652`）。同 PR の macOS ジョブを含む 7 チェックは成功。
 - マージ後の修正: 通常のエージェント作成・スケジュール登録・引き継ぎプレビューで、プロファイル解決後のモデル名を同じ規則で検証する。従来は不正なモデルでもスケジュールを保存でき、引き継ぎはプレビューに成功して実行時に失敗した。
-- 検証（Linux、Rust 1.99.0）: 修正前に新規 2 テストがそれぞれ誤受理で失敗。修正後は `bash scripts/verify.sh test rejects_invalid_model` が 3 件成功、`bash scripts/verify.sh rust` が fmt・Clippy・792 テスト成功、`bash scripts/verify.sh guidance` が成功。今回の変更で実プロバイダと macOS は再実行していない。
+- 検証（Linux、Rust 1.99.0）: 修正前に新規 2 テストがそれぞれ誤受理で失敗。修正後は `bash scripts/verify.sh test rejects_invalid_model` が 3 件成功、`bash scripts/verify.sh rust` が fmt・Clippy・792 テスト成功、`bash scripts/verify.sh guidance` が成功。ローカル検証では実プロバイダと macOS は未実行。
+- 独立レビューで、README に明示モデルがプロファイルより優先されることを明記した。新規 2 テストはモデル検証のエラー文まで照合し、他のパラメーターエラーで通ることを防ぐ。
 - 次の開発タスク: M1 Task 12 の Codex 中断失敗を偽プロバイダで再検証する。進行中のターンに対して `turn/completed` と `turn/interrupt` のエラー（-32600 以外）が続いたとき、エージェントの状態と次の送信可否を確認する。
 
 ### フェーズ A の保留指摘の整理（2026-11-28）

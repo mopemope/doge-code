@@ -384,7 +384,10 @@ async fn schedule_rejects_invalid_model_before_saving() {
         .await
         .expect_err("invalid model");
     assert_eq!(err.code(), INVALID_PARAMS);
-    assert!(!err.to_string().contains("-invalid"));
+    assert_eq!(
+        err.to_string(),
+        "model must be at most 256 bytes and must not start with '-'"
+    );
     assert!(h.store.list_schedules().expect("list schedules").is_empty());
 }
 

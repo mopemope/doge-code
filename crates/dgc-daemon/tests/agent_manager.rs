@@ -2402,7 +2402,10 @@ async fn handoff_dry_run_rejects_invalid_model_from_profile() {
     .await
     .expect_err("invalid model in preview");
     assert_eq!(err.code, dgc_protocol::rpc::INVALID_PARAMS);
-    assert!(!err.message.contains("-invalid"));
+    assert_eq!(
+        err.message,
+        "model must be at most 256 bytes and must not start with '-'"
+    );
 }
 
 #[tokio::test]

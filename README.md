@@ -154,8 +154,8 @@ directory was deleted or moved, archiving one of its worktree workspaces (no
   `--follow` then prints its events until it is idle, stopped, failed or
   archived; the exit status is 0 only when it ended idle.
 - Model names accept up to 256 UTF-8 bytes and cannot begin with `-`.
-  Agent creation, schedule creation and handoff previews all check the effective
-  model after applying profile overrides.
+  Agent creation, schedule creation and handoff previews check the explicitly
+  supplied model, or the profile’s model when no model is supplied.
 - `--mode` is the provider's permission mode. Claude: `acceptEdits`, `auto`,
   `bypassPermissions`, `manual`, `dontAsk`, `plan`. Codex: `read-only`,
   `workspace-write` (default; sandboxed commands inside the workspace run
