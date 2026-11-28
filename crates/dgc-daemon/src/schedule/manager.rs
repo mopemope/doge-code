@@ -463,9 +463,8 @@ impl ScheduleManager {
         let mut params = agent_params(workspace_id, provider, profile, model, mode);
         let provider = self
             .agents
-            .resolve_profile(&mut params)
+            .resolve_target(&mut params)
             .map_err(|err| invalid(err.to_string()))?;
-        validate_field_len("model", params.model.as_deref().unwrap_or_default())?;
         validate_field_len("mode", params.mode.as_deref().unwrap_or_default())?;
         // Fix the safe default explicitly as well as profile overrides.
         // Otherwise a provider setting could supply a different mode at launch.

@@ -582,10 +582,24 @@ impl AgentManager {
         self.adapters.contains_key(&kind)
     }
 
-    pub(crate) fn resolve_profile(
+    pub(crate) fn resolve_target(
         &self,
         params: &mut AgentCreateParams,
     ) -> Result<ProviderKind, AgentError> {
+        let kind = self.resolve_profile(params)?;
+        if params
+            .model
+            .as_ref()
+            .is_some_and(|model| model.starts_with('-') || model.len() > MAX_MODEL_BYTES)
+        {
+            return Err(AgentError::InvalidParams(
+                "model must be at most 256 bytes and must not start with '-'".to_owned(),
+            ));
+        }
+        Ok(kind)
+    }
+
+    fn resolve_profile(&self, params: &mut AgentCreateParams) -> Result<ProviderKind, AgentError> {
         let Some(name) = &params.profile else {
             return params.provider.ok_or_else(|| {
                 AgentError::InvalidParams("provider is required without a profile".to_owned())
@@ -683,16 +697,7 @@ impl AgentManager {
         mut params: AgentCreateParams,
         options: CreateOptions,
     ) -> Result<Agent, AgentError> {
-        let kind = self.resolve_profile(&mut params)?;
-        if params
-            .model
-            .as_ref()
-            .is_some_and(|model| model.starts_with('-') || model.len() > MAX_MODEL_BYTES)
-        {
-            return Err(AgentError::InvalidParams(
-                "model must be at most 256 bytes and must not start with '-'".to_owned(),
-            ));
-        }
+        let kind = self.resolve_target(&mut params)?;
         if params.parent_id.is_some() && params.mode.is_none() {
             params.mode = Some(non_auto_default_mode(kind).to_owned());
         }
@@ -802,7 +807,7 @@ impl AgentManager {
             parent_id: None,
             mcp: false,
         };
-        let provider = self.resolve_profile(&mut create)?;
+        let provider = self.resolve_target(&mut create)?;
         // Handoffs use resolved provider settings and start as standalone agents.
         create.provider = Some(provider);
         create.profile = None;
