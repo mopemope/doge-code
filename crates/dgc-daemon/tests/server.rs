@@ -611,6 +611,40 @@ async fn start_agents_with_profiles(scenario: &str, profiles: &str) -> (Running,
 }
 
 #[tokio::test]
+async fn max_agent_depth_config_is_validated() {
+    for value in [0, 9] {
+        let dir = tempdir().expect("tempdir");
+        let paths = DaemonPaths::under(dir.path());
+        std::fs::create_dir_all(paths.config_file.parent().expect("config dir")).expect("mkdir");
+        std::fs::write(&paths.config_file, format!("max_agent_depth = {value}\n"))
+            .expect("write config");
+        let loaded = DaemonConfig::load(&paths.config_file).expect_err("invalid depth accepted");
+        let (shutdown, _rx) = watch::channel(true);
+        let startup = timeout(
+            WAIT,
+            run_daemon(
+                paths.clone(),
+                DaemonConfig {
+                    max_agent_depth: value,
+                    ..hermetic_config()
+                },
+                shutdown,
+            ),
+        )
+        .await
+        .expect("daemon did not return")
+        .expect_err("daemon accepted invalid depth");
+        for message in [loaded.to_string(), startup.to_string()] {
+            assert!(
+                message.contains("max_agent_depth") && message.contains("1..=8"),
+                "{message}"
+            );
+        }
+        assert!(!paths.socket.exists());
+    }
+}
+
+#[tokio::test]
 async fn invalid_profile_mode_fails_startup() {
     let dir = tempdir().expect("tempdir");
     let paths = DaemonPaths::under(dir.path());
@@ -646,6 +680,7 @@ const PROFILES: &str = "
 [profiles.z-safe]
 provider = 'codex'
 mode = 'read-only'
+mcp = true
 
 [profiles.a-fast]
 provider = 'claude'
@@ -664,9 +699,9 @@ async fn profile_list_reports_auto_approve() {
         response["result"],
         json!({"profiles": [
             {"name": "a-fast", "provider": "claude", "model": "haiku",
-             "mode": "bypassPermissions", "notes": "Fast review", "auto_approve": true},
+             "mode": "bypassPermissions", "notes": "Fast review", "auto_approve": true, "mcp": false},
             {"name": "z-safe", "provider": "codex", "model": null,
-             "mode": "read-only", "notes": null, "auto_approve": false}
+             "mode": "read-only", "notes": null, "auto_approve": false, "mcp": true}
         ]}),
         "{response}"
     );
@@ -1080,7 +1115,7 @@ async fn old_protocol_hello_is_refused() {
     let daemon = start().await;
     let mut client = Client::connect(&daemon.paths.socket).await;
     let response = client
-        .request(1, "hello", json!({"protocol_version": 2, "client": "test"}))
+        .request(1, "hello", json!({"protocol_version": 3, "client": "test"}))
         .await;
     assert_eq!(error_code(&response), i64::from(rpc::VERSION_MISMATCH));
     client.assert_closed_silently().await;

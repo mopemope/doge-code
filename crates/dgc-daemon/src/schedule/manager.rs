@@ -469,10 +469,9 @@ impl ScheduleManager {
         validate_field_len("mode", params.mode.as_deref().unwrap_or_default())?;
         // Fix the safe default explicitly as well as profile overrides.
         // Otherwise a provider setting could supply a different mode at launch.
-        params.mode.get_or_insert_with(|| match provider {
-            ProviderKind::Claude => "manual".to_owned(),
-            ProviderKind::Codex => "workspace-write".to_owned(),
-        });
+        params
+            .mode
+            .get_or_insert_with(|| provider::non_auto_default_mode(provider).to_owned());
         let auto_approve =
             provider::validate_mode(provider, params.mode.as_deref()).map_err(invalid)?;
         Ok(ScheduleTarget::NewAgent {
@@ -652,6 +651,7 @@ fn agent_params(
         initial_prompt: String::new(),
         labels: BTreeMap::new(),
         parent_id: None,
+        mcp: false,
     }
 }
 

@@ -18,11 +18,10 @@
 
 ## 現在の作業
 
-- タスク: M5 の PR 作成とマージ待ち、その後 M6（エージェント向け MCP）の計画作成
-- 状態: M5 は PR #188（develop 向け）でレビュー待ち。CI は macOS を含め全ジョブ通過（65bfe6a）
-- 済んだこと: M5 Task 6 の偽プロバイダ、実 Claude Haiku、固定ツールチェーンでの受け入れ検証と M5 最終レビューの修正。
-- 次の一手: PR #188 のマージ後に M6（エージェント向け MCP）の計画を作成する。M6 では、同じ UID のエージェントがソケット経由でスクリプトの信頼・起動や自動承認スケジュールの作成をできる点を扱う（M5 最終レビューの保留事項）
-- 未コミットの変更: なし
+- タスク: M6 は PR #189（develop 向け）でレビュー待ち。マージ後はフェーズ A の総括（残りの保留指摘の整理）とフェーズ B の設計準備
+- 済んだこと: M6 Task 5 で Codex の MCP ツール承認を中継し、レビュー対応で MCP の起動必須と都度承認を本番の起動引数に追加した。実機でも本番の起動引数で `create_agent` と `wait_agent` を個別に許可し、子の `OK` を確認した。
+  M6 最終レビューで子の既定モードを明示し、`agent.create` のモデル検証、Codex elicitation のエラー記録、MCP 内部エラーの応答を追加した。
+- 未コミットの変更: なし（ユーザーの未追跡ファイル 2 件は対象外）
 
 ## マイルストーン
 
@@ -33,8 +32,8 @@
 | M2 | TUI | 完了（PR #185 マージ済み） | m2-tui |
 | M3 | 切替（旧 `src/` 削除、`dgc` に改名） | 完了（PR #186 マージ済み） | m3-cutover |
 | M4 | プロファイル、使用量上限時の引き継ぎ（提案→確認）、前提修正 | 完了（PR #187 マージ済み） | m4-profiles-handoff |
-| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188） | m5-schedules-scripts |
-| M6 | エージェント向け MCP（サブエージェント） | 未着手 | 未作成 |
+| M5 | スケジュール、heartbeat、ワークスペーススクリプト（dgc.json + 内容の信頼確認） | 完了（PR #188 マージ済み） | m5-schedules-scripts |
+| M6 | エージェント向け MCP（サブエージェント） | 完了（PR #189） | m6-mcp-subagents |
 
 ## タスク
 
@@ -105,9 +104,70 @@
 | 6 | M5 受け入れ | 完了 | `docs(orchestrator): complete M5 acceptance` |
 | 最終修正 | スクリプトの信頼確認と監査、スケジュールの表示と時計補正 | 完了 | `fix: tighten script trust wording and prompts, and harden schedules` |
 
+### M6
+
+| # | タスク | 状態 | コミット |
+|---|---|---|---|
+| 1 | 親子の規則と MCP の付与（デーモン） | 完了 | `feat(daemon): record sub-agent parents and attach the dgc MCP server` |
+| 2 | `dgc mcp`（MCP サーバー） | 完了 | `feat(cli): serve sub-agent tools over MCP` |
+| 3 | CLI と TUI での表示と有効化 | 完了 | `feat(cli): enable MCP per agent and show sub-agent trees` |
+| 4 | M6 受け入れ | 完了（Codex の追加対応は Task 5） | `docs(orchestrator): complete M6 acceptance` |
+| 5 | Codex の MCP elicitation を権限要求として中継 | 完了 | `feat(daemon): relay Codex MCP elicitations as permission requests`、`fix(daemon): require the dgc MCP server and prompt for its tools under Codex` |
+| 最終修正 | 子の既定モード、モデル検証、Codex elicitation と MCP 内部エラーの応答 | 完了 | `fix: pin sub-agent modes and tighten MCP edges` |
+
 ## 決定事項
 
+- 2026-11-27 (M6 計画): ユーザー決定。MCP に出すのはサブエージェントの操作だけ（権限応答、スクリプト、スケジュール、プロジェクト、ワークスペースは出さない）。子のモードは親より緩くしない（自動承認系は親が自動承認のときだけ）。MCP は `--mcp` かプロファイルの `mcp = true` で明示したエージェントだけに付ける。子は親と同じワークスペースで動く。
 設計書から外れた判断、追加依存とその理由を日付付きで追記する。
+
+- 2026-11-27 (M6 最終レビュー裁定): プロファイル解決後もモード未指定の子は、スケジュールと共通の既定値（Claude `manual`、Codex `workspace-write`）を起動と保存に使う。モード未指定のルートは従来の起動経路を使う。`agent.create` のモデルは先頭 `-` と UTF-8 で 256 バイトを超す値を `INVALID_PARAMS` で拒否する。2026-11-27 参照。[Claude Code の権限モード](https://code.claude.com/docs/en/permissions#permission-modes) [Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference)
+- 2026-11-27 (M6 最終レビュー裁定): Codex は有効なターンに結び付かない MCP elicitation に `cancel` を返し、フォームの `decline` と同じ固定文面の `Error` を記録する。MCP のツールタスクがパニックした場合は Tokio のタスク ID から対応するリクエスト ID を取得し、固定文面で JSON-RPC `-32603` を返す。2026-11-27 参照。[Codex App Server](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests) [Tokio JoinSet](https://docs.rs/tokio/1.53.3/tokio/task/struct.JoinSet.html#method.join_next_with_id) [JSON-RPC 2.0](https://www.jsonrpc.org/specification#error_object)
+
+- 2026-11-27 (M6 Task 5 レビュー裁定): Codex の MCP 有効時は、起動引数に `-c mcp_servers.dgc.required=true` を加える。サーバーの起動失敗は `thread/start` または再開の失敗になる。ユーザー承認モードでは `-c mcp_servers.dgc.default_tools_approval_mode="prompt"` も加え、ツールごとに許可を求める。`full-access` の承認ポリシーは `never` のため、都度承認の追加はユーザー承認モードに限る。両設定の適用範囲は起動した Codex プロセス。2026-11-27 参照。[Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [Codex App Server](https://learn.chatgpt.com/docs/app-server#mcp-servers) [Codex 0.172.0 の承認処理](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L1919-L1933)
+
+- 2026-11-27 (M6 Task 5): Codex CLI 0.172.0 の `codex app-server generate-json-schema` で `McpServerElicitationRequestParams` と `McpServerElicitationRequestResponse` を確認した。要求は `threadId`、`serverName` とフォーム（`form`、`openai/form`、`openaiForm`）または `url` を持つ。`turnId` は省略または null にできる。応答は `action` に `accept`、`decline`、`cancel` のいずれかを指定し、入力を送らない場合は `content: null`。2026-11-27 参照。[Codex App Server の MCP elicitation](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests)
+- 2026-11-27 (M6 Task 5): 公式の Codex 0.172.0 は、通常フォームに空のオブジェクトスキーマと `_meta.codex_approval_kind = "mcp_tool_call"` を付けてツール承認を識別する。`serverName`、`_meta.tool_name`、任意の `_meta.tool_params` を要約に使用する。入力を求めるフラグ、フィールド付きフォーム、未分類のフォーム、URL 型は本文を含まないエラーと `decline` を返す。`turnId` がなければ現在のターンに結び付け、対象のターンが動作中でなければ `cancel` を返す。セッション許可は単発の `accept` として扱う。中断と終了では `cancel` を返す。2026-11-27 参照。[承認要求の生成](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L2391-L2426) [承認応答の解釈](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L2559-L2593) [承認メタデータの定義](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/protocol/src/mcp_approval_meta.rs) [合成フィクスチャ](../../crates/dgc-daemon/tests/fixtures/README.md)
+
+- 2026-11-27 (M6 Task 4): Claude は `haiku`、Codex は `gpt-6-luna` を親子に指定した。Codex CLI の `model/list` に載る通常モデルのうち、公式の Codex 標準レートで最低のモデルを選んだ。2026-11-27 参照。[Claude Code モデル設定](https://code.claude.com/docs/en/model-config) [OpenAI の Codex レート表](https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing) [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+- 2026-11-27 (M6 Task 4): 実クライアントの初期化を [MCP フィクスチャ](../../crates/dgc-cli/tests/fixtures/mcp/README.md) に記録した。当時のアダプタは Codex の `mcpServer/elicitation/request` に `-32601` を返した。承認の中継を Task 5 に追加した。2026-11-27 参照。[Codex の MCP elicitation](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests) [MCP の版の互換性](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) [MCP のキャンセル](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation)
+- 2026-11-27 (M6 Task 3): `--mcp` は有効化専用。CLI の起動単位で `mcp = true` のプロファイルを無効化する指定は設けない。TUI 作成フォームは `profile.list` の有効値を送る。RPC の `ProfileInfo.mcp` は省略時 false として読む。
+- 2026-11-27 (M6 Task 3): 親子は同じワークスペース内で親を先に表示し、兄弟は従来の一覧順。非表示の親を持つ子はワークスペース配下で深さを保ち、`↳ parent <short id>` を付ける。TUI の列幅が足りない場合は短い ID の固定接頭辞から省く。TUI の上下移動と `p` は描画順に従い、子からの `←` は表示されている親、親が非表示ならワークスペースを選ぶ。
+- 2026-11-27 (M6 Task 3): MCP ツールの承認はプロバイダの設定と通常の権限要求経路に従うことを README に記載。公式資料を同日参照した。[Claude Code の権限](https://code.claude.com/docs/en/permissions) [Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference) [MCP のツール仕様](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#user-interaction-model)
+- 2026-11-27 (M6 Task 3 レビュー対応): TUI で親が非表示または親リンクが不正な行は、状態と `[auto]`、`[mcp]` を差し引いてからタイトルに 4–8 セルを確保する。完全な親注記が入る場合に表示し、幅に応じて ID の固定接頭辞を省く。人間向けの `dgc ls` は行末を `depth=N` にそろえ、README ではスクリプト向けに `dgc ls --json` を案内する。
+
+- 2026-11-27 (M6 Task 2): `initialize` で交渉する版は `2025-11-25`、`2025-06-18`。未対応版の要求には `2025-11-25` を返す。
+  公式仕様の現行版 `2026-07-28` ではハンドシェイクが廃止された。対応する両版で JSON-RPC バッチは廃止済みのため拒否する。stdio は UTF-8 の 1 行 1 メッセージとする。
+  2026-11-27 参照。[MCP 仕様](https://modelcontextprotocol.io/specification) [2026-07-28 の変更点](https://modelcontextprotocol.io/specification/2026-07-28/changelog) [バッチの廃止](https://modelcontextprotocol.io/specification/2025-06-18/changelog) [stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) [バージョン交渉](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
+- 2026-11-27 (M6 Task 2): `dgc mcp` は標準のパス解決と `Client::connect` を使う。`list_agents` はアーカイブ済みも含む子孫の ID、状態、タイトル、プロバイダを返す。
+  `wait_agent` は子孫であることを確認してから購読し、購読後に待機に使う状態を読む。`lagged` では購読を作り直す。指定秒数は 300 に切り詰める。
+  `last_answer` は最大 4 ページを調べ、開始と完了が記録された直近の正常な回答を返す。
+
+- 2026-11-27 (M6 Task 2 レビュー対応): 対応版は `2025-11-25` と `2025-06-18`。両方式対応のクライアントは stdio の `server/discover` に対する `-32601` を受けて `initialize` に切り替える。
+  `2026-07-28` 専用のクライアントは接続できない。`2025-03-26` はバッチ対応が必要なため対応版に含めない。
+  2026-11-27 参照。[バージョンの互換性](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) [バッチの廃止](https://modelcontextprotocol.io/specification/2025-06-18/changelog)
+- 2026-11-27 (M6 Task 2 レビュー対応): ツール呼び出しをリクエスト ID ごとに実行し、`notifications/cancelled` で中断する。stdin の EOF で処理中の呼び出しを中断する。未知のツールと壊れた呼び出しの外形には `-32602` を返す。
+  2026-11-27 参照。[キャンセル](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation) [ツールのエラー](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+- 2026-11-27 (M6 Task 2 レビュー対応): Codex の `tool_timeout_sec` を 330 秒から 360 秒に延長する。MCP は状態待機を最大 300 秒、開始時と結果取得の RPC を合算で最大 15 秒に制限する。 [Codex Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+- 2026-11-27 (M6 Task 2 レビュー対応): `agent.events` に `reverse: true` を追加し、この場合の `since_seq` は排他的な上限とする。既存の前方ページと `tail` の契約を維持し、各方向で既存のページ上限を共用する。
+  これにより、サイズが不均一なイベントでもページ間の連続性を保つ。
+
+- 2026-11-27 (M6 Task 1): Claude の `--mcp-config` は単一引数のインライン JSON を使う。
+  既存のユーザー MCP 設定も読み込むよう `--strict-mcp-config` は付けない。2026-11-27 参照。[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+- 2026-11-27 (M6 Task 1): Codex の `app-server` の前に `-c` と `mcp_servers.dgc.<key>=<TOML value>` の組を 4 件渡す。
+  `command` は文字列、`args` は文字列配列、`env` はインラインテーブル、`tool_timeout_sec` は整数の `330`。
+  後続の Task 2 レビュー対応で `tool_timeout_sec` は `360` に、Task 5 レビュー裁定で `required=true` とユーザー承認モードの `default_tools_approval_mode="prompt"` が追加された。
+  2026-11-27 参照。[Codex Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)、[Codex Advanced Configuration](https://learn.chatgpt.com/docs/config-file/config-advanced)
+- 2026-11-27 (M6 Task 1): `codex-cli 0.172.0` の `codex mcp list -c …` を一時 `HOME` と `CODEX_HOME` で認証情報なしで実行。終了コード 0。
+  一覧で `dgc`、コマンド `/tmp/dgc bin/dgc`、引数 `mcp --agent test-agent`、環境変数 `DGC_STATE_ROOT=*****` / `HOME=*****`、状態 `enabled` を確認。
+  `--json` では `transport.type = "stdio"`、引数配列、サンプル環境変数の値、`tool_timeout_sec = 330.0` を確認。一時ディレクトリ下の PATH エイリアス作成を省略する警告は出たが、設定は読み取れた。
+- 2026-11-27 (M6 Task 1 レビュー対応): MCP に渡す非空の `DGC_STATE_ROOT` は、デーモン起動時に `std::path::absolute` でデーモンの作業ディレクトリを基準に解決する。
+  `HOME`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_RUNTIME_DIR` は `DaemonPaths` と同様に絶対パスだけを使う。MCP の起動構成にはこの 6 変数以外を含めない。
+  状態ルートや実行ファイルを解決できない場合、およびパスを UTF-8 で表現できない場合は、値を含まない専用の文面で `INVALID_STATE` を返す。2026-11-27 参照。[Rust std::path::absolute](https://doc.rust-lang.org/std/path/fn.absolute.html)
+  MCP サーバー名 `dgc` は予約名とする。プロバイダの同名設定と混合または上書きされ得るため、README と AGENTS.md に記載した。
+  2026-11-27 参照。[Codex Config basics](https://learn.chatgpt.com/docs/config-file/config-basic) [Claude Code MCP](https://code.claude.com/docs/en/mcp)
+- 2026-11-27 (M6 Task 1): MCP には起動時に解決したデーモンの実行ファイルを使う。
+  スケジュールと引き継ぎで作るエージェントは、プロファイルを指定した場合も `mcp = false`、`depth = 0`、`parent_id = None`。
+  旧エージェントレコードに MCP と深さのフィールドがなければ `false` と `0` で読み込む。
 
 - 2026-11-27 (M5 最終修正): Script trust covers only the exact bytes of `dgc.json`. An agent with
   workspace write access (for example, Codex in `workspace-write` mode or
@@ -690,6 +750,62 @@
 ## 検証記録
 
 実行したコマンド、結果、環境で実行できなかったチェックを日付付きで追記する。
+
+- 2026-11-27 M6 最終レビュー修正（Linux、Rust 1.99.0）
+  - RED/GREEN で子の起動モードと保存値、ターン外 elicitation の固定エラー、モデル検証、MCP パニック後のリクエスト ID 付き応答を確認した。対象の `agent_manager` 56 件、`claude_adapter` 24 件、`codex_adapter` 37 件、MCP の結合 20 件・単体 2 件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 790 件）、`guidance`（機密ログ検査、Python 40 件）、`tui-deps`、`msrv`（Rust 1.94.0）が PASS。作業フォルダに `final-fix-*.log` を保存。
+  - この修正では偽プロバイダを使用した。実プロバイダ CLI と macOS の再検証は未実施。
+
+- 2026-11-27 M6 Task 5 レビュー対応（Linux、Rust 1.99.0）
+  - RED は起動引数の不足と必須 MCP が欠けた状態での `Idle` 到達を検出した。GREEN は `cargo test --locked -p dgc-daemon --test codex_adapter --test agent_manager` で 90 件 PASS。`full-access` と通常モード、MCP 無効時の引数、必須サーバー失敗時の `Failed` と Error、フォームの拒否、および次ターン中に届いた旧ターン要求の取り消しを確認した。セッション許可の単体テストも PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 785 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）が PASS。作業フォルダに `task-5-fix1-*.log` を保存。
+  - Codex CLI 0.172.0 と `gpt-6-luna` の親子で実機検証。Task 4 と同じ隔離手順で、既定の `workspace-write` による `dgc run --mcp` を本番の起動引数で実行した。親の `create_agent` と `wait_agent` の 2 件を `dgc permit allow` で個別に許可した。子 1 件が完了し、`wait_agent` は `last_answer="OK"`、`timed_out=false` を返した。親の最終回答も `OK`。デーモン停止と一時ディレクトリの削除を確認した。
+
+- 2026-11-27 M6 Task 5（Linux、Rust 1.99.0）
+  - `bash scripts/verify.sh test elicitation` は実装前に 5 件失敗、実装後に 5 件 PASS。許可と拒否、中断と停止、フォーム拒否、要約と元データの上限を確認した。既存の CLI と TUI のエスケープテストも PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 783 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`cargo build --locked -p dgc-cli --bin dgc` が PASS。
+  - Codex CLI 0.172.0 で、Task 4 と同じ隔離方法、使い捨て Git リポジトリ、`DGC_STATE_ROOT` を使用した。親子のモデルは `gpt-6-luna`。親の `dgc run --mcp` は既定の `workspace-write` モードで、試験用ラッパーが親にだけ `mcp_servers.dgc.required=true` と `default_tools_approval_mode="prompt"` を渡した。親の `create_agent` と `wait_agent` の 2 件を `dgc permit allow` で個別に許可した。子が 1 件作成され、`wait_agent` が `last_answer = "OK"` と `timed_out = false` を返し、親も `OK` を報告した。既定設定だけの試行ではツール一覧の取得まで進んだ。親子共通の試験設定を使った試行では承認と子の作成が成功し、子の起動は失敗した。2026-11-27 参照。[Codex 設定リファレンス](https://learn.chatgpt.com/docs/config-file/config-reference)
+  - 一時デーモンの終了、ソケット消滅、子孫プロセス 0 件と一時ディレクトリの削除を確認した。作業フォルダに `task-5-*.log` を保存。macOS 実機は未検証。
+
+- 2026-11-27 M6 Task 4（Linux、Rust 1.99.0、DONE_WITH_CONCERNS）
+  - `cargo build --locked -p dgc-cli --bin dgc` と `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` が PASS。`mktemp -d` 配下の個別の絶対 `DGC_STATE_ROOT`、設定、使い捨て Git リポジトリで手動検証した。実クライアントは既存の認証ファイルを読み取り専用で参照した。
+  - 偽プロバイダの stdio クライアントから `dgc mcp --agent ID` を呼び、子の作成、待機、`last_answer = "OK"`、アーカイブを確認。深さ上限を 2 に設定し、上限での MCP 有効化と深さ 3 の作成、通常モードの親からの `bypassPermissions` 指定はいずれも `INVALID_PARAMS`（`-32602`）で拒否された。
+  - Claude Code 2.1.332（`dgc run --provider claude --model haiku --mcp`、既定モード）: `server/discover` の `-32601` を受けて `initialize` に切り替わり、要求した `2025-11-25` が受理された。`tools/list`、`tools/call` の `create_agent` と `wait_agent` が成功し、子と親の回答は `OK`。`dgc permit ls` に出た `mcp__dgc__create_agent` 1 件と `mcp__dgc__wait_agent` 2 件を `dgc permit allow` で個別に許可した。3 件目の許可後、MCP のツール応答を一時ラッパーで保留して `dgc interrupt` を実行し、同じ要求 ID への `notifications/cancelled` を確認した。
+  - Codex CLI 0.172.0（`dgc run --provider codex --model gpt-6-luna --mcp`、既定の `workspace-write`）: 最初から `initialize` で、要求した `2025-06-18` が受理された。`tools/list` は成功。ターン中に未対応の `mcpServer/elicitation/request` が 1 件発生し、`dgc permit ls` は 0 件、MCP 側の `tools/call` は 0 件、子の作成は 0 件だった。ツール承認の要否は未確認。親の終了後に `dgc interrupt` を 1 回試し終了コード 1。処理中の MCP 呼び出しがなく、キャンセル通知は未捕捉。
+  - 全デーモンを停止し、ソケット消滅と子孫プロセス 0 件を確認。一時ディレクトリを削除し、対象プロセスの残存がないことを確認した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 778 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh msrv`（Rust 1.94.0）、`bash scripts/verify.sh tui-deps` が PASS。作業フォルダに `task-4-verify-*.log` を保存。macOS 実機は未検証。
+
+- 2026-11-27 M6 Task 3 レビュー対応（Linux、Rust 1.99.0）
+  - 120 列の TUI で `[auto]` と `[mcp]` が付いた子のタイトルと親 ID が欠けるケース、および `ls` の行末が `depth=N` にならないケースを RED/GREEN で確認した。不正な親リンクと最大深さの回帰テストは、修正前から 2 件 PASS。
+  - `bash scripts/verify.sh test tui::` 282 件、`cargo test --locked -p dgc-cli --test agent_cli` 21 件、`cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 778 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
+  - 一時状態ルートと偽 Claude で 120×18 の tmux 画面を再記録し、親をアーカイブした後も子のタイトル、`[mcp]`、選択を確認した。[画面記録](m6-tui-screen.txt)
+  - 作業フォルダに `task-3-fix1-{red,green,verify}-*.log` を保存。実プロバイダでの MCP 通信と macOS 実機は未検証。
+
+- 2026-11-27 M6 Task 3（Linux、Rust 1.99.0）
+  - `bash scripts/verify.sh test <テスト名>` で指定 6 テストと TUI のプロファイル選択テストの RED/GREEN を確認した。親のアーカイブ後に TUI で ID の末尾が切れるケースを追加し、表示幅 120 列と 136 列で再検証した。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 774 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログ、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
+  - 偽 Claude と一時状態ルートで `tmux capture-pane -p`（120×18）を実行し、親・子・孫、子の `[mcp]`、親のアーカイブ後の ID 注記と子の選択保持を記録した。初回の画面は作業フォルダの `task-3-verify-tmux.log` を参照。
+  - 実プロバイダでの MCP 通信と macOS 実機は未検証。作業フォルダに `task-3-{red,green,verify}-*.log` を保存。
+
+- 2026-11-27 M6 Task 2 レビュー対応（Linux、Rust 1.99.0）
+  - MCP で待機中の応答と EOF、フレーム処理、ツールエラー、逆方向の履歴取得、購読順と一覧 RPC に関する回帰を修正前に確認した。Codex の 330 秒と逆方向カーソルの未対応も RED で確認した。
+  - `cargo test --locked -p dgc-cli --test mcp` 19 件、`cargo test --locked -p dgc-daemon --test codex_adapter` 30 件、`cargo test --locked -p dgc-daemon --test agent_manager events_` 2 件、`bash scripts/verify.sh test wait_duration_clamps_above_300_seconds` 1 件が PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 766 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログチェック、Python 40 件）が PASS。ログは `task-2-fix1-{red,green,verify}-*.log`。実プロバイダと macOS 実機は未検証。
+
+- 2026-11-27 M6 Task 2（Linux、Rust 1.99.0）
+  - `cargo build --locked -p dgc-daemon --bin dgc-fake-provider` 後、`cargo test --locked -p dgc-cli --test mcp` は実装前に 12 件失敗、実装後に 12 件 PASS。テストは一時状態ルート内で実デーモンと偽プロバイダを使用。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、警告なしの Clippy、Rust 757 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログチェック、Python 40 件）が PASS。
+  - 実プロバイダとの MCP 通信と macOS 実機は未検証。作業フォルダに `task-2-{red,green,verify}-*.log` を保存。
+
+- 2026-11-27 M6 Task 1 レビュー対応（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-daemon --test agent_manager mcp_` と `cargo test --locked -p dgc-daemon --lib mcp_unavailable_executable_reports_invalid_state` で、未解決の相対パスと従来の状態メッセージを RED で確認。
+  - `cargo test --locked -p dgc-daemon --test agent_manager --test claude_adapter --test codex_adapter --test server` は 139 件 PASS。実行ファイルの専用エラーを検証する単体テストも PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 745 件）、`bash scripts/verify.sh guidance`（ガイダンス、機密ログチェック、Python 40 件）が PASS。作業フォルダに `task-1-fix1-{red,green,verify}-*.log` を保存。
+
+- 2026-11-27 M6 Task 1（Linux、Rust 1.99.0）
+  - `cargo test --locked -p dgc-daemon --test agent_manager --test claude_adapter --test codex_adapter --test server` は、実装前に型とフィールドの未定義で RED、実装後に 137 件 PASS。
+  - `cargo fmt --all`、`bash scripts/verify.sh rust`（fmt、Clippy、Rust 742 件）、`bash scripts/verify.sh guidance`（リンク、機密ログチェック、Python 40 件）、`bash scripts/verify.sh tui-deps` が PASS。
+  - Codex 0.172.0 の `mcp list` は認証情報なしの設定読み取りで PASS。実プロバイダとの MCP 接続と macOS 実機テストは未実行。ログは作業フォルダの `task-1-{red,green,verify}-*.log`。
 
 - 2026-11-27 M5 Linux CI（62c6dfd）: 子が親から継承した TERM ハンドラを解除する前に TERM を受け、親が `wait` 中に猶予切れで SIGKILL された。子自身が `exec` 後に改行付き PID を公開するようテストを修正。dash の負荷試験で shutdown と stop は各 2/200 → 0/200、archive と SIGKILL の検証は各 0/200 → 0/200。トレース付きでは archive も 1/200 → 0/200。Rust 1.99.0 の `verify.sh rust`（732件）と `verify.sh guidance`（Python 40件）が PASS。macOS 実機は未検証。
 
@@ -1457,3 +1573,32 @@ M5 はタスクごとのレビュー（修正の再レビューまで）と全�
 - Task 4: Ruling: fold Minors 1 (list shows in-memory runs absent from the current file), 2 (logs result carries start_offset so the CLI can mark skipped output), 7 (trust reports why the file could not be read instead of script_file_changed) — Task 5 builds on these RPC shapes — cost if wrong: two small result fields
 - Ruling: macOS verified by the CI macos job on the PR (cannot run locally); a CI failure there is fixed before merge — cost if wrong: one more fix commit after the PR opens
 - Ruling: final fix wave = README trust scope + PROGRESS decision; trust prompt requires a terminal stdout as well (preview cannot be hidden) with a testable prompt function (y/n/EOF tests); --follow skips the 500 ms wait after a full page; heartbeat create warns when the target agent is auto-approve; paused schedules show no next run; clock moving backwards recomputes next_run_at; info! audit lines (ids/names/states only) for script trust/start/stop/exit; tests for 0700 scripts/<ws>/ and SIGKILL of a TERM-ignoring group member; README archive-refusal note, storage/security tables, English heading, scheduled-agent prompt locations; PROGRESS real-Claude wrapper flags + unexercised permission relay + synthetic heartbeat step — each touches trust, approval visibility or recovery — cost if wrong: a larger fix diff to review
+
+## M6 レビューで保留した指摘と判断（2026-11-27、実行台帳から移記）
+
+M6 はタスクごとのレビュー（修正の再レビューまで）、受け入れで判明した Task 5 の追加、全体の最終レビュー（修正 0072eb0）を通過した。以下は保留した Minor 指摘と、コントローラの判断の全量。台帳の行はそのまま転記したので、最終レビューの修正で解消した項目（子のモード固定、モデル名の検証、ツールの panic 応答、ターン外の elicitation の Error、README の補足）も含む。
+
+### 保留した Minor 指摘
+
+- Task 1: minor (deferred): explicit mcp=false cannot override a profile's mcp=true (bool cannot express explicit false; Task 3 CLI/TUI note); resume does not re-check max_agent_depth after config lowered (harmless: creates refused)
+- Task 1: minor (deferred): StateRootUnavailable variant untested; non-UTF-8 path var now fails every MCP create (precomputed env)
+- Task 2: minor (deferred): duplicate in-flight tools/call id gets -32600 then the original result (two responses, one id); panicked tool task yields no response; no cap on concurrent calls (2 daemon connections per wait_agent); slow prep turns a full wait into daemon_timeout instead of timed_out; cancel test does not directly assert no late response; read_before reparses newer events per page (bounded by rotation)
+- Task 3: minor (deferred): no test of an [mcp] orphan keeping its note at 120 cols; whole-short-form note branch covered only by the existing 120/136-col tests; README 'now ends with depth=N' changelog wording; README ls bullet omits the note for invalid links
+- Task 4: minor (deferred): Claude run shows tool_call 4 vs 3 permission requests (4th unnamed); fake-check claims 'refused creates add no agents'/'parent id matches' not in saved log; daemon fixtures README lacks a link to MCP fixtures; raw Claude wire capture deleted (re-extraction kept); 'cheapest' Codex model gpt-6-luna rests on an external rate card without saved rate data
+- Task 5: minor (deferred): real-run logs do not capture the actual Codex argv/effective config (inferred from harness source + build order); fail-closed path verified only synthetically; fixtures README omits mcp_launch_full_access.jsonl; user's own Codex per-tool approval config can pre-approve dgc tools (within the provider-settings invariant)
+- Deferred after final review: last_answer may return an older turn's answer when the newest completed turn is unclean (README wording covers it); slow setup → daemon_timeout vs timed_out; non-UTF-8 irrelevant path var fails all MCP creates; real-run logs lack captured Codex argv; fail-closed only synthetic; macOS unverified locally (CI)
+- Final re-review: minor (deferred): schedule creation checks only model length (a model starting with '-' is refused at each fire, never launched); handoff dry_run does not validate the model (the real run does); the no-op panic hook in `dgc mcp` also hides panics on non-tool threads
+
+### コントローラの判断（Ruling）
+
+- Ruling: McpLaunch env = DGC_STATE_ROOT/HOME/XDG_* that are set in the daemon env, nothing else — dgc mcp must reach the same daemon under Codex's restricted MCP env — cost if wrong: dgc mcp cannot connect in some setups
+- Ruling: dgc mcp uses the CLI's path resolution and Client::connect (no autostart) — avoids a second daemon — cost if wrong: none
+- Ruling: schedule and handoff agents keep mcp=false, depth=0, parent_id=None — M6 scope is explicit sub-agents — cost if wrong: none
+- Task 1: Ruling: fold Minors — dedicated error message for mcp_environment_not_utf8 / mcp_executable_unavailable; README/AGENTS note that the MCP server name `dgc` is reserved; restore explicit provider/mode handoff coverage — cheap clarity and lost coverage — cost if wrong: none
+- Task 2: Ruling: fold Minors 1 (last_answer pages backwards, bounded, when the tail starts mid-turn), 2 (descendant check before subscribing), 3 (oversized/unterminated line → -32700, keep serving), 4 (unknown tool / malformed call → -32602), 5 (list_descendants from agent.list parent_ids), 6 (wait budget margin vs Codex tool_timeout_sec), 7 (reuse default_title), 8 (tests: nonexistent id, timeout clamp, server/discover → -32601), 9 (PROGRESS: dual-era fallback note) — robustness of the agent-facing API and its recovery — cost if wrong: a larger fix diff
+- Task 2: Ruling: MCP versions stay 2025-11-25 and 2025-06-18 (2025-03-26 requires batches, which are rejected); acceptance records each real client's first method, requested/accepted version, fallback, tools/list + tools/call, and cancellation — cost if wrong: a real client cannot connect, found in Task 4
+- Task 3: Ruling: fold Minors 1 (agent_tree unit test for corrupted records: self-parent, forged-depth cycle, cross-workspace parent, depth u32::MAX), 2 (README: the parent note also appears for records whose parent link is invalid) , 3 (README/commit note: `ls` rows now end with depth=N) — pin the safety-by-construction and document visible output change — cost if wrong: none
+- Ruling: plan defect — add Task 5 (relay Codex MCP elicitations as permission requests; form elicitations declined with an Error event) and re-run the Codex real check there — the spec's acceptance requires sub-agents from Codex too, and approvals must stay with the user — cost if wrong: one more adapter task
+- Ruling: every mcp=true Codex launch adds -c mcp_servers.dgc.required=true (fail closed: thread start fails if dgc mcp cannot start; fixes the startup race); non-auto-approve Codex launches also add default_tools_approval_mode="prompt" (every dgc tool call asks the user regardless of annotation heuristics); auto-approve launches keep Codex's default for dgc tools (approval_policy=never would deny prompted tools) — both per-launch -c only inside the MCP gate, never in a shared CODEX_HOME — real Codex check re-run with production args only — cost if wrong: an MCP startup failure now fails the Codex agent instead of running without tools
+- Task 5: Ruling: fold Minors 1 (AllowForSession → single accept, no _meta.persist, unit test), 2 (form-decline coverage: non-empty required, other codex_approval_kind, blank/missing tool_name, non-object schema type), 3 (assert escaped display or rename the test), 4 (turn-2 running + late explicit turn-1 request → cancel), 5 (fixtures README: tool_name/params come from _meta; serverName is Codex-set), 6 (module doc: shutdown cancels elicitations) — cost if wrong: none
+- Ruling: final fix wave = pin Claude children (parent_id set, no mode) to `manual` like schedules + argv test; fold Minors 1 (PROGRESS Task 1 line points to later rulings), 2 (README: --json strings escape DEL/C1/bidi as \u), 3 (README: profile mcp=true is ignored by handoff and schedules), 4 (Error event when an elicitation is cancelled outside a turn), 6 (daemon validates model: no leading '-', ≤256 bytes), 7 (README: tool error body {kind, code?}), and should-fix T2 panic → -32603 — approval guardrail plus cheap clarity/robustness — cost if wrong: a slightly larger fix diff

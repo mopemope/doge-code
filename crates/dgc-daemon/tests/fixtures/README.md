@@ -83,6 +83,18 @@ codex app-server        # stdio JSON-RPC（--listen stdio:// が既定）
 
 使用ターン数: Claude 8（うち参考 1）、Codex 9（うち参考 1、エラー 1）。
 
+### M6 の MCP 起動引数
+
+MCP が有効なとき、Claude には `--mcp-config` と stdio サーバー
+`dgc` のインライン JSON を渡す。Codex には `app-server` の前に
+`mcp_servers.dgc` の `command`、`args`、`env`、`tool_timeout_sec`、
+`required=true` を `-c` で渡す。ユーザー承認を使うモードでは
+`default_tools_approval_mode="prompt"` も渡す。アダプタテストは
+起動引数を取得して通常モードと `full-access` の内容、MCP 無効時の完全一致を
+確認する。`mcp_required_startup_failure.jsonl` は必須サーバーの起動に失敗した
+ときの `thread/start` エラーを再現する合成シナリオ。
+公式資料と Codex CLI での読み取り結果は [進捗の決定事項](../../../../docs/orchestrator/PROGRESS.md#決定事項) に記録。
+
 ---
 
 ## Wire notes: Claude Code 2.1.332（stream-json）
@@ -321,6 +333,30 @@ dgc → `{"method":"turn/start","id":3,"params":{"threadId":"..","input":[{"type
 その後 `serverRequest/resolved {threadId, requestId:0}` → `thread/status/changed {activeFlags:[]}` → `item/completed`
 （accept なら commandExecution `status:"completed"`、decline なら fileChange `status:"declined"`）。
 decline 後もターンは続き、モデルが返答して `turn/completed status:"completed"` で終わる。
+
+### MCP elicitation（合成）
+
+Codex CLI 0.172.0 の `codex app-server generate-json-schema` で生成した
+`McpServerElicitationRequestParams` と `McpServerElicitationRequestResponse` に基づく。
+`mcpServer/elicitation/request` は `threadId` と `serverName` が必須で、
+`turnId` と `environmentId` は省略または null にできる。フォームは `message` と
+`requestedSchema` を持ち、URL 型は `message`、`url`、`elicitationId` を持つ。
+通常フォームの `mode` は `form`。生成スキーマには拡張フォームの
+`openai/form`、`openaiForm` もある。応答の `action` は `accept`、`decline`、
+`cancel` のいずれかで、入力を送らない応答の `content` は null。
+2026-11-27 に参照。[Codex App Server の MCP elicitation](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests)
+
+Codex のツール承認は通常フォームとして送られ、`requestedSchema`
+は `{"type":"object","properties":{}}`、`_meta.codex_approval_kind` は
+`mcp_tool_call`。`_meta.tool_name` がツール名、任意の `_meta.tool_params`
+が引数を示す。Codex が設定する `serverName` と合わせ、これらを権限要求の要約に使う。
+ツール名や引数のメタデータは第三者の MCP サーバーが影響を与え得る情報で、
+`accept` を返すにはユーザーの許可が必要。`codex_requires_user_input` が true の要求と、フィールドのある要求は
+入力として扱う。2026-11-27 に参照。[Codex 0.172.0 の承認要求生成](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/core/src/mcp_tool_call.rs#L2391-L2426) [承認メタデータの定義](https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/protocol/src/mcp_approval_meta.rs)
+
+`mcp_elicitation_*.jsonl` はこのスキーマと公式ソースに基づく合成シナリオ。
+dgc と別の MCP サーバーの承認、ユーザーによる拒否、中断・終了による取り消し、
+入力フォームの拒否、および要約と元データの上限を検証する。
 
 ### 中断
 

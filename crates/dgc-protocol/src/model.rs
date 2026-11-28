@@ -132,6 +132,11 @@ pub struct Agent {
     pub provider_session_id: Option<String>,
     pub state: AgentState,
     pub parent_id: Option<AgentId>,
+    #[serde(default)]
+    pub mcp: bool,
+    /// Roots have depth zero.
+    #[serde(default)]
+    pub depth: u32,
     pub labels: BTreeMap<String, String>,
     pub created_at: String,
     pub last_error: Option<String>,
@@ -351,6 +356,10 @@ mod tests {
             "older agent records default to false"
         );
         json["stop_when_idle"] = serde_json::json!(false);
+        assert!(!agent.mcp);
+        assert_eq!(agent.depth, 0);
+        json["mcp"] = serde_json::json!(false);
+        json["depth"] = serde_json::json!(0);
         assert_eq!(serde_json::to_value(&agent).unwrap(), json);
     }
 }

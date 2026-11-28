@@ -1,0 +1,48 @@
+dgc TUI screen record (M6 Task 3, 2026-11-27)
+Synthetic parent, child and grandchild replaying a fake Claude provider.
+Captured with `tmux capture-pane -p` at 120×18. The child is selected in both captures.
+The plain-text capture omits colors and selection highlighting.
+
+Parent and descendants
+
+┌ dgc ─────────────────────────────┐┌ agt_…5bd8e6 claude idle Child agent ─────────────────────────────────────────────┐
+│▾ synthetic-project               ││[1] state: starting                                                               │
+│  ▾ ws local                      ││[2] user (queue): Say pong                                                        │
+│    ○ claude Parent agent         ││[3] turn started                                                                  │
+│      ○ claude Child agent [mcp]  ││[4] state: running                                                                │
+│        ○ claude Grandchild agent ││[5] assistant: pong                                                               │
+│                                  ││[6] turn completed                                                                │
+│                                  ││[7] state: idle                                                                   │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt → agt_…5bd8e6 Child agent ───────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 3 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H hando
+
+After archiving the parent
+
+The child keeps its title and [mcp] marker. The complete parent note does not fit.
+
+┌ dgc ─────────────────────────────┐┌ agt_…5bd8e6 claude idle Child agent ─────────────────────────────────────────────┐
+│▾ synthetic-project               ││[1] state: starting                                                               │
+│  ▾ ws local                      ││[2] user (queue): Say pong                                                        │
+│      ○ claude Child agent [mcp]  ││[3] turn started                                                                  │
+│        ○ claude Grandchild agent ││[4] state: running                                                                │
+│                                  ││[5] assistant: pong                                                               │
+│                                  ││[6] turn completed                                                                │
+│                                  ││[7] state: idle                                                                   │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  │└──────────────────────────────────────────────────────────────────────────────────┘
+│                                  │┌ send: queue│steer│interrupt → agt_…5bd8e6 Child agent ───────────────────────────┐
+│                                  ││> press i to type to the selected agent                                           │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+daemon ok · 2 agents · 0 waiting permission  │  ↑↓ move  Enter open  i type  n agent  w workspace  p permission  H hando

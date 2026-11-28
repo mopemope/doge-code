@@ -205,6 +205,8 @@ pub struct AgentCreateParams {
     pub labels: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub parent_id: Option<AgentId>,
+    #[serde(default)]
+    pub mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +217,8 @@ pub struct ProfileInfo {
     pub mode: Option<String>,
     pub notes: Option<String>,
     pub auto_approve: bool,
+    #[serde(default)]
+    pub mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +270,17 @@ impl AgentEventsParams {
     pub fn clamped_limit(&self) -> u32 {
         self.limit.min(MAX_EVENTS_LIMIT)
     }
+}
+
+/// Wire parameters for `agent.events`, including optional backward paging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEventsQuery {
+    #[serde(flatten)]
+    pub page: AgentEventsParams,
+    /// When true, return the newest events strictly before `since_seq`, in
+    /// ascending order. Uses `limit` and cannot be combined with `tail`.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

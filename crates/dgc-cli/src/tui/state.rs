@@ -18,7 +18,7 @@ use dgc_protocol::model::{
 use super::ConnectionState;
 use super::input::LineEditor;
 use super::layout::permission_layout;
-use crate::output::{escape_line, event_line};
+use crate::output::{AgentTreeEntry, agent_tree, escape_line, event_line};
 
 /// Most lines the stream keeps; older ones are dropped.
 pub const STREAM_CAP: usize = 2000;
@@ -41,6 +41,7 @@ pub enum NodeId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub node: NodeId,
+    pub parent: Option<NodeId>,
     pub depth: usize,
     /// Escaped: project name, `ws <branch or local>[ (wt)]`, or agent title.
     pub label: String,
@@ -50,6 +51,9 @@ pub struct Row {
     pub agent_state: Option<AgentState>,
     pub provider: Option<ProviderKind>,
     pub auto_approve: bool,
+    pub mcp: bool,
+    /// A parent that is absent from the visible workspace tree.
+    pub missing_parent: Option<AgentId>,
     /// Agents only: a permission request is pending (the `!` mark).
     pub waiting_permission: bool,
 }
@@ -95,12 +99,15 @@ impl Tree {
                 .contains(&NodeId::Project(project.id.clone()));
             rows.push(Row {
                 node: NodeId::Project(project.id.clone()),
+                parent: None,
                 depth: 0,
                 label: escape_line(&project.name),
                 expanded: Some(open),
                 agent_state: None,
                 provider: None,
                 auto_approve: false,
+                mcp: false,
+                missing_parent: None,
                 waiting_permission: false,
             });
             if !open {
@@ -111,41 +118,56 @@ impl Tree {
                 .iter()
                 .filter(|w| w.project_id == project.id && w.state == WorkspaceState::Active);
             for workspace in workspaces {
-                let open = !self
-                    .collapsed
-                    .contains(&NodeId::Workspace(workspace.id.clone()));
+                let workspace_node = NodeId::Workspace(workspace.id.clone());
+                let open = !self.collapsed.contains(&workspace_node);
                 rows.push(Row {
-                    node: NodeId::Workspace(workspace.id.clone()),
+                    node: workspace_node.clone(),
+                    parent: Some(NodeId::Project(project.id.clone())),
                     depth: 1,
                     label: workspace_label(workspace),
                     expanded: Some(open),
                     agent_state: None,
                     provider: None,
                     auto_approve: false,
+                    mcp: false,
+                    missing_parent: None,
                     waiting_permission: false,
                 });
                 if !open {
                     continue;
                 }
-                let agents = self
-                    .agents
-                    .iter()
-                    .filter(|a| a.workspace_id == workspace.id && a.state != AgentState::Archived);
-                for agent in agents {
+                for entry in self.workspace_agents(&workspace.id) {
+                    let agent = entry.agent;
+                    let parent = agent
+                        .parent_id
+                        .as_ref()
+                        .filter(|_| entry.missing_parent.is_none())
+                        .map_or_else(|| workspace_node.clone(), |id| NodeId::Agent(id.clone()));
                     rows.push(Row {
                         node: NodeId::Agent(agent.id.clone()),
-                        depth: 2,
+                        parent: Some(parent),
+                        depth: 2 + entry.indent_depth(),
                         label: escape_line(&agent.title),
                         expanded: None,
                         agent_state: Some(agent.state),
                         provider: Some(agent.provider),
                         auto_approve: agent.auto_approve,
+                        mcp: agent.mcp,
+                        missing_parent: entry.missing_parent.cloned(),
                         waiting_permission: permissions.iter().any(|p| p.agent_id == agent.id),
                     });
                 }
             }
         }
         rows
+    }
+
+    fn workspace_agents(&self, id: &WorkspaceId) -> Vec<AgentTreeEntry<'_>> {
+        agent_tree(
+            self.agents
+                .iter()
+                .filter(|a| &a.workspace_id == id && a.state != AgentState::Archived),
+        )
     }
 
     /// Agents (not archived) in tree order, folded nodes included.
@@ -158,9 +180,9 @@ impl Tree {
                 .filter(|w| w.project_id == project.id && w.state == WorkspaceState::Active)
             {
                 out.extend(
-                    self.agents.iter().filter(|a| {
-                        a.workspace_id == workspace.id && a.state != AgentState::Archived
-                    }),
+                    self.workspace_agents(&workspace.id)
+                        .into_iter()
+                        .map(|entry| entry.agent),
                 );
             }
         }
@@ -285,31 +307,22 @@ impl Tree {
 }
 
 fn nearest_survivor(old: &[Row], index: usize, alive: &impl Fn(&NodeId) -> bool) -> Option<NodeId> {
-    let depth = old[index].depth;
-    for row in &old[index + 1..] {
-        if row.depth < depth {
-            break;
-        }
-        if row.depth == depth && alive(&row.node) {
-            return Some(row.node.clone());
-        }
+    let mut parent = old[index].parent.as_ref();
+    let sibling = old[index + 1..]
+        .iter()
+        .chain(old[..index].iter().rev())
+        .find(|row| row.parent.as_ref() == parent && alive(&row.node));
+    if let Some(sibling) = sibling {
+        return Some(sibling.node.clone());
     }
-    for row in old[..index].iter().rev() {
-        if row.depth < depth {
-            break;
+    while let Some(id) = parent {
+        if alive(id) {
+            return Some(id.clone());
         }
-        if row.depth == depth && alive(&row.node) {
-            return Some(row.node.clone());
-        }
-    }
-    let mut level = depth;
-    for row in old[..index].iter().rev() {
-        if row.depth < level {
-            if alive(&row.node) {
-                return Some(row.node.clone());
-            }
-            level = row.depth;
-        }
+        parent = old
+            .iter()
+            .find(|row| &row.node == id)
+            .and_then(|row| row.parent.as_ref());
     }
     None
 }
@@ -532,6 +545,10 @@ impl NewAgentForm {
         self.profile_index
             .checked_sub(1)
             .and_then(|i| self.profiles.get(i))
+    }
+
+    pub fn mcp_enabled(&self) -> bool {
+        self.selected_profile().is_some_and(|profile| profile.mcp)
     }
 
     pub fn cycle_profile(&mut self, forward: bool) {

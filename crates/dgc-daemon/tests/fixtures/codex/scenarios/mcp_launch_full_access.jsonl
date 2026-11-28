@@ -1,0 +1,10 @@
+// SYNTHETIC: A full-access Codex session starts with its existing approval policy.
+{"expect_args":["app-server"]}
+{"expect":{"method":"initialize","id":"${ANY}"}}
+{"capture":"init","path":"/id"}
+{"send":{"id":"${init}","result":{"userAgent":"codex/0.172.0"}}}
+{"expect":{"method":"initialized"}}
+{"expect":{"method":"thread/start","id":"${ANY}","params":{"approvalPolicy":"never","sandbox":"danger-full-access"}}}
+{"capture":"thread","path":"/id"}
+{"send":{"id":"${thread}","result":{"thread":{"id":"thread-1"}}}}
+{"expect_eof":true}

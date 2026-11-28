@@ -30,7 +30,9 @@ use super::state::{
     AgentField, AppState, Dialog, Focus, HandoffField, HandoffForm, NewAgentForm, NewWorkspaceForm,
     NodeId, Row, WorkspaceField,
 };
-use crate::output::{escape_line, kind_name, provider_name, state_name};
+use crate::output::{
+    escape_line, kind_name, missing_parent_note, provider_name, short_id, state_name,
+};
 
 const ACCENT: Color = Color::Cyan;
 const WARN: Color = Color::Yellow;
@@ -71,21 +73,6 @@ pub fn render(state: &AppState, frame: &mut Frame) {
 
 // ---- text helpers ----
 
-/// `agt_…` and the last six characters of the id.
-fn short_id(id: &AgentId) -> String {
-    let s = id.as_str();
-    let prefix = s.split_once('_').map_or("", |(p, _)| p);
-    let tail: String = s
-        .chars()
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{prefix}_\u{2026}{tail}")
-}
-
 /// What an editor shows in `width` columns (escaped, scrolled so the cursor
 /// stays visible) and the cursor's column in it.
 fn editor_view(editor: &LineEditor, width: usize) -> (String, usize) {
@@ -123,6 +110,18 @@ fn state_symbol(row: &Row) -> (char, Color) {
     }
 }
 
+fn tree_parent_note(id: &AgentId, room: usize) -> Option<String> {
+    let note = format!(" {}", missing_parent_note(id));
+    if text_width(&note) <= room {
+        return Some(note);
+    }
+    // Drop the constant prefix first so the identifying suffix fits.
+    let short = short_id(id);
+    let short = short.trim_start_matches(AgentId::PREFIX);
+    let note = format!(" ↳ parent {short}");
+    (text_width(&note) <= room).then_some(note)
+}
+
 fn tree_line(
     row: &Row,
     width: usize,
@@ -130,30 +129,51 @@ fn tree_line(
     selected: bool,
     rate_limited: bool,
 ) -> Line<'static> {
-    let indent = " ".repeat(row.depth * if narrow { 1 } else { 2 });
+    let indent = row.depth * if narrow { 1 } else { 2 };
     let mut spans = Vec::new();
     match row.agent_state {
         Some(_) => {
             let (symbol, color) = state_symbol(row);
-            let suffix = if row.auto_approve { " [auto]" } else { "" };
+            let symbol = symbol.to_string();
+            let auto = if row.auto_approve { " [auto]" } else { "" };
+            let mcp = if row.mcp { " [mcp]" } else { "" };
             let limit_marker = if rate_limited { "⇄ " } else { "" };
-            let fixed = text_width(&indent) + 2 + text_width(suffix) + text_width(limit_marker);
-            // The provider name goes first when at least a few columns of the
-            // title still fit; in a very narrow tree only the title is kept.
+            let markers = text_width(&symbol)
+                + 1
+                + text_width(auto)
+                + text_width(mcp)
+                + text_width(limit_marker);
+            let indent = indent.min(width.saturating_sub(markers + 1));
+            let room = width.saturating_sub(indent + markers);
+            // Leave room for the title before the optional note or provider.
+            // Orphan rows need enough title to identify them without the parent.
+            let title_reserve = row
+                .missing_parent
+                .as_ref()
+                .map_or(4, |_| text_width(&row.label).clamp(4, 8));
+            let note = row
+                .missing_parent
+                .as_ref()
+                .and_then(|id| tree_parent_note(id, room.saturating_sub(title_reserve)));
+            let room = room.saturating_sub(note.as_deref().map_or(0, text_width));
             let provider = row
                 .provider
                 .map(|p| format!("{} ", provider_name(p)))
-                .filter(|p| width.saturating_sub(fixed + text_width(p)) >= 4)
+                .filter(|p| room.saturating_sub(text_width(p)) >= title_reserve)
                 .unwrap_or_default();
-            let room = width.saturating_sub(fixed + text_width(&provider)).max(1);
-            spans.push(Span::raw(indent));
-            spans.push(Span::styled(symbol.to_string(), Style::default().fg(color)));
+            let room = room.saturating_sub(text_width(&provider));
+            spans.push(Span::raw(" ".repeat(indent)));
+            spans.push(Span::styled(symbol, Style::default().fg(color)));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(limit_marker, Style::default().fg(WARN)));
             spans.push(Span::raw(provider));
             spans.push(Span::raw(truncate_cols(&row.label, room)));
             if row.auto_approve {
-                spans.push(Span::styled(suffix, Style::default().fg(WARN)));
+                spans.push(Span::styled(auto, Style::default().fg(WARN)));
+            }
+            spans.push(Span::raw(mcp));
+            if let Some(note) = note {
+                spans.push(Span::styled(note, dim()));
             }
         }
         None => {
@@ -162,7 +182,7 @@ fn tree_line(
             } else {
                 '\u{25b8}'
             };
-            let prefix = format!("{indent}{marker} ");
+            let prefix = format!("{}{marker} ", " ".repeat(indent));
             let room = width.saturating_sub(text_width(&prefix)).max(1);
             spans.push(Span::raw(prefix));
             spans.push(Span::raw(truncate_cols(&row.label, room)));
@@ -832,9 +852,10 @@ fn agent_body(form: &NewAgentForm, width: usize) -> DialogBody {
     let profile = form
         .selected_profile()
         .map_or_else(|| "(none)".to_owned(), |profile| escape_line(&profile.name));
+    let mcp = if form.mcp_enabled() { " [mcp]" } else { "" };
     lines.push(Line::styled(
         format!(
-            "{}{:<9}{profile}  (Tab/Shift-Tab)",
+            "{}{:<9}{profile}{mcp}  (Tab/Shift-Tab)",
             if profile_focused { "> " } else { "  " },
             "profile"
         ),
@@ -1008,6 +1029,8 @@ mod tests {
             provider_session_id: None,
             state,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: Default::default(),
             created_at: created_at.to_owned(),
             last_error: None,
@@ -1258,6 +1281,103 @@ mod tests {
     }
 
     #[test]
+    fn tree_nests_children_and_marks_mcp() {
+        let mut f = Fx::new();
+        f.a1.title = "parent".to_owned();
+        f.a1.mcp = true;
+        let mut child = agent(
+            &f.workspace.id,
+            "child\n\u{202e}",
+            ProviderKind::Claude,
+            AgentState::Idle,
+            "2026-01-01T00:00:04Z",
+        );
+        child.parent_id = Some(f.a1.id.clone());
+        child.depth = 1;
+        let mut grandchild = agent(
+            &f.workspace.id,
+            "grandchild",
+            ProviderKind::Claude,
+            AgentState::Idle,
+            "2026-01-01T00:00:05Z",
+        );
+        grandchild.parent_id = Some(child.id.clone());
+        grandchild.depth = 2;
+        let mut orphan = agent(
+            &f.workspace.id,
+            "orphan",
+            ProviderKind::Claude,
+            AgentState::Idle,
+            "2026-01-01T00:00:06Z",
+        );
+        let missing_parent = AgentId::generate();
+        orphan.parent_id = Some(missing_parent.clone());
+        orphan.depth = 1;
+        update(
+            &mut f.state,
+            AppEvent::Snapshot {
+                projects: vec![f.project.clone()],
+                workspaces: vec![f.workspace.clone()],
+                agents: vec![orphan, grandchild, f.a2, child, f.a1],
+                permissions: Vec::new(),
+            },
+        );
+        let buffer = draw(&f.state, 120, 30);
+        let parent = find(&buffer, "● claude parent [mcp]").expect("parent has the MCP mark");
+        let child = find(&buffer, r"○ claude child\n\u{202e}").expect("escaped child");
+        let grandchild = find(&buffer, "○ claude grandchild").expect("grandchild");
+        assert_eq!(child, (parent.0 + 2, parent.1 + 1));
+        assert_eq!(grandchild, (child.0 + 2, child.1 + 1));
+        assert_eq!(
+            find(&buffer, "! codex review"),
+            Some((parent.0, grandchild.1 + 1))
+        );
+        let short = short(&missing_parent);
+        let note = format!("↳ parent {}", short.trim_start_matches(AgentId::PREFIX));
+        assert_eq!(
+            find(&buffer, &note).expect("orphan note").1,
+            grandchild.1 + 2
+        );
+        assert_eq!(screen(&buffer).matches("[mcp]").count(), 1);
+        assert_no_control_chars(&buffer);
+        let wide = draw(&f.state, 136, 30);
+        assert!(find(&wide, &format!("↳ parent {short}")).is_some());
+
+        let narrow = draw(&f.state, 60, 15);
+        assert!(find(&narrow, "[mcp]").is_some(), "{}", screen(&narrow));
+        assert_no_control_chars(&narrow);
+    }
+
+    #[test]
+    fn orphan_with_both_markers_keeps_its_title_at_120_columns() {
+        let mut f = Fx::new();
+        let mut orphan = f.a2.clone();
+        orphan.title = "Review child workspace".to_owned();
+        orphan.state = AgentState::Idle;
+        orphan.parent_id = Some(f.a1.id.clone());
+        orphan.depth = 1;
+        orphan.auto_approve = true;
+        orphan.mcp = true;
+        update(
+            &mut f.state,
+            AppEvent::Snapshot {
+                projects: vec![f.project.clone()],
+                workspaces: vec![f.workspace.clone()],
+                agents: vec![orphan],
+                permissions: Vec::new(),
+            },
+        );
+
+        let buffer = draw(&f.state, 120, 30);
+        let row = rows(&buffer)
+            .into_iter()
+            .find(|row| row.contains("[auto] [mcp]"))
+            .expect("both markers should be visible");
+        assert!(row.contains("Review c"), "title was clipped: {row}");
+        assert!(!row.contains('↳'), "truncated parent note: {row}");
+    }
+
+    #[test]
     fn renders_permission_dialog() {
         let mut f = Fx::new();
         let a2 = f.a2.clone();
@@ -1299,7 +1419,7 @@ mod tests {
                     {"name": "z-read", "provider": "claude", "model": null,
                      "mode": null, "notes": null, "auto_approve": false},
                     {"name": "a-fast", "provider": "codex", "model": "gpt-5",
-                     "mode": "full-access", "notes": null, "auto_approve": true}
+                     "mode": "full-access", "notes": null, "auto_approve": true, "mcp": true}
                 ]})),
             },
         );
@@ -1313,7 +1433,7 @@ mod tests {
         press_key(&mut f.state, Key::Tab); // wrap to none
         press_key(&mut f.state, Key::Tab); // first in sorted order
         let buffer = draw(&f.state, 120, 30);
-        for text in ["a-fast", "gpt-5", "full-access"] {
+        for text in ["a-fast [mcp]", "gpt-5", "full-access"] {
             assert!(find(&buffer, text).is_some(), "{}", screen(&buffer));
         }
         let (x, y) = find(&buffer, "WARNING").expect("warning on selecting auto-approve");
@@ -1345,6 +1465,7 @@ mod tests {
         assert_eq!(params["provider"], "codex");
         assert_eq!(params["model"], "gpt-5");
         assert!(params["profile"].is_null() && params["mode"].is_null());
+        assert_eq!(params["mcp"], true);
     }
 
     #[test]

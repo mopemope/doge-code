@@ -844,8 +844,8 @@ fn collapse_or_go_to_parent(state: &mut AppState) {
     let row = &rows[index];
     if row.expanded == Some(true) {
         state.tree.collapse(row.node.clone());
-    } else if let Some(parent) = rows[..index].iter().rev().find(|r| r.depth < row.depth) {
-        state.tree.set_cursor(parent.node.clone());
+    } else if let Some(parent) = &row.parent {
+        state.tree.set_cursor(parent.clone());
     }
 }
 
@@ -1135,6 +1135,7 @@ fn submit_agent(state: &mut AppState, fx: &mut Vec<Effect>) {
         initial_prompt: prompt,
         labels: Default::default(),
         parent_id: None,
+        mcp: form.mcp_enabled(),
     };
     match call(
         RequestTag::CreateAgent,
@@ -1283,6 +1284,8 @@ mod tests {
             provider_session_id: None,
             state: AgentState::Idle,
             parent_id: None,
+            mcp: false,
+            depth: 0,
             labels: Default::default(),
             created_at: created_at.to_owned(),
             last_error: None,
@@ -2054,6 +2057,80 @@ mod tests {
     }
 
     #[test]
+    fn permission_dialog_rules_unchanged_with_children() {
+        let mut f = Fixture::new();
+        let mut child = agent(
+            &f.workspace.id,
+            "child",
+            ProviderKind::Claude,
+            "2026-01-01T00:00:04Z",
+        );
+        child.parent_id = Some(f.a1.id.clone());
+        child.depth = 1;
+        let child_permission = PendingPermission::new(
+            PermissionId::generate(),
+            child.id.clone(),
+            PermissionKind::Command,
+            (0..50)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            serde_json::Value::Null,
+            String::new(),
+        );
+        let other = permission(&f.a2.id);
+        update(
+            &mut f.state,
+            AppEvent::Snapshot {
+                projects: vec![f.project.clone()],
+                workspaces: vec![f.workspace.clone()],
+                agents: vec![f.a1.clone(), f.a2.clone(), child.clone()],
+                permissions: vec![other, child_permission.clone()],
+            },
+        );
+        f.select_a1();
+        press(&mut f.state, 'j');
+        assert_eq!(f.state.selected_agent_id(), Some(child.id.clone()));
+        assert_eq!(
+            open_permission_id(&f.state),
+            Some(child_permission.id.clone())
+        );
+        for _ in 1..PERMISSION_ARM_TICKS {
+            for key in ['a', 's', 'd'] {
+                assert_eq!(press(&mut f.state, key), vec![]);
+            }
+            tick(&mut f.state, 1);
+        }
+        assert_eq!(press(&mut f.state, 'd'), vec![]);
+        tick(&mut f.state, 1);
+        assert!(
+            f.state
+                .dialog
+                .as_ref()
+                .is_some_and(Dialog::permission_armed)
+        );
+        press_key(&mut f.state, Key::End);
+        for key in ['a', 's'] {
+            assert_eq!(press(&mut f.state, key), vec![], "End skips unread rows");
+        }
+        press_key(&mut f.state, Key::Home);
+        for _ in 0..50 {
+            press_key(&mut f.state, Key::Down);
+        }
+        let fx = press(&mut f.state, 'a');
+        assert_eq!(
+            fx,
+            vec![Effect::Call {
+                request: RequestTag::Respond {
+                    permission_id: child_permission.id.clone(),
+                },
+                method: "permission.respond",
+                params: json!({"id": child_permission.id, "decision": "allow"}),
+            }]
+        );
+    }
+
+    #[test]
     fn decision_keys_are_ignored_for_three_ticks_after_a_dialog_opens() {
         let mut f = Fixture::new();
         f.snapshot_with(vec![permission(&f.a1.id)]);
@@ -2660,6 +2737,7 @@ mod tests {
                     "initial_prompt": "fix the testplease",
                     "labels": {},
                     "parent_id": null,
+                    "mcp": false,
                 }),
             }]
         );

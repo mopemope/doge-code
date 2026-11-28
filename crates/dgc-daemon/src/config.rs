@@ -24,6 +24,8 @@ pub enum ConfigError {
     },
     #[error("invalid profile {name:?}: {reason}")]
     InvalidProfile { name: String, reason: String },
+    #[error("max_agent_depth must be in 1..=8, got {0}")]
+    InvalidAgentDepth(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -33,6 +35,7 @@ pub struct ProfileConfig {
     pub model: Option<String>,
     pub mode: Option<String>,
     pub notes: Option<String>,
+    pub mcp: Option<bool>,
 }
 
 fn deserialize_profiles<'de, D>(input: D) -> Result<BTreeMap<String, ProfileConfig>, D::Error>
@@ -71,6 +74,8 @@ pub struct DaemonConfig {
     pub codex_path: Option<PathBuf>,
     /// Size at which an agent's event log rotates.
     pub events_max_bytes: u64,
+    /// Maximum nesting depth of a child agent.
+    pub max_agent_depth: u32,
     /// Named launch settings, ordered by name.
     #[serde(deserialize_with = "deserialize_profiles")]
     pub profiles: BTreeMap<String, ProfileConfig>,
@@ -82,6 +87,7 @@ impl Default for DaemonConfig {
             claude_path: None,
             codex_path: None,
             events_max_bytes: DEFAULT_EVENTS_MAX_BYTES,
+            max_agent_depth: 3,
             profiles: BTreeMap::new(),
         }
     }
@@ -105,11 +111,14 @@ impl DaemonConfig {
             path: path.to_owned(),
             source,
         })?;
-        config.validate_profiles()?;
+        config.validate()?;
         Ok(config)
     }
 
-    pub(crate) fn validate_profiles(&self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if !(1..=8).contains(&self.max_agent_depth) {
+            return Err(ConfigError::InvalidAgentDepth(self.max_agent_depth));
+        }
         for (name, profile) in &self.profiles {
             if !(1..=32).contains(&name.len())
                 || !name
@@ -137,6 +146,7 @@ impl DaemonConfig {
                     mode: profile.mode.clone(),
                     notes: profile.notes.clone(),
                     auto_approve: profile.auto_approve(name)?,
+                    mcp: profile.mcp.unwrap_or_default(),
                 })
             })
             .collect()

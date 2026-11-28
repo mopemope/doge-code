@@ -14,19 +14,27 @@ use dgc_daemon::agent::AgentManager;
 use dgc_daemon::config::DaemonConfig;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::codex::CodexAdapter;
-use dgc_daemon::provider::{AgentSpec, ProviderAdapter, ProviderEvent, ProviderSession};
+use dgc_daemon::provider::{
+    AgentSpec, BoxFut, McpLaunch, ProviderAdapter, ProviderError, ProviderEvent, ProviderSession,
+};
 use dgc_daemon::store::Store;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
-use dgc_protocol::methods::{AgentCreateParams, AgentEventsParams, AgentSendParams};
+use dgc_protocol::methods::{
+    AgentCreateParams, AgentEventsParams, AgentSendParams, PermissionRespondParams,
+};
 use dgc_protocol::model::{
     Agent, AgentState, Decision, Isolation, PermissionKind, ProviderKind, SendBehavior,
     SendOutcome, Workspace, WorkspaceState,
 };
+use dgc_protocol::{MAX_PERMISSION_RAW_BYTES, MAX_SUMMARY_BYTES};
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
 
+#[path = "support/provider_args.rs"]
+mod provider_args;
+use provider_args::{capture_args, read_args};
 #[path = "support/provider_events.rs"]
 mod provider_events;
 use provider_events::{assert_no_rate_limited, rate_limited_details};
@@ -56,7 +64,90 @@ fn spec(dir: &TempDir, mode: Option<&str>, resume: Option<&str>) -> AgentSpec {
         model: Some(MODEL.to_owned()),
         mode: mode.map(str::to_owned),
         resume_session_id: resume.map(str::to_owned),
+        mcp: None,
     }
+}
+
+async fn launch_args(dir: &TempDir, mcp: Option<McpLaunch>) -> Vec<String> {
+    launch_args_in_mode(dir, mcp, None).await
+}
+
+async fn launch_args_in_mode(
+    dir: &TempDir,
+    mcp: Option<McpLaunch>,
+    mode: Option<&str>,
+) -> Vec<String> {
+    let capture = dir.path().join("codex.argv");
+    let fixture = if mode == Some("full-access") {
+        "mcp_launch_full_access"
+    } else {
+        "simple_turn"
+    };
+    let (program, prefix) = capture_args(&capture, &scenario(fixture));
+    let adapter = CodexAdapter::with_program(program, prefix);
+    let session = start(
+        &adapter,
+        AgentSpec {
+            mcp,
+            ..spec(dir, mode, None)
+        },
+    )
+    .await;
+    shutdown_quietly(session).await;
+    read_args(&capture)
+}
+
+#[tokio::test]
+async fn codex_launch_args_include_mcp_overrides_only_when_enabled() {
+    let dir = tempdir().expect("tempdir");
+    let command = dir.path().join("dgc \"bin\" \\ path");
+    let args = vec![
+        "mcp".to_owned(),
+        "--agent".to_owned(),
+        "test-agent".to_owned(),
+    ];
+    let state_root = "/tmp/dgc state\nwith a newline\u{7f}";
+    let mcp = McpLaunch {
+        command: command.clone(),
+        args: args.clone(),
+        env: vec![
+            ("HOME".to_owned(), "/tmp/dgc home".to_owned()),
+            ("DGC_STATE_ROOT".to_owned(), state_root.to_owned()),
+        ],
+    };
+    let required = json!({
+        "mcp_servers": {"dgc": {"command": command, "args": args,
+                               "env": {"HOME": "/tmp/dgc home", "DGC_STATE_ROOT": state_root},
+                               "tool_timeout_sec": 360, "required": true}}
+    });
+    let mut prompted = required.clone();
+    prompted["mcp_servers"]["dgc"]["default_tools_approval_mode"] = json!("prompt");
+    for (mode, expected) in [(None, prompted), (Some("full-access"), required)] {
+        let argv = launch_args_in_mode(&dir, Some(mcp.clone()), mode).await;
+        let (app_server, overrides) = argv.split_last().expect("app-server argument");
+        assert_eq!(app_server, "app-server");
+        let (pairs, remainder) = overrides.as_chunks::<2>();
+        assert!(remainder.is_empty(), "{argv:?}");
+        let mut settings = String::new();
+        for pair in pairs {
+            assert_eq!(pair[0], "-c");
+            assert!(pair[1].starts_with("mcp_servers.dgc."), "{pair:?}");
+            settings.push_str(&pair[1]);
+            settings.push('\n');
+        }
+        let parsed: toml::Value = toml::from_str(&settings).expect("inline MCP TOML");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("MCP settings"),
+            expected
+        );
+    }
+    assert_eq!(launch_args(&dir, None).await, ["app-server"]);
+}
+
+#[tokio::test]
+async fn agents_without_mcp_keep_their_launch_args() {
+    let dir = tempdir().expect("tempdir");
+    assert_eq!(launch_args(&dir, None).await, ["app-server"]);
 }
 
 async fn start(adapter: &CodexAdapter, spec: AgentSpec) -> Box<dyn ProviderSession> {
@@ -668,6 +759,269 @@ async fn codex_unknown_server_request_is_rejected() {
     shutdown_quietly(session).await;
 }
 
+async fn elicitation_approval(session: &mut Box<dyn ProviderSession>) -> ProviderEvent {
+    let mut events = events_until(session, |event| {
+        matches!(
+            event,
+            ProviderEvent::PermissionRequested { .. }
+                | ProviderEvent::Event(EventKind::Error { .. })
+        )
+    })
+    .await;
+    let approval = events.pop().expect("approval or error");
+    assert!(
+        matches!(approval, ProviderEvent::PermissionRequested { .. }),
+        "expected MCP tool approval, got {approval:?}"
+    );
+    approval
+}
+
+#[tokio::test]
+async fn codex_mcp_elicitation_is_relayed_as_permission() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_decisions");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    for (id, summary, tool, decision) in [
+        (
+            "0",
+            r#"dgc: create_agent {"prompt":"Reply OK."}"#,
+            "create_agent",
+            Decision::Allow,
+        ),
+        (
+            r#""other-request""#,
+            r#"calendar: create_event {"title":"Test event"}"#,
+            "create_event",
+            Decision::Deny,
+        ),
+    ] {
+        let ProviderEvent::PermissionRequested {
+            provider_request_id,
+            kind,
+            summary: actual,
+            raw,
+        } = elicitation_approval(&mut session).await
+        else {
+            unreachable!("elicitation_approval requires PermissionRequested");
+        };
+        assert_eq!(provider_request_id, id);
+        assert_eq!(kind, PermissionKind::Tool);
+        assert_eq!(actual, summary);
+        assert_eq!(raw["_meta"]["tool_name"], tool);
+        session
+            .respond_permission(id, decision)
+            .await
+            .expect("respond");
+    }
+    let events = turn_events(&mut session).await;
+    assert_eq!(events[0], text("pong", true), "{events:?}");
+    assert!(matches!(events[1], ProviderEvent::TurnCompleted { .. }));
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_mcp_elicitation_cancelled_on_interrupt() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_interrupt");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    elicitation_approval(&mut session).await;
+    timeout(EVENT_WAIT, session.interrupt())
+        .await
+        .expect("interrupt did not finish")
+        .expect("interrupt");
+    assert!(
+        session
+            .respond_permission("0", Decision::Allow)
+            .await
+            .is_err()
+    );
+    session.send_user(PONG).await.expect("send next turn");
+    let events = events_until(&mut session, |event| {
+        matches!(
+            event,
+            ProviderEvent::PermissionRequested { .. } | ProviderEvent::TurnCompleted { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                ProviderEvent::Event(EventKind::Error { message: first }),
+                ProviderEvent::Event(EventKind::Error { message: second }),
+                ProviderEvent::TurnCompleted { .. },
+            ] if first == "unsupported Codex MCP elicitation" && first == second
+        ),
+        "{events:?}"
+    );
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_mcp_elicitation_cancelled_on_shutdown() {
+    let dir = tempdir().expect("tempdir");
+    let completion = dir.path().join("fake-exit");
+    // The session accepts any child exit status on shutdown. Record the
+    // fixture's status to check that it received cancel before stdin closed.
+    let adapter = CodexAdapter::with_program(
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_owned(),
+            r#"completion=$1; shift; "$0" "$@"; printf '%s' "$?" > "$completion""#.to_owned(),
+            env!("CARGO_BIN_EXE_dgc-fake-provider").to_owned(),
+            completion.display().to_string(),
+            scenario("mcp_elicitation_shutdown").display().to_string(),
+        ],
+    );
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    elicitation_approval(&mut session).await;
+    shutdown_quietly(session).await;
+    assert_eq!(
+        std::fs::read_to_string(completion).expect("fake exit status"),
+        "0"
+    );
+}
+
+#[tokio::test]
+async fn codex_form_elicitation_is_declined_with_error() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_form");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    let events = events_until(&mut session, |event| {
+        matches!(
+            event,
+            ProviderEvent::PermissionRequested { .. } | ProviderEvent::TurnCompleted { .. }
+        )
+    })
+    .await;
+    let [
+        ProviderEvent::SessionStarted { .. },
+        forms @ ..,
+        answer,
+        ProviderEvent::TurnCompleted { .. },
+    ] = events.as_slice()
+    else {
+        panic!("expected form errors and a completed turn, got {events:?}");
+    };
+    assert_eq!(forms.len(), 10);
+    for event in forms {
+        assert_eq!(
+            *event,
+            ProviderEvent::Event(EventKind::Error {
+                message: "unsupported Codex MCP elicitation".to_owned(),
+            })
+        );
+    }
+    assert_eq!(*answer, text("pong", true), "{events:?}");
+    shutdown_quietly(session).await;
+}
+
+#[tokio::test]
+async fn codex_inactive_elicitation_is_cancelled_with_error() {
+    let dir = tempdir().expect("tempdir");
+    let adapter = fake_adapter("mcp_elicitation_inactive");
+    let mut session = start(&adapter, spec(&dir, None, None)).await;
+    session.send_user(PONG).await.expect("send_user");
+    let events = turn_events(&mut session).await;
+    assert!(matches!(
+        events.as_slice(),
+        [
+            ProviderEvent::SessionStarted { .. },
+            ProviderEvent::TurnCompleted { .. }
+        ]
+    ));
+
+    // The fixture exits successfully only after checking the cancel reply.
+    let mut events = Vec::new();
+    loop {
+        let event = timeout(EVENT_WAIT, session.events().recv())
+            .await
+            .expect("event deadline")
+            .expect("provider event");
+        if let ProviderEvent::Exited {
+            success,
+            stderr_tail,
+        } = event
+        {
+            assert!(success, "fake did not receive cancel: {stderr_tail}");
+            break;
+        }
+        events.push(event);
+    }
+    shutdown_quietly(session).await;
+    assert_eq!(
+        events,
+        [ProviderEvent::Event(EventKind::Error {
+            message: "unsupported Codex MCP elicitation".to_owned(),
+        })]
+    );
+}
+
+#[tokio::test]
+async fn codex_elicitation_payload_is_bounded_with_json_escaped_arguments() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = std::fs::read_to_string(scenario("mcp_elicitation_bounds")).expect("scenario");
+    let path = dir.path().join("mcp_elicitation_bounds.jsonl");
+    std::fs::write(
+        &path,
+        fixture.replace("LONG_ARGUMENT", &"あ".repeat(MAX_PERMISSION_RAW_BYTES)),
+    )
+    .expect("write large scenario");
+    let adapter = CodexAdapter::with_program(
+        PathBuf::from(env!("CARGO_BIN_EXE_dgc-fake-provider")),
+        vec![path.display().to_string()],
+    );
+    let harness = Harness::new(adapter);
+    let agent = harness.create(None, PONG).await;
+    let outcome = timeout(EVENT_WAIT, async {
+        loop {
+            if let Some(permission) = harness
+                .manager
+                .pending_permissions(Some(agent.id.clone()))
+                .pop()
+            {
+                break Some(permission);
+            }
+            if !harness.error_messages(&agent.id).is_empty() {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("wait for permission");
+    if let Some(permission) = &outcome {
+        harness
+            .manager
+            .respond_permission(PermissionRespondParams {
+                id: permission.id.clone(),
+                decision: Decision::Deny,
+            })
+            .await
+            .expect("deny");
+        harness
+            .wait_state(&agent.id, AgentState::Idle, EVENT_WAIT)
+            .await;
+    }
+    harness.manager.shutdown_all(EVENT_WAIT).await;
+    let permission = outcome.expect("expected MCP tool approval");
+    assert_eq!(permission.kind, PermissionKind::Tool);
+    assert!(
+        permission
+            .summary
+            .starts_with(r#"dgc: create_agent {"prompt":"\u001b"#)
+    );
+    assert!(permission.summary.contains(r"\n"));
+    assert!(!permission.summary.chars().any(char::is_control));
+    assert!(permission.summary.contains("…(truncated, "));
+    assert!(permission.summary.len() <= MAX_SUMMARY_BYTES);
+    assert_eq!(permission.raw, json!({"truncated": true}));
+}
+
 /// Synthetic (shapes from the 0.172.0 schema): `item/permissions/requestApproval`
 /// becomes an `Other` permission request; `decision` is answered per the
 /// response schema, which the scenario checks.
@@ -783,7 +1137,7 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(adapter: CodexAdapter) -> Self {
+    fn new(adapter: impl ProviderAdapter + 'static) -> Self {
         let dir = tempdir().expect("tempdir");
         let paths = DaemonPaths::under(dir.path());
         let store = Arc::new(Store::open(&paths.state_dir).expect("store"));
@@ -813,6 +1167,10 @@ impl Harness {
     }
 
     async fn create(&self, model: Option<&str>, prompt: &str) -> Agent {
+        self.create_with_mcp(model, prompt, false).await
+    }
+
+    async fn create_with_mcp(&self, model: Option<&str>, prompt: &str, mcp: bool) -> Agent {
         self.manager
             .create(AgentCreateParams {
                 workspace_id: self.workspace.id.clone(),
@@ -824,6 +1182,7 @@ impl Harness {
                 initial_prompt: prompt.to_owned(),
                 labels: BTreeMap::new(),
                 parent_id: None,
+                mcp,
             })
             .await
             .expect("create")
@@ -874,6 +1233,103 @@ impl Harness {
             })
             .collect()
     }
+}
+
+/// Use the real Codex adapter with a dgc MCP command that cannot be executed.
+struct MissingMcpCommand {
+    adapter: CodexAdapter,
+    command: PathBuf,
+}
+
+impl ProviderAdapter for MissingMcpCommand {
+    fn kind(&self) -> ProviderKind {
+        self.adapter.kind()
+    }
+
+    fn validate_mode(&self, mode: Option<&str>) -> Result<bool, String> {
+        self.adapter.validate_mode(mode)
+    }
+
+    fn start(
+        &self,
+        mut spec: AgentSpec,
+    ) -> BoxFut<'_, Result<Box<dyn ProviderSession>, ProviderError>> {
+        spec.mcp.as_mut().expect("MCP enabled").command = self.command.clone();
+        self.adapter.start(spec)
+    }
+}
+
+#[tokio::test]
+async fn codex_required_mcp_startup_failure_fails_agent() {
+    let dir = tempdir().expect("tempdir");
+    let command = dir.path().join("missing-dgc");
+    let command_override = format!(
+        "mcp_servers.dgc.command={}",
+        toml::Value::String(command.to_str().expect("MCP command path").to_owned())
+    );
+    // Mimic app-server's required-server behavior. The optional case can
+    // still run a turn. Check the missing executable as well as the flag.
+    let adapter = CodexAdapter::with_program(
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_owned(),
+            r#"
+required=$1; optional=$2; command=$3; expected=$4; shift 4
+scenario=$optional
+attached=false
+for arg do
+    case "$arg" in
+        "$expected") attached=true ;;
+        mcp_servers.dgc.required=true) scenario=$required ;;
+    esac
+done
+test "$attached" = true && test ! -e "$command" || exit 1
+exec "$0" "$scenario" "$@"
+"#
+            .to_owned(),
+            env!("CARGO_BIN_EXE_dgc-fake-provider").to_owned(),
+            scenario("mcp_required_startup_failure")
+                .display()
+                .to_string(),
+            scenario("simple_turn").display().to_string(),
+            command.display().to_string(),
+            command_override,
+        ],
+    );
+    let h = Harness::new(MissingMcpCommand { adapter, command });
+    let agent = h.create_with_mcp(Some(MODEL), PONG, true).await;
+    let settled = timeout(EVENT_WAIT, async {
+        loop {
+            let current = h.manager.get(&agent.id).expect("get");
+            if matches!(current.state, AgentState::Idle | AgentState::Failed) {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("agent reached a terminal state for the turn");
+    h.manager.shutdown_all(EVENT_WAIT).await;
+    assert_eq!(settled.state, AgentState::Failed);
+    assert!(settled.provider_session_id.is_none());
+    let events = h.events(&agent.id);
+    assert!(
+        events.iter().any(|kind| matches!(
+            kind,
+            EventKind::Error { message } if message.contains("required MCP server dgc")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|kind| matches!(
+            kind,
+            EventKind::TurnCompleted { .. }
+                | EventKind::StateChanged {
+                    state: AgentState::Running
+                }
+        )),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use dgc_protocol::methods::{
-    AgentCreateParams, AgentEventsParams, AgentHandoffParams, AgentIdParams, AgentListParams,
+    AgentCreateParams, AgentEventsQuery, AgentHandoffParams, AgentIdParams, AgentListParams,
     AgentSendParams, PermissionListParams, PermissionRespondParams, ProfileListResult,
     ProjectAddParams, ProjectRemoveParams, ScheduleCreateParams, ScheduleIdParams,
     ScheduleListParams, ScheduleListResult, ScriptListParams, ScriptLogsParams, ScriptNameParams,
@@ -262,8 +262,19 @@ pub async fn agent_resume(agents: &AgentManager, params: Value) -> Result<Value,
 
 /// One page of stored events. `tail` replaces forward paging when supplied.
 pub fn agent_events(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {
-    let params: AgentEventsParams = parse(params)?;
-    Ok(json!({ "events": agents.events_page(&params)? }))
+    let query: AgentEventsQuery = parse(params)?;
+    let events = if query.reverse {
+        if query.page.tail.is_some() {
+            return Err(RpcError::new(
+                INVALID_PARAMS,
+                "reverse cannot be combined with tail",
+            ));
+        }
+        agents.events_before(&query.page)?
+    } else {
+        agents.events_page(&query.page)?
+    };
+    Ok(json!({ "events": events }))
 }
 
 pub fn permission_list(agents: &AgentManager, params: Value) -> Result<Value, RpcError> {

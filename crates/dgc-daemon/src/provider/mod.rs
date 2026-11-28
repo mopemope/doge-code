@@ -39,6 +39,14 @@ use dgc_protocol::model::{Decision, PermissionKind, ProviderKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+/// Explicit mode for launches that must not inherit provider defaults.
+pub(crate) fn non_auto_default_mode(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Claude => "manual",
+        ProviderKind::Codex => "workspace-write",
+    }
+}
+
 /// Validate a provider mode and classify auto-approval without a running CLI.
 pub fn validate_mode(kind: ProviderKind, mode: Option<&str>) -> Result<bool, String> {
     match kind {
@@ -60,6 +68,23 @@ pub struct AgentSpec {
     pub mode: Option<String>,
     /// Provider session (Claude session id / Codex thread id) to continue.
     pub resume_session_id: Option<String>,
+    pub mcp: Option<McpLaunch>,
+}
+
+/// Local stdio command used to attach the dgc MCP server to a provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpLaunch {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl McpLaunch {
+    fn command_str(&self) -> Result<&str, ProviderError> {
+        self.command
+            .to_str()
+            .ok_or_else(|| ProviderError::Spawn("dgc MCP executable path is not UTF-8".to_owned()))
+    }
 }
 
 /// Normalized output of a provider session.

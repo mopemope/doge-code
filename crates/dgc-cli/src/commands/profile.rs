@@ -33,11 +33,12 @@ pub async fn run(command: ProfileCommand, json: bool) -> CliResult<ExitCode> {
                     };
                     let name = escape_line(&profile.name);
                     let provider = provider_name(profile.provider);
+                    let mcp = if profile.mcp { "  mcp" } else { "" };
                     let notes = profile
                         .notes
                         .as_deref()
                         .map_or_else(String::new, |notes| format!("  {}", escape_line(notes)));
-                    println!("{name}  {provider}  {model}  {mode}{auto}{notes}");
+                    println!("{name}  {provider}  {model}  {mode}{auto}{mcp}{notes}");
                 }
             }
         }

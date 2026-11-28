@@ -14,7 +14,7 @@ use dgc_daemon::agent::AgentManager;
 use dgc_daemon::config::DaemonConfig;
 use dgc_daemon::paths::DaemonPaths;
 use dgc_daemon::provider::claude::ClaudeAdapter;
-use dgc_daemon::provider::{AgentSpec, ProviderAdapter, ProviderEvent, ProviderSession};
+use dgc_daemon::provider::{AgentSpec, McpLaunch, ProviderAdapter, ProviderEvent, ProviderSession};
 use dgc_daemon::store::Store;
 use dgc_protocol::event::EventKind;
 use dgc_protocol::ids::{AgentId, ProjectId, WorkspaceId};
@@ -26,6 +26,9 @@ use serde_json::json;
 use tempfile::{TempDir, tempdir};
 use tokio::time::timeout;
 
+#[path = "support/provider_args.rs"]
+mod provider_args;
+use provider_args::{capture_args, read_args};
 #[path = "support/provider_events.rs"]
 mod provider_events;
 use provider_events::{assert_no_rate_limited, rate_limited_details};
@@ -55,7 +58,80 @@ fn spec(dir: &TempDir, model: Option<&str>, resume: Option<&str>) -> AgentSpec {
         model: model.map(str::to_owned),
         mode: None,
         resume_session_id: resume.map(str::to_owned),
+        mcp: None,
     }
+}
+
+const ORIGINAL_ARGS: &[&str] = &[
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-prompt-tool",
+    "stdio",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "manual",
+];
+
+async fn launch_args(dir: &TempDir, mcp: Option<McpLaunch>) -> Vec<String> {
+    let capture = dir.path().join("claude.argv");
+    let (program, prefix) = capture_args(&capture, &scenario("simple_turn"));
+    let adapter = ClaudeAdapter::with_program(program, prefix);
+    let session = start(
+        &adapter,
+        AgentSpec {
+            mcp,
+            mode: Some("manual".to_owned()),
+            ..spec(dir, Some("haiku"), None)
+        },
+    )
+    .await;
+    shutdown_quietly(session).await;
+    read_args(&capture)
+}
+
+#[tokio::test]
+async fn claude_launch_args_include_mcp_config_only_when_enabled() {
+    let dir = tempdir().expect("tempdir");
+    let command = dir.path().join("dgc \"bin\"");
+    let args = vec![
+        "mcp".to_owned(),
+        "--agent".to_owned(),
+        "test-agent".to_owned(),
+    ];
+    let argv = launch_args(
+        &dir,
+        Some(McpLaunch {
+            command: command.clone(),
+            args: args.clone(),
+            env: vec![("DGC_STATE_ROOT".to_owned(), "/tmp/dgc state".to_owned())],
+        }),
+    )
+    .await;
+    let (base, mcp) = argv.split_at(ORIGINAL_ARGS.len());
+    assert_eq!(base, ORIGINAL_ARGS);
+    let [flag, config] = mcp else {
+        panic!("expected one MCP flag and config: {mcp:?}")
+    };
+    assert_eq!(flag, "--mcp-config");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(config).expect("inline MCP JSON"),
+        json!({
+            "mcpServers": {"dgc": {"type": "stdio", "command": command, "args": args,
+                                   "env": {"DGC_STATE_ROOT": "/tmp/dgc state"}}}
+        })
+    );
+    assert_eq!(launch_args(&dir, None).await, ORIGINAL_ARGS);
+}
+
+#[tokio::test]
+async fn agents_without_mcp_keep_their_launch_args() {
+    let dir = tempdir().expect("tempdir");
+    assert_eq!(launch_args(&dir, None).await, ORIGINAL_ARGS);
 }
 
 async fn start(adapter: &ClaudeAdapter, spec: AgentSpec) -> Box<dyn ProviderSession> {
@@ -702,6 +778,7 @@ impl Harness {
                 initial_prompt: prompt.to_owned(),
                 labels: BTreeMap::new(),
                 parent_id: None,
+                mcp: false,
             })
             .await
             .expect("create")

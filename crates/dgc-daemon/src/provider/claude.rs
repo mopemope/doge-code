@@ -54,7 +54,7 @@
 //! behind unread events; without partial messages the CLI emits one line per
 //! content block, far fewer than the capacity per call.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -200,7 +200,7 @@ impl ClaudeAdapter {
         }
     }
 
-    fn args(&self, spec: &AgentSpec) -> Vec<String> {
+    fn args(&self, spec: &AgentSpec) -> Result<Vec<String>, ProviderError> {
         let mut args = self.prefix_args.clone();
         args.extend(wire::BASE_ARGS.iter().map(|arg| (*arg).to_owned()));
         let options = [
@@ -214,7 +214,21 @@ impl ClaudeAdapter {
                 args.push(value.clone());
             }
         }
-        args
+        if let Some(mcp) = &spec.mcp {
+            let env: BTreeMap<_, _> = mcp.env.iter().map(|(key, value)| (key, value)).collect();
+            let config = json!({
+                "mcpServers": {
+                    "dgc": {
+                        "type": "stdio",
+                        "command": mcp.command_str()?,
+                        "args": mcp.args,
+                        "env": env,
+                    }
+                }
+            });
+            args.extend(["--mcp-config".to_owned(), config.to_string()]);
+        }
+        Ok(args)
     }
 }
 
@@ -234,7 +248,7 @@ impl ProviderAdapter for ClaudeAdapter {
         Box::pin(async move {
             let child = ChildSpec {
                 program: self.program.clone(),
-                args: self.args(&spec),
+                args: self.args(&spec)?,
                 cwd: spec.cwd,
             };
             let (process, io) =

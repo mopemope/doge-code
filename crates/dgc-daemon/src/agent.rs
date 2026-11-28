@@ -54,9 +54,9 @@ mod actor;
 
 use self::actor::{Command, Launch, Start, register, run_actor};
 use crate::config::{DaemonConfig, ProfileConfig};
-use crate::events_log::EventLog;
+use crate::events_log::{EventLog, EventLogError};
 use crate::paths::{DaemonPaths, ensure_private_dir};
-use crate::provider::{ProviderAdapter, ProviderError};
+use crate::provider::{McpLaunch, ProviderAdapter, ProviderError, non_auto_default_mode};
 use crate::store::{Store, write_atomic};
 use crate::time::now_rfc3339;
 
@@ -69,6 +69,7 @@ const QUEUE_FILE: &str = "queue.json";
 const MAX_IDLE_LOG_HANDLES: usize = 64;
 /// Directory under the state dir holding agent records (same as `Store`).
 const AGENTS_DIR: &str = "agents";
+const MAX_MODEL_BYTES: usize = 256;
 /// How long archive (and a failing agent) waits for its session to end.
 const SESSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// Extra time `shutdown_all` gives actors beyond the session grace.
@@ -105,6 +106,8 @@ pub enum AgentError {
     /// `workspace_archived`.
     #[error("operation not allowed in state {state}")]
     InvalidState { state: String },
+    #[error(transparent)]
+    McpLaunch(#[from] McpLaunchError),
     #[error("{}", HANDOFF_CHANGED)]
     HandoffChanged,
     #[error("{0}")]
@@ -120,7 +123,7 @@ impl AgentError {
     pub fn code(&self) -> i32 {
         match self {
             Self::NotFound(_) => NOT_FOUND,
-            Self::InvalidState { .. } | Self::HandoffChanged => INVALID_STATE,
+            Self::InvalidState { .. } | Self::McpLaunch(_) | Self::HandoffChanged => INVALID_STATE,
             Self::InvalidParams(_) => INVALID_PARAMS,
             Self::Provider(_) | Self::Storage(_) => INTERNAL,
         }
@@ -131,6 +134,18 @@ impl AgentError {
             state: state_label(state).to_owned(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum McpLaunchError {
+    #[error("cannot attach the dgc MCP server: daemon executable path is unavailable or not UTF-8")]
+    ExecutableUnavailable,
+    #[error("cannot attach the dgc MCP server: a daemon path environment variable is not UTF-8")]
+    EnvironmentNotUtf8,
+    #[error(
+        "cannot attach the dgc MCP server: could not resolve DGC_STATE_ROOT to an absolute path"
+    )]
+    StateRootUnavailable,
 }
 
 fn state_label(state: AgentState) -> &'static str {
@@ -457,6 +472,45 @@ pub struct AgentManager {
     adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>>,
     timeouts: ProviderTimeouts,
     profiles: BTreeMap<String, ProfileConfig>,
+    max_agent_depth: u32,
+    mcp_program: Option<PathBuf>,
+    mcp_env: Result<Vec<(String, String)>, McpLaunchError>,
+}
+
+fn mcp_environment() -> Result<Vec<(String, String)>, McpLaunchError> {
+    let mut paths = Vec::new();
+    // The provider runs in the workspace. Resolve the override in the
+    // daemon's cwd so its meaning survives a change of cwd.
+    if let Some(root) = std::env::var_os("DGC_STATE_ROOT").filter(|root| !root.is_empty()) {
+        let absolute =
+            std::path::absolute(root).map_err(|_| McpLaunchError::StateRootUnavailable)?;
+        paths.push(("DGC_STATE_ROOT", absolute));
+    }
+    // DaemonPaths ignores empty and relative home and XDG paths.
+    for name in [
+        "HOME",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
+        if let Some(path) = std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            paths.push((name, path));
+        }
+    }
+    paths
+        .into_iter()
+        .map(|(name, path)| {
+            let value = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| McpLaunchError::EnvironmentNotUtf8)?;
+            Ok((name.to_owned(), value))
+        })
+        .collect()
 }
 
 impl AgentManager {
@@ -480,6 +534,11 @@ impl AgentManager {
             adapters,
             timeouts: ProviderTimeouts::default(),
             profiles: config.profiles,
+            max_agent_depth: config.max_agent_depth,
+            mcp_program: std::env::current_exe()
+                .ok()
+                .filter(|path| path.to_str().is_some()),
+            mcp_env: mcp_environment(),
         }
     }
 
@@ -548,7 +607,66 @@ impl AgentManager {
         if params.mode.is_none() {
             params.mode.clone_from(&profile.mode);
         }
+        params.mcp |= profile.mcp.unwrap_or_default();
         Ok(profile.provider)
+    }
+
+    fn child_depth(
+        &self,
+        params: &AgentCreateParams,
+        auto_approve: bool,
+    ) -> Result<u32, AgentError> {
+        let Some(parent_id) = &params.parent_id else {
+            return Ok(0);
+        };
+        let parent = self.load(parent_id).map_err(|err| match err {
+            AgentError::NotFound(_) => {
+                AgentError::InvalidParams("parent agent not found".to_owned())
+            }
+            other => other,
+        })?;
+        if parent.state == AgentState::Archived {
+            return Err(AgentError::InvalidParams(
+                "parent agent is archived".to_owned(),
+            ));
+        }
+        if parent.workspace_id != params.workspace_id {
+            return Err(AgentError::InvalidParams(
+                "parent agent is in a different workspace".to_owned(),
+            ));
+        }
+        if auto_approve && !parent.auto_approve {
+            return Err(AgentError::InvalidParams(
+                "parent agent does not use auto-approval".to_owned(),
+            ));
+        }
+        let depth = parent
+            .depth
+            .checked_add(1)
+            .filter(|depth| *depth <= self.max_agent_depth)
+            .ok_or_else(|| AgentError::InvalidParams("child exceeds max_agent_depth".to_owned()))?;
+        if params.mcp && depth == self.max_agent_depth {
+            return Err(AgentError::InvalidParams(
+                "MCP is unavailable at max_agent_depth".to_owned(),
+            ));
+        }
+        Ok(depth)
+    }
+
+    fn mcp_launch(&self, id: &AgentId, enabled: bool) -> Result<Option<McpLaunch>, AgentError> {
+        if !enabled {
+            return Ok(None);
+        }
+        let command = self
+            .mcp_program
+            .as_ref()
+            .ok_or(McpLaunchError::ExecutableUnavailable)?;
+        let env = self.mcp_env.as_ref().map_err(|&err| err)?;
+        Ok(Some(McpLaunch {
+            command: command.clone(),
+            args: vec!["mcp".to_owned(), "--agent".to_owned(), id.to_string()],
+            env: env.clone(),
+        }))
     }
 
     /// Store a new agent, record its initial prompt and start it. Returns once
@@ -566,13 +684,31 @@ impl AgentManager {
         options: CreateOptions,
     ) -> Result<Agent, AgentError> {
         let kind = self.resolve_profile(&mut params)?;
+        if params
+            .model
+            .as_ref()
+            .is_some_and(|model| model.starts_with('-') || model.len() > MAX_MODEL_BYTES)
+        {
+            return Err(AgentError::InvalidParams(
+                "model must be at most 256 bytes and must not start with '-'".to_owned(),
+            ));
+        }
+        if params.parent_id.is_some() && params.mode.is_none() {
+            params.mode = Some(non_auto_default_mode(kind).to_owned());
+        }
         let workspace = self.active_workspace(&params.workspace_id)?;
         let adapter = self.adapter(kind)?;
         let auto_approve = adapter
             .validate_mode(params.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
+        let id = AgentId::generate();
+        // Final archive transitions also hold this lock. Keep the parent
+        // check and the first stored child record in the same critical section.
+        let live = lock(&self.shared.live);
+        let depth = self.child_depth(&params, auto_approve)?;
+        let mcp = self.mcp_launch(&id, params.mcp)?;
         let mut agent = Agent {
-            id: AgentId::generate(),
+            id,
             workspace_id: params.workspace_id,
             title: params.title,
             provider: kind,
@@ -583,11 +719,14 @@ impl AgentManager {
             provider_session_id: None,
             state: AgentState::Starting,
             parent_id: params.parent_id,
+            mcp: params.mcp,
+            depth,
             labels: params.labels,
             created_at: now_rfc3339(),
             last_error: None,
         };
         self.shared.put_agent(&agent)?;
+        drop(live);
         let recorded = self
             .shared
             .emit(
@@ -621,6 +760,7 @@ impl AgentManager {
             adapter,
             agent: agent.clone(),
             cwd: workspace.path,
+            mcp,
             started,
             start: Start::Create {
                 prompt: params.initial_prompt,
@@ -660,8 +800,13 @@ impl AgentManager {
             initial_prompt: String::new(),
             labels: BTreeMap::from([("handoff_from".to_owned(), source.id.to_string())]),
             parent_id: None,
+            mcp: false,
         };
         let provider = self.resolve_profile(&mut create)?;
+        // Handoffs use resolved provider settings and start as standalone agents.
+        create.provider = Some(provider);
+        create.profile = None;
+        create.mcp = false;
         self.adapter(provider)?
             .validate_mode(create.mode.as_deref())
             .map_err(AgentError::InvalidParams)?;
@@ -715,7 +860,7 @@ impl AgentManager {
     /// queued message, if any, is sent; otherwise the agent becomes idle.
     /// A manual resume keeps the session available for follow-up input.
     pub async fn resume(&self, id: &AgentId) -> Result<Agent, AgentError> {
-        let (agent, cwd, adapter, queue, commands) = {
+        let (agent, cwd, adapter, mcp, queue, commands) = {
             let mut live = lock(&self.shared.live);
             let mut agent = self.load(id)?;
             if live.contains_key(id)
@@ -725,18 +870,20 @@ impl AgentManager {
             }
             let workspace = self.active_workspace(&agent.workspace_id)?;
             let adapter = self.adapter(agent.provider)?;
+            let mcp = self.mcp_launch(&agent.id, agent.mcp)?;
             let queue = load_queue(&self.shared.queue_path(id))?;
             agent.last_error = None;
             agent.stop_when_idle = false;
             self.shared.store_state(&mut agent, AgentState::Starting)?;
             let commands = self.shared.register_live(&mut live, id);
-            (agent, workspace.path, adapter, queue, commands)
+            (agent, workspace.path, adapter, mcp, queue, commands)
         };
         info!(agent_id = %agent.id, queued = queue.len(), "agent resuming");
         let launch = Launch {
             adapter,
             agent: agent.clone(),
             cwd,
+            mcp,
             started: None,
             start: Start::Resume,
             queue,
@@ -893,15 +1040,31 @@ impl AgentManager {
 
     /// One page of stored events, from a sequence cursor or the end of the log.
     pub fn events_page(&self, params: &AgentEventsParams) -> Result<Vec<AgentEvent>, AgentError> {
+        self.read_events(params, |log| match params.tail {
+            Some(n) => log.read_tail(n.min(MAX_EVENTS_LIMIT)),
+            None => log.read_page(params.since_seq, params.clamped_limit()),
+        })
+    }
+
+    pub(crate) fn events_before(
+        &self,
+        params: &AgentEventsParams,
+    ) -> Result<Vec<AgentEvent>, AgentError> {
+        self.read_events(params, |log| {
+            log.read_before(params.since_seq, params.clamped_limit())
+        })
+    }
+
+    fn read_events(
+        &self,
+        params: &AgentEventsParams,
+        read: impl FnOnce(&EventLog) -> Result<Vec<AgentEvent>, EventLogError>,
+    ) -> Result<Vec<AgentEvent>, AgentError> {
         self.load(&params.agent_id)?;
         let slot = self.shared.log_slot(&params.agent_id);
         let mut slot = lock(&slot);
         let log = self.shared.open_log(&params.agent_id, &mut slot)?;
-        match params.tail {
-            Some(n) => log.read_tail(n.min(MAX_EVENTS_LIMIT)),
-            None => log.read_page(params.since_seq, params.clamped_limit()),
-        }
-        .map_err(storage)
+        read(log).map_err(storage)
     }
 
     /// At daemon start no provider process exists: mark agents stored as
@@ -956,5 +1119,35 @@ impl AgentManager {
                 warn!(agent_id = %id, "agent did not shut down in time");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_unavailable_executable_reports_invalid_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = DaemonPaths::under(dir.path());
+        let store = Arc::new(Store::open(&paths.state_dir).expect("store"));
+        let mut manager = AgentManager::new(store, paths, DaemonConfig::default(), HashMap::new());
+        manager.mcp_program = None;
+
+        let id = AgentId::generate();
+        assert!(
+            manager
+                .mcp_launch(&id, false)
+                .expect("MCP disabled")
+                .is_none()
+        );
+        let err = manager
+            .mcp_launch(&id, true)
+            .expect_err("unavailable executable");
+        assert_eq!(err.code(), INVALID_STATE);
+        assert_eq!(
+            err.to_string(),
+            "cannot attach the dgc MCP server: daemon executable path is unavailable or not UTF-8"
+        );
     }
 }

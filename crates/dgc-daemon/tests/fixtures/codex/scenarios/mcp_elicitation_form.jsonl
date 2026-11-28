@@ -1,0 +1,37 @@
+// SYNTHETIC: Unsupported forms and URL flow, including malformed approval metadata and schema.
+// Derived from the Codex CLI 0.172.0 generated app-server schema and upstream approval metadata.
+{"expect_args":["app-server"]}
+{"expect":{"method":"initialize","id":"${ANY}"}}
+{"capture":"init","path":"/id"}
+{"send":{"id":"${init}","result":{"userAgent":"codex/0.172.0"}}}
+{"expect":{"method":"initialized"}}
+{"expect":{"method":"thread/start","id":"${ANY}"}}
+{"capture":"thread","path":"/id"}
+{"send":{"id":"${thread}","result":{"thread":{"id":"thread-1"}}}}
+{"expect":{"method":"turn/start","id":"${ANY}","params":{"threadId":"thread-1"}}}
+{"capture":"turn","path":"/id"}
+{"send":{"id":"${turn}","result":{"turn":{"id":"turn-1","status":"inProgress"}}}}
+{"send":{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress"}}}}
+{"send":{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"dgc","environmentId":null,"mode":"form","message":"SYNTHETIC_PRIVATE_FORM_TEXT","requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent"}}}}
+{"expect":{"id":0,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","id":1,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"dgc","environmentId":null,"mode":"form","message":"Allow the MCP tool call?","requestedSchema":{"type":"object","properties":{}},"_meta":null}}}
+{"expect":{"id":1,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","id":2,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"dgc","environmentId":null,"mode":"form","message":"Allow the MCP tool call?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent","codex_requires_user_input":true}}}}
+{"expect":{"id":2,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","id":3,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"dgc","environmentId":null,"mode":"openai/form","message":"Allow the MCP tool call?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent"}}}}
+{"expect":{"id":3,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","id":4,"params":{"threadId":"thread-1","turnId":null,"serverName":"calendar","mode":"url","message":"SYNTHETIC_PRIVATE_FORM_TEXT","url":"https://example.invalid","elicitationId":"synthetic"}}}
+{"expect":{"id":4,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","params":{"threadId":"thread-1","requestedSchema":{"type":"object","properties":{},"required":["answer"]},"serverName":"dgc","turnId":"turn-1","environmentId":null,"mode":"form","message":"SYNTHETIC_PRIVATE_FORM_TEXT","_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent"}},"id":5}}
+{"expect":{"id":5,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","params":{"threadId":"thread-1","_meta":{"codex_approval_kind":"tool_suggestion","tool_name":"create_agent"},"serverName":"dgc","turnId":"turn-1","environmentId":null,"mode":"form","message":"SYNTHETIC_PRIVATE_FORM_TEXT","requestedSchema":{"type":"object","properties":{}}},"id":6}}
+{"expect":{"id":6,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","params":{"threadId":"thread-1","_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"  "},"serverName":"dgc","turnId":"turn-1","environmentId":null,"mode":"form","message":"SYNTHETIC_PRIVATE_FORM_TEXT","requestedSchema":{"type":"object","properties":{}}},"id":7}}
+{"expect":{"id":7,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","params":{"threadId":"thread-1","_meta":{"codex_approval_kind":"mcp_tool_call"},"serverName":"dgc","turnId":"turn-1","environmentId":null,"mode":"form","message":"SYNTHETIC_PRIVATE_FORM_TEXT","requestedSchema":{"type":"object","properties":{}}},"id":8}}
+{"expect":{"id":8,"result":{"action":"decline","content":null}}}
+{"send":{"method":"mcpServer/elicitation/request","params":{"threadId":"thread-1","requestedSchema":{"type":"array","properties":{}},"serverName":"dgc","turnId":"turn-1","environmentId":null,"mode":"form","message":"SYNTHETIC_PRIVATE_FORM_TEXT","_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"create_agent"}},"id":9}}
+{"expect":{"id":9,"result":{"action":"decline","content":null}}}
+{"send":{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"response","text":"pong"}}}}
+{"send":{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}}
+{"expect_eof":true}

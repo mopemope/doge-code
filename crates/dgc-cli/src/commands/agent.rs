@@ -75,6 +75,9 @@ pub enum AgentCommand {
         /// Title (default: the first line of the prompt, cut to 60 chars).
         #[arg(long)]
         title: Option<String>,
+        /// Enable the dgc MCP server for this agent.
+        #[arg(long)]
+        mcp: bool,
         /// Stream the agent's events until it is idle, stopped, failed or
         /// archived (exit status 0 only when idle).
         #[arg(long)]
@@ -127,6 +130,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
             model,
             mode,
             title,
+            mcp,
             follow,
             prompt,
         } => {
@@ -141,11 +145,15 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
                 initial_prompt: prompt,
                 labels: Default::default(),
                 parent_id: None,
+                mcp,
             };
             let agent: Agent = client.call(AGENT_CREATE, &params).await?;
             warn_auto_approve(&agent);
             if json {
-                println!("{}", serde_json::to_string(&agent)?);
+                println!(
+                    "{}",
+                    output::escape_json_line(&serde_json::to_string(&agent)?)
+                );
             } else {
                 println!("{}", agent.id);
             }
@@ -164,18 +172,21 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
                 )
                 .await?;
             if json {
-                println!("{result}");
+                println!("{}", output::escape_json_line(&result.to_string()));
             } else {
                 let agents: Vec<Agent> = serde_json::from_value(result["agents"].clone())?;
-                for agent in &agents {
-                    println!("{}", output::agent_line(agent));
+                for entry in output::agent_tree(&agents) {
+                    println!("{}", output::agent_tree_line(&entry));
                 }
             }
         }
         AgentCommand::Show { id } => {
             let agent: Agent = client.call(AGENT_GET, &AgentIdParams { id }).await?;
             if json {
-                println!("{}", serde_json::to_string(&agent)?);
+                println!(
+                    "{}",
+                    output::escape_json_line(&serde_json::to_string(&agent)?)
+                );
             } else {
                 println!("{}", output::agent_details(&agent));
             }
@@ -231,7 +242,7 @@ pub async fn run(command: AgentCommand, json: bool) -> CliResult<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn default_title(prompt: &str) -> String {
+pub(crate) fn default_title(prompt: &str) -> String {
     prompt
         .lines()
         .next()

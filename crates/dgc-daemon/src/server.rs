@@ -311,7 +311,7 @@ pub async fn run_daemon(
     config: DaemonConfig,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), DaemonError> {
-    config.validate_profiles()?;
+    config.validate()?;
     ensure_private_dir(&paths.state_dir)?;
     let _lock = InstanceLock::acquire(&paths.state_dir)?;
     let store = Arc::new(Store::open(&paths.state_dir)?);
