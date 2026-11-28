@@ -2388,6 +2388,24 @@ async fn handoff_dry_run_creates_nothing() {
 }
 
 #[tokio::test]
+async fn handoff_dry_run_rejects_invalid_model_from_profile() {
+    let config = toml::from_str("[profiles.target]\nprovider = 'codex'\nmodel = '-invalid'\n")
+        .expect("profile config");
+    let h = Harness::with_config(DEFAULT, config);
+    let id = stored_handoff_source(&h, ProviderKind::Claude, vec![instruction("first")]);
+    let err = handoff_rpc(
+        &h,
+        serde_json::json!({
+            "agent_id": id, "profile": "target", "dry_run": true
+        }),
+    )
+    .await
+    .expect_err("invalid model in preview");
+    assert_eq!(err.code, dgc_protocol::rpc::INVALID_PARAMS);
+    assert!(!err.message.contains("-invalid"));
+}
+
+#[tokio::test]
 async fn handoff_dry_run_checks_target_availability_before_reading_logs() {
     let h = Harness::new(DEFAULT);
     let id = stored_handoff_source(&h, ProviderKind::Codex, vec![instruction("first")]);

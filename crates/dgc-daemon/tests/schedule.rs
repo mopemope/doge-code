@@ -372,6 +372,23 @@ fn profile(mode: &str, model: &str) -> DaemonConfig {
 }
 
 #[tokio::test]
+async fn schedule_rejects_invalid_model_before_saving() {
+    let h = Harness::new("complete", profile("manual", "-invalid"));
+    let mut params = h.params();
+    if let ScheduleTargetParams::NewAgent { profile, .. } = &mut params.target {
+        *profile = Some("automation".into());
+    }
+    let err = h
+        .manager
+        .create_at(params, NOW)
+        .await
+        .expect_err("invalid model");
+    assert_eq!(err.code(), INVALID_PARAMS);
+    assert!(!err.to_string().contains("-invalid"));
+    assert!(h.store.list_schedules().expect("list schedules").is_empty());
+}
+
+#[tokio::test]
 async fn schedule_snapshots_profile_at_creation() {
     let mut h = Harness::new("complete", profile("manual", "haiku"));
     let schedule = h
